@@ -1,12 +1,11 @@
 <main class="auth-page">
   <section class="auth-card">
     <div class="brand-block">
-      <p class="eyebrow">Despensa Lista + Cognito</p>
+      <p class="eyebrow">Tu despensa en orden</p>
       <h1>{{ appName }}</h1>
       <p class="lead">
-        Inicia sesi&oacute;n con Cognito. Despensa Lista ya no guarda passwords locales:
-        la cuenta, recuperaci&oacute;n y proveedores sociales viven en el flujo seguro
-        de AWS.
+        Entra con tu correo o una de tus cuentas para organizar tu despensa,
+        revisar caducidades y preparar tus compras.
       </p>
     </div>
 
@@ -58,16 +57,14 @@
 
         @if (!hasSocialProviders(providerOptions)) {
           <p class="status-copy">
-            Los proveedores sociales aparecer&aacute;n aqu&iacute; cuando est&eacute;n
-            conectados en Cognito.
+            Usa tu correo para entrar o crear una cuenta.
           </p>
         }
       }
     </div>
 
     <p class="helper-copy">
-      Para crear cuenta o recuperar acceso, usa la pantalla de Cognito que se abre
-      despu&eacute;s de elegir una opci&oacute;n.
+      Puedes crear tu cuenta o recuperar el acceso en la siguiente pantalla.
     </p>
   </section>
 </main>

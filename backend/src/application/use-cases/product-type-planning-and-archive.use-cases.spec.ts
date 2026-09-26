@@ -1,3 +1,4 @@
+import { makePantryMutationMock } from '../ports/pantry-mutation.mock';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { ProductType } from '../../domain/entities/product-type.entity';
 import { ProductCategory, QuantityUnit } from '../../domain/enums';
@@ -31,7 +32,7 @@ describe('product type planning settings and archive use cases', () => {
       findByUserId: jest.fn(),
       findArchivedByUserId: jest.fn(),
       findArchivedPageByUserId: jest.fn(),
-      findByProductTypeId: jest.fn(),
+      findByProductTypeId: jest.fn().mockResolvedValue([]),
       reassignUserOwnership: jest.fn(),
       delete: jest.fn(),
       deleteByProductTypeId: jest.fn(),
@@ -61,7 +62,10 @@ describe('product type planning settings and archive use cases', () => {
     const repository = makeProductTypeRepository();
     const productType = makeProductType();
     repository.findById.mockResolvedValue(productType);
-    const useCase = new UpdateProductTypePlanningSettingsUseCase(repository);
+    const useCase = new UpdateProductTypePlanningSettingsUseCase(
+      repository,
+      makePantryMutationMock({ types: repository }),
+    );
 
     const updated = await useCase.execute({
       productTypeId: 'type-1',
@@ -82,7 +86,10 @@ describe('product type planning settings and archive use cases', () => {
   it('rejects planning settings updates from another user', async () => {
     const repository = makeProductTypeRepository();
     repository.findById.mockResolvedValue(makeProductType());
-    const useCase = new UpdateProductTypePlanningSettingsUseCase(repository);
+    const useCase = new UpdateProductTypePlanningSettingsUseCase(
+      repository,
+      makePantryMutationMock({ types: repository }),
+    );
 
     await expect(
       useCase.execute({
@@ -100,7 +107,10 @@ describe('product type planning settings and archive use cases', () => {
     const productType = makeProductType();
     repository.findById.mockResolvedValue(productType);
 
-    const archived = await new ArchiveProductTypeUseCase(repository).execute({
+    const archived = await new ArchiveProductTypeUseCase(
+      repository,
+      makePantryMutationMock({ types: repository }),
+    ).execute({
       productTypeId: 'type-1',
       userId: 'owner-user',
       reason: 'Ya no se compra',
@@ -109,7 +119,10 @@ describe('product type planning settings and archive use cases', () => {
     expect(archived.isArchived()).toBe(true);
     expect(archived.toPrimitives().archivedReason).toBe('Ya no se compra');
 
-    const restored = await new RestoreProductTypeUseCase(repository).execute({
+    const restored = await new RestoreProductTypeUseCase(
+      repository,
+      makePantryMutationMock({ types: repository }),
+    ).execute({
       productTypeId: 'type-1',
       userId: 'owner-user',
     });
@@ -125,6 +138,10 @@ describe('product type planning settings and archive use cases', () => {
     const useCase = new DeleteProductTypeUseCase(
       productTypeRepository,
       inventoryLotRepository,
+      makePantryMutationMock({
+        types: productTypeRepository,
+        lots: inventoryLotRepository,
+      }),
     );
 
     await expect(
@@ -150,5 +167,48 @@ describe('product type planning settings and archive use cases', () => {
     expect(productTypeRepository.delete).toHaveBeenCalledWith(
       ProductTypeId.fromString('type-1'),
     );
+  });
+
+  it('keeps the archived product type retryable when archived-lot cleanup fails', async () => {
+    const productTypeRepository = makeProductTypeRepository();
+    const inventoryLotRepository = makeInventoryLotRepository();
+    const productType = makeProductType();
+    productType.archive();
+    productTypeRepository.findById.mockResolvedValue(productType);
+    inventoryLotRepository.deleteByProductTypeId
+      .mockRejectedValueOnce(new Error('storage unavailable'))
+      .mockResolvedValueOnce(undefined);
+    const pantryMutation = makePantryMutationMock({
+      types: productTypeRepository,
+      lots: inventoryLotRepository,
+    });
+    const useCase = new DeleteProductTypeUseCase(
+      productTypeRepository,
+      inventoryLotRepository,
+      pantryMutation,
+    );
+
+    await expect(
+      useCase.execute({
+        productTypeId: 'type-1',
+        userId: 'owner-user',
+        confirmationText: 'Detergente',
+      }),
+    ).rejects.toThrow('storage unavailable');
+    expect(pantryMutation.beginProductTypeDeletion).toHaveBeenCalledTimes(1);
+    expect(pantryMutation.deleteProductType).not.toHaveBeenCalled();
+
+    await expect(
+      useCase.execute({
+        productTypeId: 'type-1',
+        userId: 'owner-user',
+        confirmationText: 'Detergente',
+      }),
+    ).resolves.toBeUndefined();
+    expect(inventoryLotRepository.deleteByProductTypeId).toHaveBeenCalledTimes(
+      2,
+    );
+    expect(pantryMutation.beginProductTypeDeletion).toHaveBeenCalledTimes(2);
+    expect(pantryMutation.deleteProductType).toHaveBeenCalledTimes(1);
   });
 });

@@ -10,7 +10,6 @@ import {
   ProductTypeShoppingMetadataPrimitives,
 } from '../../../domain/entities/product-type.entity';
 import {
-  MAX_ACTIVE_PRODUCT_TYPES_PER_USER,
   MAX_ARCHIVED_PANTRY_PAGE_SIZE,
   MAX_ARCHIVED_PRODUCT_TYPES_PER_USER,
   MAX_PRODUCT_TYPE_SEARCH_RESULTS,
@@ -116,10 +115,7 @@ export class DynamoDbProductTypeRepository implements ProductTypeRepository {
   }
 
   async findByUserId(userId: UserId): Promise<ProductType[]> {
-    const productTypes = await this.findAllByUserId(
-      userId,
-      MAX_ACTIVE_PRODUCT_TYPES_PER_USER,
-    );
+    const productTypes = await this.findAllByUserId(userId);
 
     return productTypes
       .filter((productType) => !productType.archivedAt)
@@ -132,15 +128,12 @@ export class DynamoDbProductTypeRepository implements ProductTypeRepository {
 
     do {
       const page = await this.findArchivedPageByUserId(userId, {
-        limit: MAX_ARCHIVED_PRODUCT_TYPES_PER_USER - productTypes.length,
+        limit: MAX_ARCHIVED_PANTRY_PAGE_SIZE,
         cursor,
       });
       productTypes.push(...page.items);
       cursor = page.nextCursor;
-    } while (
-      cursor &&
-      productTypes.length < MAX_ARCHIVED_PRODUCT_TYPES_PER_USER
-    );
+    } while (cursor);
 
     return productTypes;
   }
@@ -265,10 +258,7 @@ export class DynamoDbProductTypeRepository implements ProductTypeRepository {
     return productTypes.length;
   }
 
-  private async findAllByUserId(
-    userId: UserId,
-    limit?: number,
-  ): Promise<ProductType[]> {
+  private async findAllByUserId(userId: UserId): Promise<ProductType[]> {
     const items: ProductTypeItem[] = [];
     let exclusiveStartKey: Record<string, unknown> | undefined;
 
@@ -281,7 +271,6 @@ export class DynamoDbProductTypeRepository implements ProductTypeRepository {
           ExpressionAttributeValues: {
             ':userId': userId.toString(),
           },
-          ...(limit ? { Limit: limit } : {}),
           ...(exclusiveStartKey
             ? { ExclusiveStartKey: exclusiveStartKey }
             : {}),
@@ -289,9 +278,9 @@ export class DynamoDbProductTypeRepository implements ProductTypeRepository {
       );
 
       items.push(...((result.Items ?? []) as ProductTypeItem[]));
-      exclusiveStartKey = limit
-        ? undefined
-        : (result.LastEvaluatedKey as Record<string, unknown> | undefined);
+      exclusiveStartKey = result.LastEvaluatedKey as
+        | Record<string, unknown>
+        | undefined;
     } while (exclusiveStartKey);
 
     return items.map((item) => this.toDomain(item));

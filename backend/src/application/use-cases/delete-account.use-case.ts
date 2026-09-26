@@ -13,11 +13,13 @@ import {
   USER_DEVICE_REPOSITORY,
 } from '../tokens';
 import { HouseholdRepository } from '../../domain/repositories/household.repository';
+import { HouseholdMembership } from '../../domain/entities/household.entity';
 import { UserDeviceRepository } from '../../domain/repositories/user-device.repository';
 import { UserId } from '../../domain/value-objects/user-id.vo';
 import { DeletePantryDataUseCase } from './delete-pantry-data.use-case';
 
 const DELETE_ACCOUNT_CONFIRMATION = 'ELIMINAR CUENTA';
+const ACCOUNT_DELETION_FENCE_MS = 24 * 60 * 60 * 1000;
 
 export interface DeleteAccountResult {
   deletedInventoryLotCount: number;
@@ -60,17 +62,34 @@ export class DeleteAccountUseCase {
       throw new NotFoundException('User not found');
     }
 
-    await this.assertHouseholdCanBeDeletedOrLeft(command.userId);
+    const membership = await this.assertHouseholdCanBeDeletedOrLeft(
+      command.userId,
+    );
+    const fencedUser = await this.userDao.beginAccountDeletion(
+      userId,
+      new Date(Date.now() + ACCOUNT_DELETION_FENCE_MS),
+    );
+
+    if (!fencedUser) {
+      throw new NotFoundException('User not found');
+    }
 
     const pantryResult = await this.deletePantryDataUseCase.execute({
       userId: command.userId,
       confirmationText: 'ELIMINAR',
+      accountDeletion: true,
     });
-    await this.deleteHouseholdOrMembership(command.userId);
+    await this.deleteHouseholdOrMembership(
+      command.userId,
+      fencedUser.email,
+      membership,
+    );
     const deletedKnownDeviceCount =
       await this.userDeviceRepository.deleteByUserId(userId);
     const deletedCognitoIdentityCount =
-      await this.cognitoUserAdmin.deleteUsersBySubjectIds(user.authSubjectIds);
+      await this.cognitoUserAdmin.deleteUsersBySubjectIds(
+        fencedUser.authSubjectIds,
+      );
     await this.userDao.delete(userId);
 
     return {
@@ -82,30 +101,33 @@ export class DeleteAccountUseCase {
 
   private async assertHouseholdCanBeDeletedOrLeft(
     userId: string,
-  ): Promise<void> {
+  ): Promise<HouseholdMembership | null> {
     const membership =
       await this.householdRepository.findMembershipByUserId(userId);
 
     if (!membership || membership.role !== 'owner') {
-      return;
+      return membership;
     }
 
-    const members = await this.householdRepository.findMembersByHouseholdId(
+    const canDelete = await this.householdRepository.beginHouseholdDeletion(
       membership.householdId,
+      userId,
     );
-    const otherMembers = members.filter((member) => member.userId !== userId);
 
-    if (otherMembers.length > 0) {
+    if (!canDelete) {
       throw new BadRequestException(
         'Remove household members before deleting the owner account',
       );
     }
+
+    return membership;
   }
 
-  private async deleteHouseholdOrMembership(userId: string): Promise<void> {
-    const membership =
-      await this.householdRepository.findMembershipByUserId(userId);
-
+  private async deleteHouseholdOrMembership(
+    userId: string,
+    email: string,
+    membership: HouseholdMembership | null,
+  ): Promise<void> {
     if (!membership) {
       return;
     }
@@ -117,9 +139,10 @@ export class DeleteAccountUseCase {
       return;
     }
 
-    await this.householdRepository.deleteMembership(
+    await this.householdRepository.deleteAccountHouseholdData(
       membership.householdId,
       userId,
+      email,
     );
   }
 }

@@ -29,37 +29,11 @@ describe('MongoProductRepository', () => {
     }),
   });
 
-  it('persists a product and returns it as a domain entity', async () => {
-    const product = makeProduct();
-    const primitives = product.toPrimitives();
-    const model = {
-      findOneAndUpdate: jest.fn().mockReturnValue(makeQuery(primitives)),
-      findOne: jest.fn(),
-      find: jest.fn(),
-      deleteOne: jest.fn(),
-    };
-
-    const repository = new MongoProductRepository(model as never);
-
-    const saved = await repository.save(product);
-
-    expect(model.findOneAndUpdate).toHaveBeenCalledWith(
-      { id: primitives.id },
-      primitives,
-      expect.objectContaining({
-        new: true,
-        upsert: true,
-      }),
-    );
-    expect(saved.toPrimitives()).toMatchObject(primitives);
-  });
-
   it('returns a product by id when it exists', async () => {
     const product = makeProduct();
     const primitives = product.toPrimitives();
     const query = makeQuery(primitives);
     const model = {
-      findOneAndUpdate: jest.fn(),
       findOne: jest.fn().mockReturnValue(query),
       find: jest.fn(),
       deleteOne: jest.fn(),
@@ -78,7 +52,6 @@ describe('MongoProductRepository', () => {
   it('returns null when a product does not exist', async () => {
     const query = makeQuery(null);
     const model = {
-      findOneAndUpdate: jest.fn(),
       findOne: jest.fn().mockReturnValue(query),
       find: jest.fn(),
       deleteOne: jest.fn(),
@@ -89,5 +62,22 @@ describe('MongoProductRepository', () => {
     await expect(
       repository.findById(ProductId.fromString('missing-product')),
     ).resolves.toBeNull();
+  });
+
+  it('deletes every legacy product owned by a user', async () => {
+    const exec = jest.fn().mockResolvedValue({ deletedCount: 3 });
+    const model = {
+      findOne: jest.fn(),
+      find: jest.fn(),
+      deleteOne: jest.fn(),
+      deleteMany: jest.fn().mockReturnValue({ exec }),
+    };
+    const repository = new MongoProductRepository(model as never);
+
+    await expect(
+      repository.deleteByUserId(UserId.fromString('user-1')),
+    ).resolves.toBe(3);
+    expect(model.deleteMany).toHaveBeenCalledWith({ userId: 'user-1' });
+    expect(exec).toHaveBeenCalledTimes(1);
   });
 });

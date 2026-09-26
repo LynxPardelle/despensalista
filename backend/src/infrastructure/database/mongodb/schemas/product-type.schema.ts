@@ -129,6 +129,9 @@ export class ProductTypeDocument {
   @Prop({ required: true, index: true })
   normalizedBaseName: string;
 
+  @Prop({ required: false })
+  activeName?: string;
+
   @Prop({ required: true, enum: Object.values(ProductCategory), index: true })
   category: ProductCategory;
 
@@ -153,6 +156,9 @@ export class ProductTypeDocument {
   @Prop({ required: false })
   retentionExpiresAt?: Date;
 
+  @Prop({ required: false })
+  deleting?: boolean;
+
   @Prop({ required: true })
   createdAt: Date;
 
@@ -164,6 +170,13 @@ export const ProductTypeSchema =
   SchemaFactory.createForClass(ProductTypeDocument);
 
 ProductTypeSchema.index({ userId: 1, normalizedBaseName: 1 });
+ProductTypeSchema.index(
+  { userId: 1, activeName: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { activeName: { $type: 'string' } },
+  },
+);
 ProductTypeSchema.index(
   { retentionExpiresAt: 1 },
   { expireAfterSeconds: 0, sparse: true },

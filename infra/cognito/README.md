@@ -6,22 +6,45 @@ This CDK app creates the AWS Cognito side of Despensa Lista authentication:
 - Cognito Managed Login v2 prefix domain.
 - OAuth app client with Authorization Code flow.
 - Local callback/logout URLs for `http://localhost:48673`.
-- Optional Dokploy HTTPS callback/logout URLs.
+- Stage-specific HTTPS callback/logout URLs.
 - Optional Google and Facebook social login, with client secrets stored in SSM
   SecureString parameters and Cognito IdPs updated by helper script.
 
 When `includeServerlessBackend=true`, it also creates the staged Lambda/API Gateway
 backend using the existing DynamoDB repositories and Cognito stack.
 
-When `includeProductionInfra=true`, it also creates the production application
-support stack:
+The serverless stack defines the staged application resources:
 
 - DynamoDB tables for users, products, product types, and inventory lots.
-- IAM permissions for the Dokploy EC2 instance role.
 - ACM certificate for `despensalista.lynxpardelle.com` plus the planned
   `test.` and `dev.` subdomains.
-- CloudFront distribution with a Dokploy EC2 HTTP origin.
+- CloudFront distribution with private S3 frontend and API Gateway origin.
 - Route53 A/AAAA aliases for the production domain.
+- An attempted CloudFront FREE subscription and five included WAF rules; if AWS
+  rejects eligibility, neither the subscription nor Web ACL is retained.
+- Required local-user TOTP MFA. The production configuration uses the verified
+  custom From address under `COGNITO_DEFAULT` and its 50-message daily quota.
+- Stage-specific GitHub OIDC deployment roles, immutable Lambda versions and `live` alias.
+- Four production alarms (about USD 0.40/month), bounded API/Lambda logs, and production canary rollback.
+
+The retired Dokploy/EC2 stack has been removed. Production and nonproduction
+have separate origin-verification secrets; dev and tst share the nonproduction
+secret, totaling USD 0.80/month. Deploy dev before tst. CloudWatch Synthetics is
+deliberately excluded. SES/DKIM is provisioned only in prod. The verified custom
+From works with Cognito-managed delivery while the account remains in the SES
+sandbox; direct `DEVELOPER` sending still requires SES production access.
+
+Administrator bootstrap attempts the CloudFront `FREE` plan. If AWS rejects the
+account or distribution as ineligible, redeploy that bootstrap with
+`--context enableFlatRateWaf=false`; an inventory without `subscriptionArn`
+keeps later stage deployments on low-traffic CloudFront PAYG without AWS WAF.
+This avoids the WAF PAYG base charge while preserving the private API-origin
+header check.
+
+Release workflows pass `backendArtifactPath` pointing to the once-built ARM64
+Lambda ZIP and optionally `frontendArtifactPath` for the matching static assets.
+CDK must not rebuild the Lambda ZIP during stage promotion. For source-only local
+validation, omitting the path retains the normal bundle/build behavior.
 
 No Google/Facebook client secret belongs in this repository.
 
@@ -37,9 +60,12 @@ domain, callbacks, and supported-provider list reproducible.
 - A unique Cognito domain prefix, for example `despensalista-dev-alec`.
 - Optional Google OAuth client ID and secret.
 - Optional Facebook app ID and secret.
-- Optional Dokploy public URL, for example `https://despensalista.example.com`.
+- Stage public URL, for example `https://despensalista.example.com`.
 
-If this is the first CDK deployment in the account/region, run:
+Release infrastructure does not use the account-wide default CDK bootstrap.
+Administrator setup creates the stage-specific asset bucket, CloudFormation role,
+OIDC role and permissions boundary described in the production runbook. Use a
+standard bootstrap only for a separate disposable account/local experiment:
 
 ```powershell
 npx cdk bootstrap aws://<account-id>/<region>
@@ -155,54 +181,20 @@ npx cdk synth `
   --context externallyManagedSocialProviders=Google
 ```
 
-## Deploy: Local Cognito Only
+## Deployment safety
 
-This creates a User Pool with Cognito-hosted email/password accounts and local
-callback URLs, but no Google/Facebook IdPs:
+Do not run an ad-hoc `cdk deploy` from this application against `dev`, `tst`, or
+`prod`: those names resolve to the real staged stacks and a different domain
+prefix can replace the hosted-login domain. Use the administrator bootstrap and
+immutable promotion procedure in `docs/operations/production-runbook.md`.
 
-```powershell
-npx cdk deploy `
-  --context stage=dev `
-  --context awsRegion=us-east-1 `
-  --context domainPrefix=despensalista-dev-alec
-```
+## Deploy: Staged Serverless App
 
-## Deploy: Google And Local Callback URLs
-
-```powershell
-npx cdk deploy `
-  --context stage=dev `
-  --context awsRegion=us-east-1 `
-  --context domainPrefix=despensalista-dev-alec `
-  --context productionFrontendBaseUrl=https://despensalista.example.com `
-  --context externallyManagedSocialProviders=Google
-```
-
-Use `removalPolicy=retain` by default. Use `removalPolicy=destroy` only for
-throwaway environments.
-
-## Deploy: Production Serverless App
-
-This creates production Cognito plus the serverless production stack for
-`https://despensalista.lynxpardelle.com`:
-
-```powershell
-npx cdk deploy despensalista-prod-cognito despensalista-prod-serverless-backend `
-  --require-approval never `
-  --context projectName=despensalista `
-  --context stage=prod `
-  --context awsRegion=us-east-1 `
-  --context includeServerlessBackend=true `
-  --context removalPolicy=retain `
-  --context deletionProtection=true `
-  --context domainPrefix=despensalista-prod-765932874577 `
-  --context productionFrontendBaseUrl=https://despensalista.lynxpardelle.com `
-  --context serverlessFrontendBaseUrl=https://despensalista.lynxpardelle.com `
-  --context appDomainName=despensalista.lynxpardelle.com `
-  --context hostedZoneId=Z05088763QG63CC5SE7PN `
-  --context hostedZoneName=lynxpardelle.com `
-  --context externallyManagedSocialProviders=Google
-```
+Do not deploy production with an ad-hoc administrator command. The supported
+path is the immutable `dev -> tst -> prod` GitHub workflow with stage-scoped
+OIDC and CloudFormation roles. Follow
+`docs/operations/production-runbook.md`; it also documents the one-time
+administrator bootstrap and the exact rollback receipt.
 
 Do not put OAuth client secrets in command-line context. Store them in SSM
 SecureString parameters and pass only non-secret provider IDs to
@@ -218,7 +210,7 @@ aws cloudformation describe-stacks `
   --query "Stacks[0].Outputs"
 ```
 
-Set these in `.env.docker.local`, `.env.production.local`, or Dokploy:
+For local development, set these in `.env.docker.local`:
 
 ```env
 COGNITO_ENABLED=true
@@ -232,11 +224,11 @@ COGNITO_SCOPES=openid email profile
 COGNITO_ALLOWED_PROVIDERS=COGNITO,Google
 ```
 
-For Dokploy, use:
+The CDK serverless stack supplies the deployed stage URLs automatically:
 
 ```env
-COGNITO_REDIRECT_URI=https://<your-dokploy-domain>/api/auth/cognito/callback
-COGNITO_LOGOUT_REDIRECT_URI=https://<your-dokploy-domain>/login
+COGNITO_REDIRECT_URI=https://<stage-domain>/api/auth/cognito/callback
+COGNITO_LOGOUT_REDIRECT_URI=https://<stage-domain>/login
 ```
 
 ## Useful Outputs

@@ -7,10 +7,8 @@ import {
   InventoryLotPrimitives,
 } from '../../../domain/entities/inventory-lot.entity';
 import {
-  MAX_ACTIVE_INVENTORY_LOTS_PER_USER,
   MAX_ARCHIVED_PANTRY_PAGE_SIZE,
   MAX_ARCHIVED_INVENTORY_LOTS_PER_USER,
-  MAX_INVENTORY_LOTS_PER_PRODUCT_TYPE,
 } from '../../../application/constants/query-limits';
 import { getArchivedRecordRetentionExpiresAt } from '../../../application/policies/retention-policy';
 import {
@@ -106,7 +104,6 @@ export class MongoInventoryLotRepository implements InventoryLotRepository {
     const lots = await this.inventoryLotModel
       .find({ userId: userId.toString(), archivedAt: { $exists: false } })
       .sort({ updatedAt: -1 })
-      .limit(MAX_ACTIVE_INVENTORY_LOTS_PER_USER)
       .lean()
       .exec();
 
@@ -114,11 +111,17 @@ export class MongoInventoryLotRepository implements InventoryLotRepository {
   }
 
   async findArchivedByUserId(userId: UserId): Promise<InventoryLot[]> {
-    const page = await this.findArchivedPageByUserId(userId, {
-      limit: MAX_ARCHIVED_INVENTORY_LOTS_PER_USER,
-    });
-
-    return page.items;
+    const items: InventoryLot[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.findArchivedPageByUserId(userId, {
+        limit: MAX_ARCHIVED_PANTRY_PAGE_SIZE,
+        cursor,
+      });
+      items.push(...page.items);
+      cursor = page.nextCursor;
+    } while (cursor);
+    return items;
   }
 
   async findArchivedPageByUserId(
@@ -168,7 +171,6 @@ export class MongoInventoryLotRepository implements InventoryLotRepository {
         archivedAt: { $exists: false },
       })
       .sort({ updatedAt: -1 })
-      .limit(MAX_INVENTORY_LOTS_PER_PRODUCT_TYPE)
       .lean()
       .exec();
 

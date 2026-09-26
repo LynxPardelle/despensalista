@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { UserPreferencesDao } from '../../../application/ports/daos';
@@ -39,13 +39,21 @@ export class MongoUserPreferencesDao implements UserPreferencesDao {
       preferences instanceof UserPreferences
         ? preferences
         : UserPreferences.resolve(preferences);
+    const now = new Date();
     const savedUser = await this.userModel
       .findOneAndUpdate(
-        { id: userId.toString() },
+        {
+          id: userId.toString(),
+          status: 'active',
+          $or: [
+            { deletionFenceExpiresAt: { $exists: false } },
+            { deletionFenceExpiresAt: { $lte: now } },
+          ],
+        },
         {
           $set: {
             preferences: resolvedPreferences.toPrimitives(),
-            updatedAt: new Date(),
+            updatedAt: now,
           },
         },
         { new: true },
@@ -54,6 +62,10 @@ export class MongoUserPreferencesDao implements UserPreferencesDao {
       .lean<UserWithPreferences>()
       .exec();
 
-    return UserPreferences.resolve(savedUser?.preferences);
+    if (!savedUser) {
+      throw new UnauthorizedException('Account deletion is in progress');
+    }
+
+    return UserPreferences.resolve(savedUser.preferences);
   }
 }

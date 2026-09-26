@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { User } from '../../domain/entities/user.entity';
+import { UserDevice } from '../../domain/entities/user-device.entity';
 import { UserAccountStatus } from '../../domain/enums';
 import { UserPreferences } from '../../domain/value-objects/user-preferences.vo';
 import { UserDao, UserPreferencesDao } from '../ports/daos';
@@ -75,4 +76,99 @@ describe('GetUserProfileUseCase', () => {
     });
     expect(userDeviceRepository.findByUserId).toHaveBeenCalled();
   });
+
+  it('does not persist a new device when the user already has 25', async () => {
+    const devices = Array.from({ length: 25 }, (_, index) =>
+      makeDevice(`device-${index}`),
+    );
+    const { useCase, userDeviceRepository } = makeProfileTestContext({
+      devices,
+    });
+
+    await useCase.execute('user-1', { clientDeviceId: 'new-device' });
+
+    expect(userDeviceRepository.findByUserId).toHaveBeenCalledWith(
+      expect.anything(),
+      25,
+    );
+    expect(userDeviceRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('still updates an existing device when the user already has 25', async () => {
+    const existingDevice = makeDevice('existing-device');
+    const devices = [
+      existingDevice,
+      ...Array.from({ length: 24 }, (_, index) =>
+        makeDevice(`device-${index}`),
+      ),
+    ];
+    const { useCase, userDeviceRepository } = makeProfileTestContext({
+      devices,
+      existingDevice,
+    });
+
+    await useCase.execute('user-1', { clientDeviceId: 'existing-device' });
+
+    expect(userDeviceRepository.save).toHaveBeenCalledWith(existingDevice);
+    expect(existingDevice.toPrimitives().seenCount).toBe(2);
+    expect(userDeviceRepository.findByUserId).not.toHaveBeenCalledWith(
+      expect.anything(),
+      25,
+    );
+  });
 });
+
+function makeProfileTestContext(input: {
+  devices: UserDevice[];
+  existingDevice?: UserDevice;
+}): {
+  useCase: GetUserProfileUseCase;
+  userDeviceRepository: jest.Mocked<UserDeviceRepository>;
+} {
+  const user = User.fromPrimitives({
+    id: 'user-1',
+    email: 'chef@example.com',
+    username: 'chef',
+    authSubjectIds: ['cognito-sub'],
+    status: UserAccountStatus.ACTIVE,
+    createdAt: new Date('2026-04-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-04-02T00:00:00.000Z'),
+  });
+  const userDao = {
+    findById: jest.fn().mockResolvedValue(user),
+  } as unknown as jest.Mocked<UserDao>;
+  const preferencesDao = {
+    findByUserId: jest.fn().mockResolvedValue(UserPreferences.resolve()),
+  } as unknown as jest.Mocked<UserPreferencesDao>;
+  const userDeviceRepository = {
+    findById: jest.fn().mockResolvedValue(input.existingDevice ?? null),
+    findByUserId: jest.fn().mockResolvedValue(input.devices),
+    save: jest.fn((device: UserDevice) => Promise.resolve(device)),
+    deleteByUserId: jest.fn(),
+  } as unknown as jest.Mocked<UserDeviceRepository>;
+  const configService = {
+    get: jest.fn(),
+  } as unknown as ConfigService;
+
+  return {
+    useCase: new GetUserProfileUseCase(
+      userDao,
+      preferencesDao,
+      userDeviceRepository,
+      configService,
+    ),
+    userDeviceRepository,
+  };
+}
+
+function makeDevice(id: string): UserDevice {
+  return UserDevice.fromPrimitives({
+    id,
+    userId: 'user-1',
+    label: `Device ${id}`,
+    userAgentSummary: 'Chrome en Windows',
+    firstSeenAt: new Date('2026-04-01T00:00:00.000Z'),
+    lastSeenAt: new Date('2026-04-01T00:00:00.000Z'),
+    seenCount: 1,
+  });
+}

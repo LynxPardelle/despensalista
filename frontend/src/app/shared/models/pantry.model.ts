@@ -369,6 +369,21 @@ export interface CloseShoppingPurchaseRequest {
   items: CloseShoppingPurchaseItemRequest[];
 }
 
+export interface IdempotentMutationResult<T> {
+  value: T;
+  idempotencyKey: string;
+  replayed: boolean;
+}
+
+export interface CursorPagination {
+  nextCursor?: string;
+}
+
+export interface ApiCursorPage<T> {
+  items: T[];
+  pagination: CursorPagination;
+}
+
 export interface SavedShoppingListItem {
   productTypeId: string;
   baseName: string;

@@ -95,9 +95,7 @@ describe('MongoInventoryLotRepository archive-aware queries', () => {
       userId: userId.toString(),
       archivedAt: { $exists: false },
     });
-    expect(query.limit).toHaveBeenCalledWith(
-      MAX_ACTIVE_INVENTORY_LOTS_PER_USER,
-    );
+    expect(query.limit).not.toHaveBeenCalled();
   });
 
   it('excludes archived lots from active product type listings', async () => {
@@ -117,9 +115,7 @@ describe('MongoInventoryLotRepository archive-aware queries', () => {
       productTypeId: productTypeId.toString(),
       archivedAt: { $exists: false },
     });
-    expect(query.limit).toHaveBeenCalledWith(
-      MAX_INVENTORY_LOTS_PER_PRODUCT_TYPE,
-    );
+    expect(query.limit).not.toHaveBeenCalled();
   });
 
   it('lists archived lots separately', async () => {
@@ -142,9 +138,7 @@ describe('MongoInventoryLotRepository archive-aware queries', () => {
       userId: userId.toString(),
       archivedAt: { $exists: true },
     });
-    expect(query.limit).toHaveBeenCalledWith(
-      MAX_ARCHIVED_INVENTORY_LOTS_PER_USER + 1,
-    );
+    expect(query.limit).toHaveBeenCalledWith(51);
     expect(archived[0].toPrimitives()).toMatchObject({
       id: 'lot-1',
       archivedReason: 'Regalado',

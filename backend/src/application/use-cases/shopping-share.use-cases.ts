@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { SHOPPING_SHARE_TTL_MS } from '../constants/shopping-share-limits';
-import { SHOPPING_SHARE_REPOSITORY } from '../tokens';
+import { PANTRY_MUTATION_PORT, SHOPPING_SHARE_REPOSITORY } from '../tokens';
 import { ShoppingShare } from '../../domain/entities/shopping-share.entity';
 import { ShoppingShareRepository } from '../../domain/repositories/shopping-share.repository';
 import {
@@ -12,12 +12,13 @@ import {
   ShoppingShareNotFoundError,
   ShoppingShareRevokedError,
 } from './shopping-share.errors';
+import { PantryMutationPort } from '../ports/pantry-mutation.port';
 
 @Injectable()
 export class CreateShoppingShareUseCase {
   constructor(
-    @Inject(SHOPPING_SHARE_REPOSITORY)
-    private readonly shoppingShareRepository: ShoppingShareRepository,
+    @Inject(PANTRY_MUTATION_PORT)
+    private readonly pantryMutationPort: PantryMutationPort,
   ) {}
 
   async execute(params: {
@@ -35,7 +36,7 @@ export class CreateShoppingShareUseCase {
     });
 
     return {
-      share: await this.shoppingShareRepository.save(share),
+      share: await this.pantryMutationPort.createShoppingShare(share),
       token,
     };
   }
@@ -89,6 +90,8 @@ export class RevokeShoppingShareUseCase {
   constructor(
     @Inject(SHOPPING_SHARE_REPOSITORY)
     private readonly shoppingShareRepository: ShoppingShareRepository,
+    @Inject(PANTRY_MUTATION_PORT)
+    private readonly pantryMutationPort: PantryMutationPort,
   ) {}
 
   async execute(params: {
@@ -103,9 +106,10 @@ export class RevokeShoppingShareUseCase {
       throw new ShoppingShareNotFoundError();
     }
 
+    const expected = ShoppingShare.fromPrimitives(share.toPrimitives());
     share.revoke(params.ownerUserId);
 
-    return this.shoppingShareRepository.save(share);
+    return this.pantryMutationPort.updateShoppingShare(expected, share);
   }
 }
 
@@ -114,6 +118,8 @@ export class RevokeShoppingShareByIdUseCase {
   constructor(
     @Inject(SHOPPING_SHARE_REPOSITORY)
     private readonly shoppingShareRepository: ShoppingShareRepository,
+    @Inject(PANTRY_MUTATION_PORT)
+    private readonly pantryMutationPort: PantryMutationPort,
   ) {}
 
   async execute(params: {
@@ -126,8 +132,9 @@ export class RevokeShoppingShareByIdUseCase {
       throw new ShoppingShareNotFoundError();
     }
 
+    const expected = ShoppingShare.fromPrimitives(share.toPrimitives());
     share.revoke(params.ownerUserId);
 
-    return this.shoppingShareRepository.save(share);
+    return this.pantryMutationPort.updateShoppingShare(expected, share);
   }
 }

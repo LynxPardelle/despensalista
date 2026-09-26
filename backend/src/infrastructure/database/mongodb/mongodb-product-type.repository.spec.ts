@@ -101,7 +101,7 @@ describe('MongoProductTypeRepository archive-aware queries', () => {
       userId: userId.toString(),
       archivedAt: { $exists: false },
     });
-    expect(query.limit).toHaveBeenCalledWith(MAX_ACTIVE_PRODUCT_TYPES_PER_USER);
+    expect(query.limit).not.toHaveBeenCalled();
   });
 
   it('lists archived product types separately', async () => {
@@ -124,9 +124,7 @@ describe('MongoProductTypeRepository archive-aware queries', () => {
       userId: userId.toString(),
       archivedAt: { $exists: true },
     });
-    expect(query.limit).toHaveBeenCalledWith(
-      MAX_ARCHIVED_PRODUCT_TYPES_PER_USER + 1,
-    );
+    expect(query.limit).toHaveBeenCalledWith(51);
     expect(archived[0].toPrimitives()).toMatchObject({
       id: 'type-1',
       archivedReason: 'Ya no se compra',

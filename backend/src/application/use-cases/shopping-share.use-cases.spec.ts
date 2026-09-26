@@ -12,29 +12,33 @@ import {
   ShoppingShareRevokedError,
 } from './shopping-share.errors';
 import { hashShoppingShareToken } from '../utils/shopping-share-token';
+import { makePantryMutationMock } from '../ports/pantry-mutation.mock';
+import { PantryMutationPort } from '../ports/pantry-mutation.port';
 
 describe('shopping share use cases', () => {
   let repository: jest.Mocked<ShoppingShareRepository>;
+  let pantryMutation: jest.Mocked<PantryMutationPort>;
 
   beforeEach(() => {
     repository = {
-      save: jest.fn(async (share) => share),
       findById: jest.fn(),
       findByTokenHash: jest.fn(),
       listActiveByOwnerUserId: jest.fn(),
       deleteByOwnerUserId: jest.fn(),
     };
+    pantryMutation = makePantryMutationMock();
   });
 
   it('creates an opaque revocable token and stores only its hash', async () => {
-    const useCase = new CreateShoppingShareUseCase(repository);
+    const useCase = new CreateShoppingShareUseCase(pantryMutation);
 
     const result = await useCase.execute({
       ownerUserId: 'user-1',
       text: 'Lista de compras Despensa Lista\n- Arroz: 2 kg',
     });
 
-    const saved = repository.save.mock.calls[0][0].toPrimitives();
+    const saved =
+      pantryMutation.createShoppingShare.mock.calls[0][0].toPrimitives();
     expect(result.token).toEqual(expect.any(String));
     expect(result.token).not.toContain('Arroz');
     expect(saved.tokenHash).toBe(hashShoppingShareToken(result.token));
@@ -91,7 +95,7 @@ describe('shopping share use cases', () => {
     repository.findByTokenHash.mockResolvedValue(
       makeShare({ tokenHash: hashShoppingShareToken(token) }),
     );
-    const useCase = new RevokeShoppingShareUseCase(repository);
+    const useCase = new RevokeShoppingShareUseCase(repository, pantryMutation);
 
     const revoked = await useCase.execute({
       ownerUserId: 'user-1',
@@ -99,7 +103,10 @@ describe('shopping share use cases', () => {
     });
 
     expect(revoked.toPrimitives().revokedAt).toBeInstanceOf(Date);
-    expect(repository.save).toHaveBeenCalledWith(revoked);
+    expect(pantryMutation.updateShoppingShare).toHaveBeenCalledWith(
+      expect.objectContaining({}),
+      revoked,
+    );
   });
 
   it('lists active shares for the current user only', async () => {
@@ -124,7 +131,7 @@ describe('shopping share use cases', () => {
     repository.findByTokenHash.mockResolvedValue(
       makeShare({ tokenHash: hashShoppingShareToken(token) }),
     );
-    const useCase = new RevokeShoppingShareUseCase(repository);
+    const useCase = new RevokeShoppingShareUseCase(repository, pantryMutation);
 
     await expect(
       useCase.execute({
@@ -136,7 +143,10 @@ describe('shopping share use cases', () => {
 
   it('revokes a share by id for the current owner', async () => {
     repository.findById.mockResolvedValue(makeShare({ id: 'share-active-1' }));
-    const useCase = new RevokeShoppingShareByIdUseCase(repository);
+    const useCase = new RevokeShoppingShareByIdUseCase(
+      repository,
+      pantryMutation,
+    );
 
     const revoked = await useCase.execute({
       ownerUserId: 'user-1',
@@ -145,7 +155,10 @@ describe('shopping share use cases', () => {
 
     expect(repository.findById).toHaveBeenCalledWith('share-active-1');
     expect(revoked.toPrimitives().revokedAt).toBeInstanceOf(Date);
-    expect(repository.save).toHaveBeenCalledWith(revoked);
+    expect(pantryMutation.updateShoppingShare).toHaveBeenCalledWith(
+      expect.objectContaining({}),
+      revoked,
+    );
   });
 });
 

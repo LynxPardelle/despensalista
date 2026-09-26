@@ -7,6 +7,31 @@ import { DynamoDbDocumentClientService } from './dynamodb-document-client.servic
 import { DynamoDbProductTypeRepository } from './dynamodb-product-type.repository';
 
 describe('DynamoDbProductTypeRepository', () => {
+  it('reads active products beyond pages containing archived products', async () => {
+    const send = jest
+      .fn()
+      .mockResolvedValueOnce({
+        Items: [
+          {
+            ...buildProductTypeItem('archived', 'A'),
+            archivedAt: '2026-01-01',
+          },
+        ],
+        LastEvaluatedKey: { id: 'archived' },
+      })
+      .mockResolvedValueOnce({ Items: [buildProductTypeItem('active', 'B')] });
+    const repository = new DynamoDbProductTypeRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      {
+        getOrThrow: () => 'types',
+        get: () => undefined,
+      } as unknown as ConfigService,
+    );
+    const products = await repository.findByUserId(UserId.fromString('user-1'));
+    expect(products.map((product) => product.id.toString())).toEqual([
+      'active',
+    ]);
+  });
   it('serializes price history dates before persisting shopping metadata', async () => {
     let capturedItem: Record<string, unknown> | undefined;
     const dynamoDb = {

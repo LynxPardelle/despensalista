@@ -42,7 +42,7 @@ describe('SharedShoppingListPageComponent', () => {
     ).toContain('https://wa.me/');
   });
 
-  it('renders a legacy valid temporary shopping list token', async () => {
+  it('rejects an unsigned legacy shopping list payload', async () => {
     const token = toBase64Url(
       JSON.stringify({
         version: 1,
@@ -67,18 +67,11 @@ describe('SharedShoppingListPageComponent', () => {
     fixture.detectChanges();
 
     const compiled = fixture.nativeElement as HTMLElement;
-    const textarea = compiled.querySelector<HTMLTextAreaElement>(
-      '.shopping-export-text',
-    );
-
-    expect(compiled.textContent).toContain('Lista compartida');
-    expect(textarea?.value).toContain('Arroz: 2 kg');
-    expect(
-      compiled.querySelector<HTMLAnchorElement>('.whatsapp-link')?.href,
-    ).toContain('https://wa.me/');
+    expect(compiled.textContent).toContain('Enlace inválido');
+    expect(compiled.querySelector('.shopping-export-text')).toBeNull();
   });
 
-  it('rejects an expired temporary shopping list token', async () => {
+  it('does not trust expiry from an unsigned legacy payload', async () => {
     const token = toBase64Url(
       JSON.stringify({
         version: 1,
@@ -104,8 +97,29 @@ describe('SharedShoppingListPageComponent', () => {
 
     const compiled = fixture.nativeElement as HTMLElement;
 
-    expect(compiled.textContent).toContain('Este enlace ya caducó');
+    expect(compiled.textContent).toContain('Enlace inválido');
     expect(compiled.querySelector('.shopping-export-text')).toBeNull();
+  });
+
+  it('distinguishes a retryable server failure from an invalid token', async () => {
+    fixture = await createComponent('opaque-token');
+
+    const request = httpMock.expectOne(
+      `${environment.apiUrl}/shopping-shares/opaque-token`,
+    );
+    request.flush(
+      { message: 'unavailable' },
+      {
+        status: 503,
+        statusText: 'Service Unavailable',
+      },
+    );
+    fixture.detectChanges();
+
+    const compiled = fixture.nativeElement as HTMLElement;
+
+    expect(compiled.textContent).toContain('No pudimos cargar la lista');
+    expect(compiled.querySelector<HTMLButtonElement>('.retry-button')).not.toBeNull();
   });
 
   async function createComponent(token: string) {

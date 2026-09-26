@@ -1,3 +1,4 @@
+import { getUserErrorMessage, UserFacingError } from '../../shared/user-error';
 import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
@@ -17,13 +18,16 @@ import {
   catchError,
   debounceTime,
   distinctUntilChanged,
+  filter,
   finalize,
   startWith,
   switchMap,
+  take,
   timeout,
 } from 'rxjs/operators';
 import { AuthFacade } from '../../core/services/auth.facade';
 import { PantryService } from '../../core/services/pantry.service';
+import { AuthUser } from '../../shared/models/auth.model';
 import {
   ArchivedPantryItems,
   CloseShoppingPurchaseItemRequest,
@@ -138,8 +142,24 @@ interface SavedShoppingListSnapshotPayload {
 
 interface PendingShoppingCheckout {
   id: string;
+  idempotencyKey: string;
+  ownerUserId: string;
   createdAt: Date;
   items: CloseShoppingPurchaseItemRequest[];
+  queuedOffline?: boolean;
+}
+
+interface PendingInventoryMutation {
+  actionId: string;
+  payloadFingerprint: string;
+  idempotencyKey: string;
+  createdAt: Date;
+}
+
+interface UserScopedLocalStateEnvelope {
+  version: 1;
+  ownerUserId: string;
+  payload: string;
 }
 
 interface ScreenWakeLock {
@@ -307,6 +327,8 @@ const SHOPPING_LOCATION_ORDER = [
   'Sin tienda definida',
 ];
 const ARCHIVED_PAGE_SIZE = 50;
+const SHOPPING_CHECKOUT_MAX_ITEMS = 49;
+const IDEMPOTENCY_RECEIPT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Component({
   selector: 'app-pantry-page',
@@ -330,8 +352,11 @@ export class PantryPageComponent implements OnInit {
   private readonly shoppingTripStorageKey = 'despensalista.shoppingTripDraft';
   private readonly pendingShoppingCheckoutStorageKey =
     'despensalista.pendingShoppingCheckouts';
+  private readonly pendingInventoryMutationStorageKey =
+    'despensalista.pendingInventoryMutations';
   private readonly savedShoppingListsStorageKey =
     'despensalista.savedShoppingLists';
+  private localStateOwnerUserId: string | null = null;
 
   readonly username$ = this.authFacade.currentUsername$;
   readonly loading$ = this.store.select(selectPantryLoading);
@@ -437,7 +462,7 @@ export class PantryPageComponent implements OnInit {
     depletionConsumeAmount: [1, [Validators.required, Validators.min(0.01)]],
     depletionEveryAmount: [1, [Validators.required, Validators.min(1)]],
     depletionEveryPeriod: ['month' as DepletionPeriod, Validators.required],
-    depletionAnchorDate: [toDateInputValue(new Date()), Validators.required],
+    depletionAnchorDate: [toDateInputValue(new Date(), true), Validators.required],
   });
 
   readonly depletionRuleForm = this.formBuilder.nonNullable.group({
@@ -445,7 +470,7 @@ export class PantryPageComponent implements OnInit {
     consumeAmount: [1, [Validators.required, Validators.min(0.01)]],
     everyAmount: [1, [Validators.required, Validators.min(1)]],
     everyPeriod: ['month' as DepletionPeriod, Validators.required],
-    anchorDate: [toDateInputValue(new Date()), Validators.required],
+    anchorDate: [toDateInputValue(new Date(), true), Validators.required],
   });
 
   readonly planningSettingsForm = this.formBuilder.group({
@@ -581,8 +606,10 @@ export class PantryPageComponent implements OnInit {
   voiceCaptureListening = false;
   voiceCaptureStatus: string | null = null;
   pendingShoppingCheckoutCount = 0;
+  readonly shoppingCheckoutMaxItems = SHOPPING_CHECKOUT_MAX_ITEMS;
   isOffline = false;
   readonly consumeErrors: Record<string, string> = {};
+  readonly consumeNotices: Record<string, string> = {};
   private readonly expandedProductTypeIds = new Set<string>();
   private shoppingWakeLock: ScreenWakeLock | null = null;
   private pendingShoppingCheckoutSyncing = false;
@@ -593,8 +620,17 @@ export class PantryPageComponent implements OnInit {
       this.loadOverview();
       this.loadWasteOverview();
       this.watchNetworkState();
-      this.loadLocalShoppingSupport();
-      this.loadSavedShoppingLists();
+      this.authFacade.currentUser$
+        .pipe(
+          filter((user): user is AuthUser => user !== null),
+          take(1),
+          takeUntilDestroyed(this.destroyRef),
+        )
+        .subscribe((user) => {
+          this.localStateOwnerUserId = user.id;
+          this.loadLocalShoppingSupport();
+          this.loadSavedShoppingLists();
+        });
       this.setupVoiceCapture();
       this.setupBarcodeCapture();
       this.loadActiveShoppingShares();
@@ -634,7 +670,7 @@ export class PantryPageComponent implements OnInit {
               depletionConsumeAmount: 1,
               depletionEveryAmount: 1,
               depletionEveryPeriod: 'month',
-              depletionAnchorDate: toDateInputValue(new Date()),
+              depletionAnchorDate: toDateInputValue(new Date(), true),
             },
             { emitEvent: false }
           );
@@ -658,6 +694,7 @@ export class PantryPageComponent implements OnInit {
               now.getMonth(),
               now.getDate() + template.suggestedShelfLifeDays,
             ),
+            true,
           );
     this.lotForm.patchValue(
       {
@@ -673,11 +710,11 @@ export class PantryPageComponent implements OnInit {
         depletionConsumeAmount: template.depletionConsumeAmount,
         depletionEveryAmount: template.depletionEveryAmount,
         depletionEveryPeriod: template.depletionEveryPeriod,
-        depletionAnchorDate: toDateInputValue(now),
+        depletionAnchorDate: toDateInputValue(now, true),
         expiresAt: suggestedExpirationDate,
         purchaseDate: template.suggestedShelfLifeDays === undefined
           ? ''
-          : toDateInputValue(now),
+          : toDateInputValue(now, true),
       },
       { emitEvent: false },
     );
@@ -732,7 +769,7 @@ export class PantryPageComponent implements OnInit {
       everyPeriod: rule?.everyPeriod ?? 'month',
       anchorDate: rule?.anchorDate
         ? toDateInputValue(rule.anchorDate)
-        : toDateInputValue(new Date()),
+        : toDateInputValue(new Date(), true),
     });
   }
 
@@ -981,6 +1018,7 @@ export class PantryPageComponent implements OnInit {
     }
 
     delete this.consumeErrors[lotId];
+    delete this.consumeNotices[lotId];
     this.consumeBusyLotId = lotId;
     const request = {
       quantity: Number(quantity.toFixed(2)),
@@ -992,21 +1030,47 @@ export class PantryPageComponent implements OnInit {
         : {}),
     };
 
+    const actionId = `consume:${lotId}`;
+    const payloadFingerprint = JSON.stringify(request);
+    let idempotencyKey: string;
+    try {
+      idempotencyKey = this.getOrCreateInventoryMutationKey(actionId, payloadFingerprint);
+    } catch (error) {
+      this.consumeBusyLotId = null;
+      this.consumeErrors[lotId] = this.getErrorMessage(error);
+      this.loadOverview();
+      return;
+    }
+
     this.pantryService
-      .consumeInventoryLot(lotId, request)
+      .consumeInventoryLot(lotId, request, idempotencyKey)
       .pipe(
+        timeout(this.lotRegistrationTimeoutMs),
         finalize(() => {
           this.consumeBusyLotId = null;
         })
       )
       .subscribe({
-        next: () => {
+        next: (result) => {
+          this.completeInventoryMutation(actionId, idempotencyKey);
+          if (result.replayed) {
+            this.consumeNotices[lotId] =
+              'Esta acción ya se había completado; actualizamos la despensa sin duplicarla.';
+          }
           this.loadOverview();
           if (wasteReason) {
             this.loadWasteOverview();
           }
         },
         error: (error) => {
+          if (this.isMutationConflict(error)) {
+            this.completeInventoryMutation(actionId, idempotencyKey);
+            this.consumeErrors[lotId] =
+              'La despensa cambió mientras realizabas esta acción. Ya actualizamos los datos; revísalos y vuelve a intentarlo.';
+            this.loadOverview();
+            return;
+          }
+
           this.consumeErrors[lotId] = this.getErrorMessage(error);
         },
       });
@@ -1335,8 +1399,8 @@ export class PantryPageComponent implements OnInit {
     return displayUnit ? `${quantity} ${displayUnit}` : `${quantity}`;
   }
 
-  formatShoppingPrice(value: number | undefined): string {
-    return value === undefined
+  formatShoppingPrice(value: number | null | undefined): string {
+    return value == null || !Number.isFinite(value)
       ? 'Sin estimado'
       : `${value.toFixed(2)} moneda local`;
   }
@@ -1841,6 +1905,7 @@ export class PantryPageComponent implements OnInit {
         const now = new Date();
         const localList: SavedShoppingList = {
           id: `local-${now.getTime()}`,
+          ownerUserId: this.localStateOwnerUserId ?? undefined,
           ...listPayload,
           createdAt: now,
           updatedAt: now,
@@ -2337,6 +2402,9 @@ export class PantryPageComponent implements OnInit {
   }
 
   closeShoppingTrip(items: ShoppingPlanItem[]): void {
+    if (this.shoppingCheckoutBusy || this.pendingShoppingCheckoutSyncing) {
+      return;
+    }
     const selectedItems = this.getSelectedShoppingTripItems(
       this.getShoppingModeRows(items),
     );
@@ -2348,8 +2416,21 @@ export class PantryPageComponent implements OnInit {
 
     const requestItems = this.buildCloseShoppingPurchaseItems(selectedItems);
 
+    if (requestItems.length > SHOPPING_CHECKOUT_MAX_ITEMS) {
+      this.shoppingCheckoutStatus =
+        `El cierre atómico admite como máximo ${SHOPPING_CHECKOUT_MAX_ITEMS} productos por compra.`;
+      return;
+    }
+
+    const pendingCheckout = this.enqueuePendingShoppingCheckout(requestItems);
+
+    if (!pendingCheckout) {
+      this.shoppingCheckoutStatus =
+        'No se pudo guardar el cierre en este navegador. Mantén el modo compra abierto e intenta de nuevo.';
+      return;
+    }
+
     if (this.isOffline) {
-      this.enqueuePendingShoppingCheckout(requestItems);
       this.shoppingCheckoutStatus =
         'Sin conexion. Cierre guardado para sincronizar despues.';
       this.shoppingModeActive = false;
@@ -2363,7 +2444,10 @@ export class PantryPageComponent implements OnInit {
     this.shoppingCheckoutStatus = null;
 
     this.pantryService
-      .closeShoppingPurchase({ items: requestItems })
+      .closeShoppingPurchase(
+        { items: requestItems },
+        pendingCheckout.idempotencyKey,
+      )
       .pipe(
         timeout(this.lotRegistrationTimeoutMs),
         finalize(() => {
@@ -2372,8 +2456,11 @@ export class PantryPageComponent implements OnInit {
         })
       )
       .subscribe({
-        next: (lots) => {
-          this.shoppingCheckoutStatus = `Compra cerrada: ${lots.length} lotes registrados.`;
+        next: (result) => {
+          this.removePendingShoppingCheckout(pendingCheckout.id);
+          this.shoppingCheckoutStatus = result.replayed
+            ? `Compra recuperada sin duplicados: ${result.value.length} lotes registrados.`
+            : `Compra cerrada: ${result.value.length} lotes registrados.`;
           this.shoppingModeActive = false;
           this.shoppingModeSourceList = null;
           this.shoppingTripDraft = {};
@@ -2382,6 +2469,14 @@ export class PantryPageComponent implements OnInit {
           this.loadOverview();
         },
         error: (error) => {
+          if (this.isMutationConflict(error)) {
+            this.removePendingShoppingCheckout(pendingCheckout.id);
+            this.shoppingCheckoutStatus =
+              'La despensa cambió mientras cerrabas la compra. Ya actualizamos los datos; revisa la selección y vuelve a intentarlo.';
+            this.loadOverview();
+            return;
+          }
+
           this.shoppingCheckoutStatus = this.getErrorMessage(error);
           this.persistShoppingTripDraft();
         },
@@ -2726,7 +2821,7 @@ export class PantryPageComponent implements OnInit {
 
     this.downloadTextFile(
       this.buildPantryCsvExport(pantryGroups),
-      `despensalista-despensa-${toDateInputValue(new Date())}.csv`,
+      `despensalista-despensa-${toDateInputValue(new Date(), true)}.csv`,
       'text/csv;charset=utf-8'
     );
     this.quickCaptureStatus = 'CSV exportado para Excel.';
@@ -2921,7 +3016,7 @@ export class PantryPageComponent implements OnInit {
         shoppingLocation: item.shoppingLocation ?? '',
         estimatedUnitPrice: item.estimatedUnitPrice ?? null,
         shoppingNotes: item.barcode ? `Código: ${item.barcode}` : '',
-        purchaseDate: toDateInputValue(new Date()),
+        purchaseDate: toDateInputValue(new Date(), true),
       },
       { emitEvent: false }
     );
@@ -3243,13 +3338,17 @@ export class PantryPageComponent implements OnInit {
             updatedAt?: string;
           }
         >;
-        this.savedShoppingLists = parsedLists.map((list) => ({
-          ...list,
-          createdAt: new Date(list.createdAt),
-          updatedAt: list.updatedAt
-            ? new Date(list.updatedAt)
-            : new Date(list.createdAt),
-        }));
+        this.savedShoppingLists = parsedLists
+          .filter(
+            (list) => list.ownerUserId === this.localStateOwnerUserId,
+          )
+          .map((list) => ({
+            ...list,
+            createdAt: new Date(list.createdAt),
+            updatedAt: list.updatedAt
+              ? new Date(list.updatedAt)
+              : new Date(list.createdAt),
+          }));
       } catch {
         this.savedShoppingLists = [];
       }
@@ -3287,12 +3386,23 @@ export class PantryPageComponent implements OnInit {
   private loadSavedShoppingLists(): void {
     this.pantryService.listSavedShoppingLists().subscribe({
       next: (serverLists) => {
+        const ownedServerLists = serverLists
+          .filter(
+            (list) =>
+              !list.ownerUserId ||
+              list.ownerUserId === this.localStateOwnerUserId,
+          )
+          .map((list) => ({
+            ...list,
+            ownerUserId:
+              list.ownerUserId ?? this.localStateOwnerUserId ?? undefined,
+          }));
         const localOnlyLists = this.savedShoppingLists.filter(
           (list) =>
-            !list.ownerUserId &&
-            !serverLists.some((serverList) => serverList.id === list.id),
+            list.ownerUserId === this.localStateOwnerUserId &&
+            !ownedServerLists.some((serverList) => serverList.id === list.id),
         );
-        this.savedShoppingLists = [...serverLists, ...localOnlyLists].slice(
+        this.savedShoppingLists = [...ownedServerLists, ...localOnlyLists].slice(
           0,
           25,
         );
@@ -3431,14 +3541,18 @@ export class PantryPageComponent implements OnInit {
   }
 
   private persistSavedShoppingLists(): void {
-    if (this.savedShoppingLists.length === 0) {
+    const ownedLists = this.savedShoppingLists.filter(
+      (list) => list.ownerUserId === this.localStateOwnerUserId,
+    );
+
+    if (ownedLists.length === 0) {
       this.removeLocalValue(this.savedShoppingListsStorageKey);
       return;
     }
 
     this.setLocalValue(
       this.savedShoppingListsStorageKey,
-      JSON.stringify(this.savedShoppingLists)
+      JSON.stringify(ownedLists),
     );
   }
 
@@ -3576,48 +3690,83 @@ export class PantryPageComponent implements OnInit {
 
   private enqueuePendingShoppingCheckout(
     items: CloseShoppingPurchaseItemRequest[]
-  ): void {
+  ): PendingShoppingCheckout | null {
+    if (!this.localStateOwnerUserId) {
+      return null;
+    }
+
+    const pending = this.loadPendingShoppingCheckouts();
+    const unresolved = pending.find(checkout => !checkout.queuedOffline);
+    if (unresolved) {
+      return !this.isExpiredMutation(unresolved.createdAt) &&
+        JSON.stringify(unresolved.items) === JSON.stringify(items)
+        ? unresolved
+        : null;
+    }
+
+    const idempotencyKey = this.createIdempotencyKey();
+    const pendingCheckout: PendingShoppingCheckout = {
+      id: idempotencyKey,
+      idempotencyKey,
+      ownerUserId: this.localStateOwnerUserId,
+      createdAt: new Date(),
+      items,
+      queuedOffline: this.isOffline,
+    };
+
     const pendingCheckouts = [
-      ...this.loadPendingShoppingCheckouts(),
-      {
-        id: `${Date.now()}`,
-        createdAt: new Date(),
-        items,
-      },
+      ...pending,
+      pendingCheckout,
     ];
 
+    if (
+      !this.setLocalValue(
+        this.pendingShoppingCheckoutStorageKey,
+        JSON.stringify(pendingCheckouts),
+      )
+    ) {
+      return null;
+    }
+
     this.pendingShoppingCheckoutCount = pendingCheckouts.length;
-    this.setLocalValue(
-      this.pendingShoppingCheckoutStorageKey,
-      JSON.stringify(pendingCheckouts)
-    );
+    return pendingCheckout;
   }
 
   private flushPendingShoppingCheckouts(): void {
-    if (this.isOffline || this.pendingShoppingCheckoutSyncing) {
+    if (this.isOffline || this.pendingShoppingCheckoutSyncing || this.shoppingCheckoutBusy) {
       return;
     }
 
-    const [nextCheckout, ...remainingCheckouts] =
-      this.loadPendingShoppingCheckouts();
+    const pending = this.loadPendingShoppingCheckouts();
+    const nextCheckout = pending.find(checkout => !this.isExpiredMutation(checkout.createdAt));
 
     if (!nextCheckout) {
-      this.pendingShoppingCheckoutCount = 0;
+      this.pendingShoppingCheckoutCount = pending.length;
+      if (pending.length) {
+        this.shoppingCheckoutStatus =
+          'Hay cierres pendientes de hace más de siete días. Revisa la despensa antes de descartarlos y registrar lo que falte.';
+      }
       return;
     }
 
     this.pendingShoppingCheckoutSyncing = true;
     this.pantryService
-      .closeShoppingPurchase({ items: nextCheckout.items })
+      .closeShoppingPurchase(
+        { items: nextCheckout.items },
+        nextCheckout.idempotencyKey,
+      )
       .pipe(timeout(this.lotRegistrationTimeoutMs))
       .subscribe({
-        next: () => {
-          this.persistPendingShoppingCheckouts(remainingCheckouts);
+        next: (result) => {
+          this.removePendingShoppingCheckout(nextCheckout.id);
+          const remainingCheckouts = this.loadPendingShoppingCheckouts();
           if (remainingCheckouts.length === 0) {
             this.shoppingTripDraft = {};
             this.removeLocalValue(this.shoppingTripStorageKey);
           }
-          this.shoppingCheckoutStatus = remainingCheckouts.length
+          this.shoppingCheckoutStatus = result.replayed
+            ? 'Compra pendiente recuperada sin duplicados.'
+            : remainingCheckouts.length
             ? `Compra sincronizada. Quedan ${remainingCheckouts.length} pendientes.`
             : 'Compra pendiente sincronizada.';
           this.loadOverview();
@@ -3627,6 +3776,15 @@ export class PantryPageComponent implements OnInit {
         },
         error: (error) => {
           this.pendingShoppingCheckoutSyncing = false;
+          if (this.isMutationConflict(error)) {
+            this.removePendingShoppingCheckout(nextCheckout.id);
+            this.shoppingCheckoutStatus =
+              'Una compra pendiente entró en conflicto con la despensa actual y no se reintentará automáticamente.';
+            this.loadOverview();
+            this.changeDetector.markForCheck();
+            return;
+          }
+
           this.shoppingCheckoutStatus = this.getErrorMessage(error);
           this.changeDetector.markForCheck();
         },
@@ -3647,10 +3805,16 @@ export class PantryPageComponent implements OnInit {
         Omit<PendingShoppingCheckout, 'createdAt'> & { createdAt: string }
       >;
 
-      return parsedCheckouts.map((checkout) => ({
-        ...checkout,
-        createdAt: new Date(checkout.createdAt),
-      }));
+      return parsedCheckouts
+        .filter(
+          (checkout) =>
+            checkout.ownerUserId === this.localStateOwnerUserId &&
+            this.isUuid(checkout.idempotencyKey) && Array.isArray(checkout.items),
+        )
+        .map((checkout) => ({
+          ...checkout,
+          createdAt: new Date(checkout.createdAt),
+        }));
     } catch {
       return [];
     }
@@ -3712,40 +3876,283 @@ export class PantryPageComponent implements OnInit {
   }
 
   private getLocalValue(key: string): string | null {
-    if (!isPlatformBrowser(this.platformId)) {
+    const scopedKey = this.getUserScopedStorageKey(key);
+
+    if (!isPlatformBrowser(this.platformId) || !scopedKey) {
       return null;
     }
 
     try {
-      return localStorage.getItem(key);
+      const storedValue = localStorage.getItem(scopedKey);
+
+      if (storedValue !== null) {
+        return this.readOwnedLocalStateEnvelope(storedValue);
+      }
+
+      return this.migrateOwnedLegacyLocalValue(key);
     } catch {
       return null;
     }
   }
 
-  private setLocalValue(key: string, value: string): void {
-    if (!isPlatformBrowser(this.platformId)) {
+  private removePendingShoppingCheckout(checkoutId: string): void {
+    this.persistPendingShoppingCheckouts(
+      this.loadPendingShoppingCheckouts().filter(
+        (checkout) => checkout.id !== checkoutId,
+      ),
+    );
+  }
+
+  private getOrCreateInventoryMutationKey(
+    actionId: string,
+    payloadFingerprint: string,
+  ): string {
+    const pendingMutations = this.loadPendingInventoryMutations();
+    const existingMutation = pendingMutations.find(
+      (mutation) =>
+        mutation.actionId === actionId,
+    );
+
+    if (existingMutation) {
+      if (this.isExpiredMutation(existingMutation.createdAt)) {
+        this.completeInventoryMutation(actionId, existingMutation.idempotencyKey);
+        throw new UserFacingError('Este intento tiene más de siete días. Revisa el inventario actualizado antes de realizar una nueva acción.');
+      }
+      if (existingMutation.payloadFingerprint !== payloadFingerprint) {
+        this.completeInventoryMutation(actionId, existingMutation.idempotencyKey);
+        throw new UserFacingError('La acción anterior no está confirmada. Revisa el inventario actualizado antes de cambiar la cantidad.');
+      }
+      return existingMutation.idempotencyKey;
+    }
+
+    const idempotencyKey = this.createIdempotencyKey();
+    const nextMutations = [
+      ...pendingMutations.filter((mutation) => mutation.actionId !== actionId),
+      {
+        actionId,
+        payloadFingerprint,
+        idempotencyKey,
+        createdAt: new Date(),
+      },
+    ];
+    if (!this.setLocalValue(
+      this.pendingInventoryMutationStorageKey,
+      JSON.stringify(nextMutations),
+    )) {
+      throw new UserFacingError('No se pudo guardar el intento en este navegador. Revisa el almacenamiento e intenta de nuevo.');
+    }
+
+    return idempotencyKey;
+  }
+
+  private completeInventoryMutation(
+    actionId: string,
+    idempotencyKey: string,
+  ): void {
+    const remainingMutations = this.loadPendingInventoryMutations().filter(
+      (mutation) =>
+        mutation.actionId !== actionId ||
+        mutation.idempotencyKey !== idempotencyKey,
+    );
+
+    if (remainingMutations.length === 0) {
+      this.removeLocalValue(this.pendingInventoryMutationStorageKey);
       return;
     }
 
+    this.setLocalValue(
+      this.pendingInventoryMutationStorageKey,
+      JSON.stringify(remainingMutations),
+    );
+  }
+
+  private loadPendingInventoryMutations(): PendingInventoryMutation[] {
+    const storedMutations = this.getLocalValue(
+      this.pendingInventoryMutationStorageKey,
+    );
+
+    if (!storedMutations) {
+      return [];
+    }
+
     try {
-      localStorage.setItem(key, value);
+      const parsedMutations = JSON.parse(storedMutations) as Array<
+        Omit<PendingInventoryMutation, 'createdAt'> & { createdAt: string }
+      >;
+
+      return parsedMutations
+        .filter(
+          (mutation) =>
+            typeof mutation.actionId === 'string' &&
+            typeof mutation.payloadFingerprint === 'string' &&
+            this.isUuid(mutation.idempotencyKey),
+        )
+        .map((mutation) => ({
+          ...mutation,
+          createdAt: new Date(mutation.createdAt),
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  get hasExpiredPendingCheckouts(): boolean {
+    return this.loadPendingShoppingCheckouts().some(checkout => this.isExpiredMutation(checkout.createdAt));
+  }
+
+  discardExpiredPendingCheckouts(): void {
+    this.persistPendingShoppingCheckouts(
+      this.loadPendingShoppingCheckouts().filter(checkout => !this.isExpiredMutation(checkout.createdAt)),
+    );
+    this.shoppingCheckoutStatus = 'Cierres vencidos descartados. Registra solo los productos que falten en tu despensa.';
+    this.loadOverview();
+  }
+
+  private isExpiredMutation(createdAt: Date): boolean {
+    const age = Date.now() - createdAt.getTime();
+    return !Number.isFinite(age) || age < 0 || age >= IDEMPOTENCY_RECEIPT_TTL_MS;
+  }
+
+  private createIdempotencyKey(): string {
+    if (typeof globalThis.crypto?.randomUUID === 'function') {
+      return globalThis.crypto.randomUUID();
+    }
+
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'));
+    return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex
+      .slice(6, 8)
+      .join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`;
+  }
+
+  private isUuid(value: unknown): value is string {
+    return (
+      typeof value === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        value,
+      )
+    );
+  }
+
+  private setLocalValue(key: string, value: string): boolean {
+    const scopedKey = this.getUserScopedStorageKey(key);
+
+    if (!isPlatformBrowser(this.platformId) || !scopedKey) {
+      return false;
+    }
+
+    try {
+      const envelope: UserScopedLocalStateEnvelope = {
+        version: 1,
+        ownerUserId: this.localStateOwnerUserId!,
+        payload: value,
+      };
+      localStorage.setItem(scopedKey, JSON.stringify(envelope));
+      return true;
     } catch {
       this.quickCaptureStatus =
         'No se pudo guardar en este navegador; conserva el texto manualmente.';
+      return false;
     }
   }
 
   private removeLocalValue(key: string): void {
-    if (!isPlatformBrowser(this.platformId)) {
+    const scopedKey = this.getUserScopedStorageKey(key);
+
+    if (!isPlatformBrowser(this.platformId) || !scopedKey) {
       return;
     }
 
     try {
-      localStorage.removeItem(key);
+      localStorage.removeItem(scopedKey);
     } catch {
       // Local persistence is a convenience; failing closed keeps the app usable.
     }
+  }
+
+  private getUserScopedStorageKey(key: string): string | null {
+    return this.localStateOwnerUserId
+      ? `${key}.v2.${encodeURIComponent(this.localStateOwnerUserId)}`
+      : null;
+  }
+
+  private readOwnedLocalStateEnvelope(rawValue: string): string | null {
+    try {
+      const envelope = JSON.parse(
+        rawValue,
+      ) as Partial<UserScopedLocalStateEnvelope>;
+
+      return envelope.version === 1 &&
+        envelope.ownerUserId === this.localStateOwnerUserId &&
+        typeof envelope.payload === 'string'
+        ? envelope.payload
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private migrateOwnedLegacyLocalValue(key: string): string | null {
+    const legacyValue = localStorage.getItem(key);
+
+    if (legacyValue === null) {
+      return null;
+    }
+
+    try {
+      const parsedValue: unknown = JSON.parse(legacyValue);
+
+      if (this.isUserScopedLocalStateEnvelope(parsedValue)) {
+        if (parsedValue.ownerUserId !== this.localStateOwnerUserId) {
+          return null;
+        }
+
+        this.setLocalValue(key, parsedValue.payload);
+        return parsedValue.payload;
+      }
+
+      if (
+        Array.isArray(parsedValue) &&
+        (key === this.savedShoppingListsStorageKey ||
+          key === this.pendingShoppingCheckoutStorageKey)
+      ) {
+        const ownedEntries = parsedValue.filter(
+          (entry) =>
+            Boolean(entry) &&
+            typeof entry === 'object' &&
+            (entry as { ownerUserId?: unknown }).ownerUserId ===
+              this.localStateOwnerUserId,
+        );
+
+        if (ownedEntries.length > 0) {
+          const ownedPayload = JSON.stringify(ownedEntries);
+          this.setLocalValue(key, ownedPayload);
+          return ownedPayload;
+        }
+      }
+    } catch {
+      return null;
+    }
+
+    return null;
+  }
+
+  private isUserScopedLocalStateEnvelope(
+    value: unknown,
+  ): value is UserScopedLocalStateEnvelope {
+    if (!value || typeof value !== 'object') {
+      return false;
+    }
+
+    const envelope = value as Partial<UserScopedLocalStateEnvelope>;
+    return (
+      envelope.version === 1 &&
+      typeof envelope.ownerUserId === 'string' &&
+      typeof envelope.payload === 'string'
+    );
   }
 
   private toKnownProductUnit(unit: string): ProductUnit {
@@ -3780,7 +4187,7 @@ export class PantryPageComponent implements OnInit {
       depletionConsumeAmount: 1,
       depletionEveryAmount: 1,
       depletionEveryPeriod: 'month',
-      depletionAnchorDate: toDateInputValue(new Date()),
+      depletionAnchorDate: toDateInputValue(new Date(), true),
     });
   }
 
@@ -3888,7 +4295,7 @@ export class PantryPageComponent implements OnInit {
         unit,
         everyAmount: 1,
         everyPeriod: 'month',
-        anchorDate: rawValue.anchorDate || toDateInputValue(new Date()),
+        anchorDate: rawValue.anchorDate || toDateInputValue(new Date(), true),
       };
     }
 
@@ -3934,28 +4341,18 @@ export class PantryPageComponent implements OnInit {
         depletionEveryPeriod: rule?.everyPeriod ?? 'month',
         depletionAnchorDate: rule?.anchorDate
           ? toDateInputValue(rule.anchorDate)
-          : toDateInputValue(new Date()),
+          : toDateInputValue(new Date(), true),
       },
       { emitEvent: false }
     );
   }
 
   private getErrorMessage(error: unknown): string {
-    if (error instanceof TimeoutError) {
-      return 'La solicitud tardo demasiado. Revisa tu conexion e intenta de nuevo.';
-    }
+    return getUserErrorMessage(error);
+  }
 
-    if (error instanceof HttpErrorResponse) {
-      const apiMessage =
-        typeof error.error?.message === 'string' ? error.error.message : null;
-      return apiMessage ?? error.message;
-    }
-
-    if (error instanceof Error) {
-      return error.message;
-    }
-
-    return 'No se pudo completar la solicitud.';
+  private isMutationConflict(error: unknown): boolean {
+    return error instanceof HttpErrorResponse && error.status === 409;
   }
 
   private runMutation(
@@ -4165,6 +4562,9 @@ export class PantryPageComponent implements OnInit {
   }
 }
 
-function toDateInputValue(date: Date): string {
+export function toDateInputValue(date: Date, localDate = false): string {
+  if (localDate) {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
   return date.toISOString().slice(0, 10);
 }

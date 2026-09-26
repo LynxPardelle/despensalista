@@ -6,34 +6,152 @@ on:
     branches:
       - dev
 
-permissions:
-  contents: read
-  id-token: write
+permissions: {}
+
+concurrency:
+  group: serverless-dev
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  deploy:
+  package-backend:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - name: Require dev branch
+        run: test "$GITHUB_REF_NAME" = dev
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Build backend once for Lambda Linux ARM64
+        working-directory: backend
+        env:
+          MONGOMS_DISABLE_POSTINSTALL: '1'
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          npm ci --omit=dev
+          zip -q -r lambda.zip dist node_modules package.json
+          python -c "import zipfile; z=zipfile.ZipFile('lambda.zip'); assert sum(i.file_size for i in z.infolist()) <= 250 * 1024 * 1024, 'Lambda artifact exceeds 250 MiB'; assert not any('/.cache/' in i.filename for i in z.infolist()), 'Build cache leaked into Lambda artifact'"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: backend-lambda-${{ github.sha }}
+          path: backend/lambda.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  build-release:
+    needs: package-backend
     runs-on: ubuntu-latest
-    environment: dev
-    defaults:
-      run:
-        working-directory: ./infra/cognito
+    permissions:
+      contents: read
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: actions/setup-node@v6.4.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+            infra/cognito/package-lock.json
+
+      - name: Validate release automation
+        run: node --test .github/scripts/*.test.mjs docker/mongodb/replica-health.test.mjs backend/scripts/deployed-api-smoke.test.cjs
+
+      - name: Verify authenticated MongoDB replica-set transactions
+        run: bash .github/scripts/mongodb-compose-smoke.sh
+
+      - name: Test and build frontend
+        run: |
+          set -euo pipefail
+          npm --prefix frontend ci
+          npm --prefix frontend audit --omit=dev --audit-level=moderate
+          npm --prefix frontend run test:ci
+          npm --prefix frontend run build
+          npm --prefix frontend run test:e2e
+
+      - name: Test backend
+        run: |
+          set -euo pipefail
+          npm --prefix backend ci
+          npm --prefix backend audit --omit=dev --audit-level=moderate
+          npm --prefix backend run lint:check
+          npm --prefix backend run test
+          npm --prefix backend run test:e2e
+
+      - name: Download prebuilt Linux ARM64 backend
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: backend-lambda-${{ github.sha }}
+          path: backend
+
+      - name: Type-check infrastructure
+        run: |
+          set -euo pipefail
+          npm --prefix infra/cognito ci
+          npm --prefix infra/cognito audit --omit=dev --audit-level=moderate
+          npm --prefix infra/cognito run build
+          npm --prefix infra/cognito test
+
+      - name: Create immutable release manifest
+        run: >-
+          node .github/scripts/release-artifact.mjs create
+          --root .
+          --output .release
+          --source-sha "$GITHUB_SHA"
+
+      - name: Upload immutable release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: despensalista-release-${{ github.sha }}
+          path: .release
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 90
+
+  deploy:
+    needs: build-release
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download immutable release
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: despensalista-release-${{ github.sha }}
+          path: .release
+
+      - name: Verify and apply releaseId
+        run: |
+          set -euo pipefail
+          node .github/scripts/release-artifact.mjs verify --artifact .release --source-sha "$GITHUB_SHA"
+          node .github/scripts/release-artifact.mjs apply --artifact .release --workspace . --source-sha "$GITHUB_SHA"
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: infra/cognito/package-lock.json
 
-      - run: npm ci
-      - run: npm --prefix ../../frontend ci
-      - run: npm --prefix ../../frontend run build
-      - run: npm run validate:serverless
+      - name: Install deployment dependencies
+        run: npm --prefix infra/cognito ci
 
       - name: Validate deploy inputs
         env:
@@ -41,7 +159,6 @@ jobs:
           APP_DOMAIN_NAME: ${{ vars.APP_DOMAIN_NAME || 'dev.despensalista.lynxpardelle.com' }}
           AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
           COGNITO_DOMAIN_PREFIX: ${{ vars.COGNITO_DOMAIN_PREFIX }}
-          FRONTEND_BASE_URL: ${{ vars.FRONTEND_BASE_URL }}
         run: |
           set -euo pipefail
           test -n "$AWS_ROLE_ARN"
@@ -49,30 +166,68 @@ jobs:
           test -n "$AWS_REGION"
           test -n "$COGNITO_DOMAIN_PREFIX"
 
-      - uses: aws-actions/configure-aws-credentials@v6.1.1
+      - uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
-      - name: Confirm AWS caller identity
-        run: aws sts get-caller-identity
+      - name: Snapshot current published release
+        run: node .github/scripts/deployment-state.mjs capture dev .rollback
 
-      - name: Deploy dev serverless backend
+      - name: Validate infrastructure against AWS
+        run: npm --prefix infra/cognito run build
+
+      - name: Deploy dev releaseId
+        id: deploy
+        working-directory: infra/cognito
         env:
           AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
           APP_DOMAIN_NAME: ${{ vars.APP_DOMAIN_NAME || 'dev.despensalista.lynxpardelle.com' }}
           COGNITO_DOMAIN_PREFIX: ${{ vars.COGNITO_DOMAIN_PREFIX }}
-          FRONTEND_BASE_URL: ${{ vars.FRONTEND_BASE_URL }}
         run: |
           set -euo pipefail
-          FRONTEND_BASE_URL="${FRONTEND_BASE_URL:-https://$APP_DOMAIN_NAME}"
-          npx cdk deploy --all --require-approval never \
+          FRONTEND_BASE_URL="https://$APP_DOMAIN_NAME"
+          npx cdk deploy --all --require-approval never --change-set-name despensalista-dev-release \
             --context projectName=despensalista \
             --context stage=dev \
             --context awsRegion="$AWS_REGION" \
             --context includeServerlessBackend=true \
+            --context backendArtifactPath=../../backend/lambda.zip \
             --context removalPolicy=destroy \
             --context domainPrefix="$COGNITO_DOMAIN_PREFIX" \
             --context appDomainName="$APP_DOMAIN_NAME" \
             --context productionFrontendBaseUrl="$FRONTEND_BASE_URL" \
             --context serverlessFrontendBaseUrl="$FRONTEND_BASE_URL"
+
+      - name: Reconcile exact published release
+        id: reconcile
+        run: node .github/scripts/deployment-state.mjs reconcile dev .release
+
+      - name: Post-deploy smoke
+        id: smoke
+        env:
+          APP_DOMAIN_NAME: ${{ vars.APP_DOMAIN_NAME || 'dev.despensalista.lynxpardelle.com' }}
+        run: node .github/scripts/smoke.mjs --base-url "https://$APP_DOMAIN_NAME" --attempts 18 --delay-ms 10000
+
+      - name: Restore previous frontend and backend after failed publish or smoke
+        if: failure() && (steps.reconcile.outcome == 'failure' || steps.smoke.outcome == 'failure')
+        run: node .github/scripts/deployment-state.mjs restore dev .rollback
+
+      - name: Record exact published deployment
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+        run: node .github/scripts/deployment-state.mjs record dev .release deployment-receipt "$GITHUB_SHA"
+
+      - name: Upload exact rollback receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: despensalista-deployment-dev-${{ github.sha }}
+          path: deployment-receipt
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Record releaseId
+        run: >-
+          node -e 'const m=require("./.release/release-manifest.json");
+          process.stdout.write("### Deployed releaseId "+m.releaseId+" ("+m.sourceSha+")\n")'
+          >> "$GITHUB_STEP_SUMMARY"

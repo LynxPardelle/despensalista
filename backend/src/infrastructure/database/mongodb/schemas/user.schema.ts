@@ -32,6 +32,9 @@ export class UserDocument {
   @Prop({ required: true, enum: Object.values(UserAccountStatus), index: true })
   status: UserAccountStatus;
 
+  @Prop({ required: false })
+  deletionFenceExpiresAt?: Date;
+
   @Prop({ required: false, type: Object })
   preferences?: Partial<UserPreferencesPrimitives>;
 

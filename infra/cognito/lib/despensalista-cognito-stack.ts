@@ -1,5 +1,8 @@
 import * as cdk from 'aws-cdk-lib';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as ses from 'aws-cdk-lib/aws-ses';
+import { createStageDeliveryControls } from './stage-delivery';
 import { Construct } from 'constructs';
 
 type ContextValue = string | undefined;
@@ -27,14 +30,16 @@ export class DespensaListaCognitoStack extends cdk.Stack {
       `${projectName}-${stage}-${cdk.Aws.ACCOUNT_ID}`;
 
     const callbackUrls = this.buildCallbackUrls(
+      stage,
       localFrontendBaseUrl,
       productionFrontendBaseUrl,
     );
     const logoutUrls = this.buildLogoutUrls(
+      stage,
       localFrontendBaseUrl,
       productionFrontendBaseUrl,
     );
-    const mfaConfiguration = this.readMfaConfiguration();
+    const mfaConfiguration = this.readMfaConfiguration(stage);
     const supportedIdentityProviders = ['COGNITO'];
 
     const userPool = new cognito.CfnUserPool(this, 'UserPool', {
@@ -44,9 +49,19 @@ export class DespensaListaCognitoStack extends cdk.Stack {
       mfaConfiguration,
       enabledMfas:
         mfaConfiguration === 'OFF' ? undefined : ['SOFTWARE_TOKEN_MFA'],
-      deletionProtection: this.readBooleanContext('deletionProtection', false)
+      deletionProtection: this.isProduction(stage) ||
+        this.readBooleanContext('deletionProtection', false)
         ? 'ACTIVE'
         : 'INACTIVE',
+      emailConfiguration: {
+        // Managed delivery accepts a verified custom sender while SES remains
+        // sandboxed. Bootstrap the exact-pool SES sending policy first.
+        emailSendingAccount: 'COGNITO_DEFAULT',
+        ...(this.isProduction(stage) ? {
+          from: 'DespensaLista <no-reply@despensalista.lynxpardelle.com>',
+          sourceArn: this.formatArn({ service: 'ses', resource: 'identity', resourceName: 'despensalista.lynxpardelle.com' }),
+        } : {}),
+      },
       accountRecoverySetting: {
         recoveryMechanisms: [
           {
@@ -149,6 +164,9 @@ export class DespensaListaCognitoStack extends cdk.Stack {
     );
     managedLoginBranding.addDependency(userPoolClient);
 
+    const sesIdentity = this.createSesIdentity(stage);
+    createStageDeliveryControls(this, projectName, stage, userPool.attrArn);
+
     const userPoolDomainUrl = `https://${domainPrefix}.auth.${cdk.Aws.REGION}.amazoncognito.com`;
     this.allowedProviders = supportedIdentityProviders;
     this.userPoolClientId = userPoolClient.ref;
@@ -173,18 +191,32 @@ export class DespensaListaCognitoStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AllowedProviders', {
       value: supportedIdentityProviders.join(','),
     });
-    new cdk.CfnOutput(this, 'LocalCallbackUrl', {
-      value: `${localFrontendBaseUrl}/api/auth/cognito/callback`,
-    });
+    if (sesIdentity) {
+      new cdk.CfnOutput(this, 'SesEmailIdentityName', {
+        value: sesIdentity.emailIdentityName,
+      });
+      new cdk.CfnOutput(this, 'SesFromAddress', {
+        value: `no-reply@${sesIdentity.emailIdentityName}`,
+      });
+      new cdk.CfnOutput(this, 'CognitoEmailSendingAccount', {
+        value: 'COGNITO_DEFAULT',
+      });
+    }
+    if (stage.trim().toLowerCase() !== 'prod') {
+      new cdk.CfnOutput(this, 'LocalCallbackUrl', {
+        value: `${localFrontendBaseUrl}/api/auth/cognito/callback`,
+      });
+    }
 
     userPoolClient.addDependency(userPoolDomain);
   }
 
   private buildCallbackUrls(
+    stage: string,
     localFrontendBaseUrl: string,
     productionFrontendBaseUrl: ContextValue,
   ): string[] {
-    return this.uniqueUrls([
+    return this.allowedAuthUrls(stage, [
       `${localFrontendBaseUrl}/api/auth/cognito/callback`,
       productionFrontendBaseUrl
         ? `${productionFrontendBaseUrl}/api/auth/cognito/callback`
@@ -194,10 +226,11 @@ export class DespensaListaCognitoStack extends cdk.Stack {
   }
 
   private buildLogoutUrls(
+    stage: string,
     localFrontendBaseUrl: string,
     productionFrontendBaseUrl: ContextValue,
   ): string[] {
-    return this.uniqueUrls([
+    return this.allowedAuthUrls(stage, [
       `${localFrontendBaseUrl}/login`,
       productionFrontendBaseUrl ? `${productionFrontendBaseUrl}/login` : undefined,
       ...this.readCsvContext('extraLogoutUrls'),
@@ -212,6 +245,29 @@ export class DespensaListaCognitoStack extends cdk.Stack {
           .filter((value): value is string => Boolean(value)),
       ),
     ];
+  }
+
+  private allowedAuthUrls(
+    stage: string,
+    values: Array<string | undefined>,
+  ): string[] {
+    const urls = this.uniqueUrls(values);
+
+    if (stage.trim().toLowerCase() !== 'prod') {
+      return urls;
+    }
+
+    return urls.filter((url) => !this.isLocalhostUrl(url));
+  }
+
+  private isLocalhostUrl(value: string): boolean {
+    try {
+      const hostname = new URL(value).hostname.toLowerCase().replace(/\.$/, '');
+
+      return hostname === 'localhost' || hostname.endsWith('.localhost');
+    } catch {
+      return false;
+    }
   }
 
   private readContext(key: string, fallback: string): string {
@@ -271,8 +327,63 @@ export class DespensaListaCognitoStack extends cdk.Stack {
     return cdk.RemovalPolicy.RETAIN;
   }
 
-  private readMfaConfiguration(): 'OFF' | 'OPTIONAL' | 'ON' {
-    const value = this.readContext('mfaConfiguration', 'OFF')
+  private createSesIdentity(stage: string): ses.EmailIdentity | undefined {
+    if (!this.isProduction(stage)) {
+      return undefined;
+    }
+
+    const hostedZoneId = this.readContext(
+      'hostedZoneId',
+      'Z05088763QG63CC5SE7PN',
+    );
+    const hostedZoneName = this.readContext(
+      'hostedZoneName',
+      'lynxpardelle.com',
+    );
+    const identityDomain = this.readContext(
+      'sesIdentityDomain',
+      'despensalista.lynxpardelle.com',
+    );
+    const zone = route53.HostedZone.fromHostedZoneAttributes(
+      this,
+      'SesHostedZone',
+      {
+        hostedZoneId,
+        zoneName: hostedZoneName,
+      },
+    );
+    const identity = new ses.EmailIdentity(this, 'SesEmailIdentity', {
+      identity: ses.Identity.domain(identityDomain),
+      dkimIdentity: ses.DkimIdentity.easyDkim(
+        ses.EasyDkimSigningKeyLength.RSA_2048_BIT,
+      ),
+      dkimSigning: true,
+      feedbackForwarding: true,
+    });
+
+    identity.dkimRecords.forEach((record, index) => {
+      new route53.CfnRecordSet(this, `SesDkimRecord${index + 1}`, {
+        hostedZoneId: zone.hostedZoneId,
+        name: record.name,
+        type: 'CNAME',
+        resourceRecords: [record.value],
+        ttl: '1800',
+      });
+    });
+
+    return identity;
+  }
+
+  private isProduction(stage: string): boolean {
+    return stage.trim().toLowerCase() === 'prod';
+  }
+
+  private readMfaConfiguration(stage: string): 'OFF' | 'OPTIONAL' | 'ON' {
+    if (this.isProduction(stage)) {
+      return 'ON';
+    }
+
+    const value = this.readContext('mfaConfiguration', 'ON')
       .trim()
       .toUpperCase();
 
@@ -284,4 +395,5 @@ export class DespensaListaCognitoStack extends cdk.Stack {
       `Unsupported mfaConfiguration "${value}". Use OFF, OPTIONAL, or ON.`,
     );
   }
+
 }

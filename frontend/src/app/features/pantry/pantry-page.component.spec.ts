@@ -7,11 +7,20 @@ import {
 } from '@angular/core/testing';
 import { ReactiveFormsModule } from '@angular/forms';
 import { RouterTestingModule } from '@angular/router/testing';
-import { NEVER, of, Subject } from 'rxjs';
+import {
+  BehaviorSubject,
+  NEVER,
+  of,
+  Subject,
+  throwError,
+  TimeoutError,
+} from 'rxjs';
+import { HttpErrorResponse } from '@angular/common/http';
 import { Store } from '@ngrx/store';
 import { AuthFacade } from '../../core/services/auth.facade';
-import { PantryPageComponent } from './pantry-page.component';
+import { PantryPageComponent, toDateInputValue } from './pantry-page.component';
 import { PantryService } from '../../core/services/pantry.service';
+import { AuthUser } from '../../shared/models/auth.model';
 import {
   InventoryLot,
   PantryLotSummary,
@@ -32,6 +41,10 @@ import {
 } from '../../store/pantry/pantry.selectors';
 
 describe('PantryPageComponent', () => {
+  it('keeps local today separate from stored UTC civil dates', () => {
+    expect((toDateInputValue as any)(new Date(2026, 8, 25, 23, 30), true)).toBe('2026-09-25');
+    expect(toDateInputValue(new Date('2026-09-25T00:00:00.000Z'))).toBe('2026-09-25');
+  });
   let fixture: ComponentFixture<PantryPageComponent>;
   let component: PantryPageComponent;
   let pantryService: jasmine.SpyObj<PantryService>;
@@ -39,6 +52,7 @@ describe('PantryPageComponent', () => {
   let store: { select: jasmine.Spy; dispatch: jasmine.Spy };
 
   beforeEach(async () => {
+    clearPantryLocalState();
     pantryService = jasmine.createSpyObj<PantryService>('PantryService', [
       'searchProductTypes',
       'registerLot',
@@ -65,7 +79,7 @@ describe('PantryPageComponent', () => {
     ]);
     pantryService.searchProductTypes.and.returnValue(of([]));
     pantryService.registerLot.and.returnValue(of({} as any));
-    pantryService.consumeInventoryLot.and.returnValue(of(null));
+    pantryService.consumeInventoryLot.and.returnValue(of(makeConsumeResult()));
     pantryService.updateProductTypeDepletionRule.and.returnValue(of({} as any));
     pantryService.updateProductTypePlanningSettings.and.returnValue(
       of({} as any),
@@ -82,7 +96,7 @@ describe('PantryPageComponent', () => {
     pantryService.getArchivedPantryItems.and.returnValue(
       of({ productTypes: [], inventoryLots: [] }),
     );
-    pantryService.closeShoppingPurchase.and.returnValue(of([]));
+    pantryService.closeShoppingPurchase.and.returnValue(of(makeCheckoutResult()));
     pantryService.listSavedShoppingLists.and.returnValue(of([]));
     pantryService.createSavedShoppingList.and.callFake((request) =>
       of({
@@ -204,6 +218,10 @@ describe('PantryPageComponent', () => {
     fixture.detectChanges();
   });
 
+  afterEach(() => {
+    clearPantryLocalState();
+  });
+
   it('resets the unit when switching from an existing type to a new type', () => {
     const existingType: ProductType = {
       id: 'type-1',
@@ -227,7 +245,7 @@ describe('PantryPageComponent', () => {
   });
 
   it('prevents a second consume request while one is already in flight', () => {
-    const pendingRequest = new Subject<null>();
+    const pendingRequest = new Subject<ReturnType<typeof makeConsumeResult>>();
     pantryService.consumeInventoryLot.and.returnValue(pendingRequest);
 
     component.consumeLot('lot-1', 1);
@@ -239,18 +257,99 @@ describe('PantryPageComponent', () => {
       {
         quantity: 1,
       },
+      jasmine.any(String),
     ]);
   });
 
   it('sends waste metadata when consuming a lot as waste', () => {
     component.consumeLot('lot-1', 1, 'expired', 'Fecha vencida');
 
-    expect(pantryService.consumeInventoryLot).toHaveBeenCalledWith('lot-1', {
-      quantity: 1,
-      wasteReason: 'expired',
-      wasteNote: 'Fecha vencida',
-    });
+    expect(pantryService.consumeInventoryLot).toHaveBeenCalledWith(
+      'lot-1',
+      {
+        quantity: 1,
+        wasteReason: 'expired',
+        wasteNote: 'Fecha vencida',
+      },
+      jasmine.any(String),
+    );
     expect(pantryService.getWasteOverview).toHaveBeenCalled();
+  });
+
+  it('persists and reuses the same consume idempotency key after a timeout', () => {
+    pantryService.consumeInventoryLot.and.returnValue(
+      throwError(() => new TimeoutError()),
+    );
+
+    component.consumeLot('lot-1', 1, 'expired', 'Fecha vencida');
+    const firstKey = (pantryService.consumeInventoryLot.calls.argsFor(0) as any[])[2] as
+      | string
+      | undefined;
+
+    expect(firstKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+
+    pantryService.consumeInventoryLot.and.returnValue(of(makeConsumeResult()));
+    component.consumeLot('lot-1', 1, 'expired', 'Fecha vencida');
+
+    expect((pantryService.consumeInventoryLot.calls.argsFor(1) as any[])[2]).toBe(
+      firstKey,
+    );
+  });
+
+  it('refreshes inventory and asks for a new action after an idempotency conflict', () => {
+    store.dispatch.calls.reset();
+    pantryService.consumeInventoryLot.and.returnValue(
+      throwError(
+        () =>
+          new HttpErrorResponse({
+            status: 409,
+            error: { message: 'Conditional request failed' },
+          }),
+      ),
+    );
+
+    component.consumeLot('lot-1', 1);
+
+    expect(component.consumeErrors['lot-1']).toContain(
+      'La despensa cambió mientras realizabas esta acción',
+    );
+    expect(store.dispatch).toHaveBeenCalled();
+  });
+
+  it('requires review before resubmitting an expired consume receipt', () => {
+    pantryService.consumeInventoryLot.and.returnValue(throwError(() => new TimeoutError()));
+    component.consumeLot('lot-1', 1);
+    const pending = (component as any).loadPendingInventoryMutations();
+    pending[0].createdAt = new Date(Date.now() - 8 * 86400000);
+    (component as any).setLocalValue('despensalista.pendingInventoryMutations', JSON.stringify(pending));
+    component.consumeLot('lot-1', 1);
+    expect(pantryService.consumeInventoryLot).toHaveBeenCalledTimes(1);
+    expect(component.consumeErrors['lot-1']).toContain('siete días');
+  });
+
+  it('does not consume when its retry key cannot be persisted', () => {
+    spyOn(Storage.prototype, 'setItem').and.throwError('quota exceeded');
+    component.consumeLot('lot-1', 1);
+    expect(pantryService.consumeInventoryLot).not.toHaveBeenCalled();
+    expect(component.consumeErrors['lot-1']).toContain('guardar');
+  });
+
+  it('shows when a consume result was safely replayed', () => {
+    pantryService.consumeInventoryLot.and.returnValue(
+      of({
+        value: null,
+        idempotencyKey: '9b29fb9a-ce30-473f-abaf-f8d987634f55',
+        replayed: true,
+      } as any),
+    );
+
+    component.consumeLot('lot-1', 1);
+
+    expect((component as any).consumeNotices['lot-1']).toContain(
+      'ya se había completado',
+    );
   });
 
   it('renders an explicit label for the existing type search input', () => {
@@ -385,7 +484,7 @@ describe('PantryPageComponent', () => {
 
     expect(component.submittingLot).toBeFalse();
     expect(component.registerError).toBe(
-      'La solicitud tardo demasiado. Revisa tu conexion e intenta de nuevo.',
+      'La solicitud tardó demasiado. Revisa tu conexión e intenta de nuevo.',
     );
   }));
 
@@ -674,17 +773,20 @@ describe('PantryPageComponent', () => {
 
     component.closeShoppingTrip([]);
 
-    expect(pantryService.closeShoppingPurchase).toHaveBeenCalledWith({
-      items: [
-        jasmine.objectContaining({
-          productTypeId: 'type-rice',
-          quantity: 2,
-          unit: 'kg',
-          paidUnitPrice: 36,
-          shoppingLocation: 'Mercado',
-        }),
-      ],
-    });
+    expect(pantryService.closeShoppingPurchase).toHaveBeenCalledWith(
+      {
+        items: [
+          jasmine.objectContaining({
+            productTypeId: 'type-rice',
+            quantity: 2,
+            unit: 'kg',
+            paidUnitPrice: 36,
+            shoppingLocation: 'Mercado',
+          }),
+        ],
+      },
+      jasmine.any(String),
+    );
     expect(component.shoppingModeSourceList).toBeNull();
   });
 
@@ -805,6 +907,81 @@ describe('PantryPageComponent', () => {
     expect((component as any).getBudgetStatusLabel(925)).toBe(
       'Sobre presupuesto por 125.00 moneda local',
     );
+  });
+
+  it('formats missing and non-finite shopping prices without throwing', () => {
+    expect(component.formatShoppingPrice(null)).toBe('Sin estimado');
+    expect(component.formatShoppingPrice(Number.NaN)).toBe('Sin estimado');
+    expect(component.formatShoppingPrice(Number.POSITIVE_INFINITY)).toBe(
+      'Sin estimado',
+    );
+  });
+
+  it('keeps all local shopping state isolated when another account opens the pantry', () => {
+    const item = makeShoppingPlanItem();
+    component.saveShoppingBudget(800);
+    component.quickCaptureForm.setValue({ rawText: 'Arroz | 2 kg' });
+    component.saveQuickCaptureDraft();
+    (component as any).ensureShoppingTripDraft([item]);
+    component.updateShoppingTripChecked(item, {
+      target: { checked: true },
+    } as unknown as Event);
+    component.shoppingModeActive = true;
+    component.isOffline = true;
+    component.closeShoppingTrip([item]);
+    pantryService.createSavedShoppingList.and.returnValue(
+      throwError(() => new Error('offline')),
+    );
+    component.savedShoppingListForm.patchValue({ title: 'Lista de A' });
+    component.saveShoppingListSnapshot([item]);
+
+    expect(component.pendingShoppingCheckoutCount).toBe(1);
+    expect(component.savedShoppingLists.length).toBe(1);
+
+    fixture.destroy();
+    authFacade.setCurrentUser(makeAuthUser('user-b'));
+    spyOnProperty(window.navigator, 'onLine', 'get').and.returnValue(false);
+    pantryService.closeShoppingPurchase.calls.reset();
+    fixture = TestBed.createComponent(PantryPageComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+
+    expect(component.shoppingBudget).toBeNull();
+    expect(component.quickCaptureDrafts).toEqual([]);
+    expect((component as any).shoppingTripDraft).toEqual({});
+    expect(component.pendingShoppingCheckoutCount).toBe(0);
+    expect(component.savedShoppingLists).toEqual([]);
+    expect(pantryService.closeShoppingPurchase).not.toHaveBeenCalled();
+  });
+
+  it('migrates only legacy saved lists that identify the current owner', () => {
+    fixture.destroy();
+    localStorage.setItem(
+      'despensalista.savedShoppingLists',
+      JSON.stringify([
+        makeStoredShoppingList('list-owned', 'Propia', 'tester'),
+        makeStoredShoppingList('list-foreign', 'Ajena', 'user-b'),
+        makeStoredShoppingList('list-unowned', 'Sin propietario'),
+      ]),
+    );
+
+    fixture = TestBed.createComponent(PantryPageComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+
+    expect(component.savedShoppingLists.map((list) => list.title)).toEqual([
+      'Propia',
+    ]);
+
+    fixture.destroy();
+    localStorage.removeItem('despensalista.savedShoppingLists');
+    fixture = TestBed.createComponent(PantryPageComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+
+    expect(component.savedShoppingLists.map((list) => list.title)).toEqual([
+      'Propia',
+    ]);
   });
 
   it('parses quick capture lines for offline purchase drafts', () => {
@@ -1486,8 +1663,27 @@ describe('PantryPageComponent', () => {
     expect(component.deleteConfirmationTarget).toBeNull();
   });
 
+  it('keeps shopping mode open when an offline checkout cannot be persisted', () => {
+    const item = makeShoppingPlanItem();
+    component.isOffline = true;
+    component.shoppingModeActive = true;
+    (component as any).ensureShoppingTripDraft([item]);
+    component.updateShoppingTripChecked(item, {
+      target: { checked: true },
+    } as unknown as Event);
+    spyOn(Storage.prototype, 'setItem').and.throwError('quota exceeded');
+
+    component.closeShoppingTrip([item]);
+
+    expect(component.shoppingModeActive).toBeTrue();
+    expect(component.shoppingCheckoutStatus).toContain(
+      'No se pudo guardar el cierre',
+    );
+    expect(component.pendingShoppingCheckoutCount).toBe(0);
+    expect(pantryService.closeShoppingPurchase).not.toHaveBeenCalled();
+  });
+
   it('queues a selected shopping checkout while offline and syncs it later', () => {
-    localStorage.removeItem('despensalista.pendingShoppingCheckouts');
     const item = makeShoppingPlanItem();
 
     component.isOffline = true;
@@ -1500,72 +1696,197 @@ describe('PantryPageComponent', () => {
 
     expect(pantryService.closeShoppingPurchase).not.toHaveBeenCalled();
     expect(component.shoppingModeActive).toBeFalse();
-    expect(
-      JSON.parse(
-        localStorage.getItem('despensalista.pendingShoppingCheckouts') ?? '[]',
-      )[0].items[0],
-    ).toEqual(
-      jasmine.objectContaining({
-        productTypeId: 'type-detergent',
-        quantity: 1,
-        unit: 'lt',
-      }),
-    );
+    expect(component.pendingShoppingCheckoutCount).toBe(1);
 
     component.isOffline = false;
     (component as any).flushPendingShoppingCheckouts();
 
-    expect(pantryService.closeShoppingPurchase).toHaveBeenCalledWith({
-      items: [
-        jasmine.objectContaining({
-          productTypeId: 'type-detergent',
-          quantity: 1,
-          unit: 'lt',
-        }),
-      ],
-    });
+    expect(pantryService.closeShoppingPurchase).toHaveBeenCalledWith(
+      {
+        items: [
+          jasmine.objectContaining({
+            productTypeId: 'type-detergent',
+            quantity: 1,
+            unit: 'lt',
+          }),
+        ],
+      },
+      jasmine.any(String),
+    );
+    expect(component.pendingShoppingCheckoutCount).toBe(0);
+  });
+
+  it('reuses the persisted checkout idempotency key after a failed sync', () => {
+    const item = makeShoppingPlanItem();
+    component.isOffline = true;
+    (component as any).ensureShoppingTripDraft([item]);
+    component.updateShoppingTripChecked(item, {
+      target: { checked: true },
+    } as unknown as Event);
+    component.closeShoppingTrip([item]);
+
+    pantryService.closeShoppingPurchase.and.returnValue(
+      throwError(() => new TimeoutError()),
+    );
+    component.isOffline = false;
+    (component as any).flushPendingShoppingCheckouts();
+    const firstKey = (pantryService.closeShoppingPurchase.calls.argsFor(0) as any[])[1] as
+      | string
+      | undefined;
+
+    expect(firstKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+
+    pantryService.closeShoppingPurchase.and.returnValue(of(makeCheckoutResult()));
+    (component as any).flushPendingShoppingCheckouts();
+
+    expect((pantryService.closeShoppingPurchase.calls.argsFor(1) as any[])[1]).toBe(
+      firstKey,
+    );
+  });
+
+  it('rejects a checkout larger than the atomic limit of 49 lines', () => {
+    const items = Array.from({ length: 50 }, (_, index) =>
+      makeShoppingPlanItem({ productTypeId: `type-${index}` }),
+    );
+    component.setShoppingTripItemsChecked(items, true);
+
+    component.closeShoppingTrip(items);
+
+    expect(pantryService.closeShoppingPurchase).not.toHaveBeenCalled();
+    expect(component.shoppingCheckoutStatus).toContain('máximo 49');
+  });
+
+  it('reuses the key when manually retrying an unresolved online checkout', () => {
+    const item = makeShoppingPlanItem();
+    component.setShoppingTripItemsChecked([item], true);
+    pantryService.closeShoppingPurchase.and.returnValue(throwError(() => new TimeoutError()));
+    component.closeShoppingTrip([item]);
+    const firstKey = pantryService.closeShoppingPurchase.calls.argsFor(0)[1];
+    component.closeShoppingTrip([item]);
+    expect(pantryService.closeShoppingPurchase.calls.argsFor(1)[1]).toBe(firstKey);
+    expect(component.pendingShoppingCheckoutCount).toBe(1);
+  });
+
+  it('does not automatically replay purchases after the seven-day receipt window', () => {
+    const item = makeShoppingPlanItem();
+    component.isOffline = true;
+    component.setShoppingTripItemsChecked([item], true);
+    component.closeShoppingTrip([item]);
+    const pending = (component as any).loadPendingShoppingCheckouts();
+    pending[0].createdAt = new Date(Date.now() - 8 * 86400000);
+    (component as any).persistPendingShoppingCheckouts(pending);
+    component.isOffline = false;
+    (component as any).flushPendingShoppingCheckouts();
+    expect(pantryService.closeShoppingPurchase).not.toHaveBeenCalled();
+    expect(component.pendingShoppingCheckoutCount).toBe(1);
+    expect(component.shoppingCheckoutStatus).toContain('siete días');
   });
 
   it('does not start parallel pending checkout syncs', () => {
-    const pendingRequest = new Subject<InventoryLot[]>();
-    pantryService.closeShoppingPurchase.and.returnValue(pendingRequest);
-    localStorage.setItem(
-      'despensalista.pendingShoppingCheckouts',
-      JSON.stringify([
-        {
-          id: 'checkout-1',
-          createdAt: new Date().toISOString(),
-          items: [
-            {
-              productTypeId: 'type-detergent',
-              quantity: 1,
-              unit: 'lt',
-            },
-          ],
-        },
-      ]),
-    );
+    const item = makeShoppingPlanItem();
+    const pendingRequest = new Subject<ReturnType<typeof makeCheckoutResult>>();
+    component.isOffline = true;
+    (component as any).ensureShoppingTripDraft([item]);
+    component.updateShoppingTripChecked(item, {
+      target: { checked: true },
+    } as unknown as Event);
+    component.closeShoppingTrip([item]);
 
+    pantryService.closeShoppingPurchase.and.returnValue(pendingRequest);
     component.isOffline = false;
     (component as any).flushPendingShoppingCheckouts();
     (component as any).flushPendingShoppingCheckouts();
 
     expect(pantryService.closeShoppingPurchase).toHaveBeenCalledTimes(1);
 
-    pendingRequest.next([makeInventoryLot()]);
+    pendingRequest.next(makeCheckoutResult([makeInventoryLot()]));
     pendingRequest.complete();
 
-    expect(
-      localStorage.getItem('despensalista.pendingShoppingCheckouts'),
-    ).toBeNull();
+    expect(component.pendingShoppingCheckoutCount).toBe(0);
   });
 });
 
+function makeConsumeResult(
+  value: InventoryLot | null = null,
+  replayed = false,
+) {
+  return {
+    value,
+    idempotencyKey: '9b29fb9a-ce30-473f-abaf-f8d987634f55',
+    replayed,
+  };
+}
+
+function makeCheckoutResult(
+  value: InventoryLot[] = [],
+  replayed = false,
+) {
+  return {
+    value,
+    idempotencyKey: 'fb5b1163-9dc5-4db4-b181-9f036f31bd08',
+    replayed,
+  };
+}
+
 class AuthFacadeStub {
+  readonly currentUser$ = new BehaviorSubject<AuthUser | null>(
+    makeAuthUser('tester'),
+  );
   readonly currentUsername$ = of('tester');
+
+  setCurrentUser(user: AuthUser): void {
+    this.currentUser$.next(user);
+  }
 
   logout(): void {
     // no-op
+  }
+}
+
+function makeAuthUser(id: string): AuthUser {
+  return {
+    id,
+    email: `${id}@example.com`,
+    username: id,
+    status: 'active',
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+  };
+}
+
+function makeStoredShoppingList(
+  id: string,
+  title: string,
+  ownerUserId?: string,
+): Record<string, unknown> {
+  return {
+    id,
+    ownerUserId,
+    title,
+    createdAt: '2026-06-09T00:00:00.000Z',
+    updatedAt: '2026-06-09T00:00:00.000Z',
+    items: [],
+  };
+}
+
+function clearPantryLocalState(): void {
+  const pantryStoragePrefixes = [
+    'despensalista.shoppingBudget',
+    'despensalista.quickCaptureDrafts',
+    'despensalista.shoppingTripDraft',
+    'despensalista.pendingShoppingCheckouts',
+    'despensalista.pendingInventoryMutations',
+    'despensalista.savedShoppingLists',
+  ];
+
+  for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+    const key = localStorage.key(index);
+
+    if (key && pantryStoragePrefixes.some((prefix) => key.startsWith(prefix))) {
+      localStorage.removeItem(key);
+    }
   }
 }
 

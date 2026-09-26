@@ -6,6 +6,14 @@ import {
 } from '../entities/household.entity';
 
 export interface HouseholdRepository {
+  createHouseholdWithOwner(
+    household: Household,
+    membership: HouseholdMembership,
+  ): Promise<HouseholdMembership>;
+  acceptInvite(
+    invite: HouseholdInvite,
+    membership: HouseholdMembership,
+  ): Promise<HouseholdMembership>;
   saveHousehold(household: Household): Promise<Household>;
   saveMembership(membership: HouseholdMembership): Promise<HouseholdMembership>;
   saveInvite(invite: HouseholdInvite): Promise<HouseholdInvite>;
@@ -28,5 +36,16 @@ export interface HouseholdRepository {
     householdId: string,
     limit: number,
   ): Promise<HouseholdActivity[]>;
+  deleteAccountHouseholdData(
+    householdId: string,
+    userId: string,
+    email: string,
+  ): Promise<void>;
+  // Locks new household writes before deletion. False leaves the household open
+  // when other members still exist; a successful lock can be retried after failure.
+  beginHouseholdDeletion(
+    householdId: string,
+    ownerUserId: string,
+  ): Promise<boolean>;
   deleteHouseholdCascade(householdId: string): Promise<void>;
 }

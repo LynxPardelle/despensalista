@@ -10,12 +10,10 @@ export interface ProductFilter {
 }
 
 export interface ProductRepository {
-  save(product: Product): Promise<Product>;
   findById(id: ProductId): Promise<Product | null>;
   findByUserId(userId: UserId): Promise<Product[]>;
   findByCategory(category: ProductCategory): Promise<Product[]>;
   findByStatus(status: ProductStatus): Promise<Product[]>;
-  reassignUserOwnership(fromUserId: UserId, toUserId: UserId): Promise<number>;
-  delete(id: ProductId): Promise<void>;
+  deleteByUserId(userId: UserId): Promise<number>;
   findAll(filter?: ProductFilter): Promise<Product[]>;
 }

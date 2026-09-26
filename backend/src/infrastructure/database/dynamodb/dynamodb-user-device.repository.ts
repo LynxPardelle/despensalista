@@ -1,10 +1,11 @@
 import {
   DeleteCommand,
   GetCommand,
-  PutCommand,
   QueryCommand,
+  ScanCommand,
+  TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   UserDevice,
@@ -40,12 +41,38 @@ export class DynamoDbUserDeviceRepository implements UserDeviceRepository {
   async save(device: UserDevice): Promise<UserDevice> {
     const item = this.toItem(device.toPrimitives());
 
-    await this.dynamoDb.send(
-      new PutCommand({
-        TableName: this.tableName,
-        Item: item,
-      }),
-    );
+    const now = new Date().toISOString();
+    try {
+      await this.dynamoDb.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              ConditionCheck: {
+                TableName: this.tableName,
+                Key: { pk: userKey(device.userId.toString()) },
+                ConditionExpression:
+                  '#entityType = :user AND #status = :active AND (attribute_not_exists(deletionFenceExpiresAt) OR deletionFenceExpiresAt <= :now)',
+                ExpressionAttributeNames: {
+                  '#entityType': 'entityType',
+                  '#status': 'status',
+                },
+                ExpressionAttributeValues: {
+                  ':user': 'USER',
+                  ':active': 'active',
+                  ':now': now,
+                },
+              },
+            },
+            { Put: { TableName: this.tableName, Item: item } },
+          ],
+        }),
+      );
+    } catch (error) {
+      if ((error as Error).name === 'TransactionCanceledException') {
+        throw new UnauthorizedException('Account deletion is in progress');
+      }
+      throw error;
+    }
 
     return this.toDomain(item);
   }
@@ -108,14 +135,14 @@ export class DynamoDbUserDeviceRepository implements UserDeviceRepository {
 
     do {
       const result = await this.dynamoDb.send(
-        new QueryCommand({
+        new ScanCommand({
           TableName: this.tableName,
-          IndexName: 'gsi1',
-          KeyConditionExpression: 'gsi1pk = :gsi1pk',
+          ConsistentRead: true,
+          FilterExpression: 'entityType = :entityType AND userId = :userId',
           ExpressionAttributeValues: {
-            ':gsi1pk': userDeviceIndexKey(userId.toString()),
+            ':entityType': 'USER_DEVICE',
+            ':userId': userId.toString(),
           },
-          ScanIndexForward: false,
           ...(exclusiveStartKey
             ? { ExclusiveStartKey: exclusiveStartKey }
             : {}),
@@ -124,7 +151,9 @@ export class DynamoDbUserDeviceRepository implements UserDeviceRepository {
 
       items.push(
         ...((result.Items ?? []) as UserDeviceItem[]).filter(
-          (item) => item.entityType === 'USER_DEVICE',
+          (item) =>
+            item.entityType === 'USER_DEVICE' &&
+            item.userId === userId.toString(),
         ),
       );
       exclusiveStartKey = result.LastEvaluatedKey as
@@ -166,6 +195,10 @@ export class DynamoDbUserDeviceRepository implements UserDeviceRepository {
 
 function deviceKey(id: string): string {
   return `USER_DEVICE#${id}`;
+}
+
+function userKey(id: string): string {
+  return `USER#${id}`;
 }
 
 function userDeviceIndexKey(userId: string): string {

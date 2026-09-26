@@ -1,6 +1,11 @@
 import { ConfigService } from '@nestjs/config';
-import { DeleteCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  DeleteCommand,
+  QueryCommand,
+  ScanCommand,
+} from '@aws-sdk/lib-dynamodb';
 import { QuantityUnit } from '../../../domain/enums';
+import { ProductTypeId } from '../../../domain/value-objects/product-type-id.vo';
 import { UserId } from '../../../domain/value-objects/user-id.vo';
 import { DynamoDbDocumentClientService } from './dynamodb-document-client.service';
 import { DynamoDbInventoryLotRepository } from './dynamodb-inventory-lot.repository';
@@ -114,6 +119,47 @@ describe('DynamoDbInventoryLotRepository', () => {
       }),
     ).rejects.toThrow('Invalid archived inventory lot cursor');
     expect(dynamoDb.send).not.toHaveBeenCalled();
+  });
+
+  it('strongly scans every page before deleting all lots for a product type', async () => {
+    const firstItem = buildInventoryLotItem('lot-1');
+    const secondItem = buildInventoryLotItem('lot-2');
+    const unrelated = {
+      ...buildInventoryLotItem('keep'),
+      productTypeId: 'other-type',
+    };
+    const dynamoDb = {
+      send: jest
+        .fn()
+        .mockImplementationOnce(async (command: ScanCommand) => {
+          expect(command).toBeInstanceOf(ScanCommand);
+          expect(command.input.ConsistentRead).toBe(true);
+          expect(command.input.IndexName).toBeUndefined();
+          return {
+            Items: [firstItem, unrelated],
+            LastEvaluatedKey: { id: firstItem.id },
+          };
+        })
+        .mockImplementationOnce(async (command: ScanCommand) => {
+          expect(command).toBeInstanceOf(ScanCommand);
+          expect(command.input.ConsistentRead).toBe(true);
+          expect(command.input.ExclusiveStartKey).toEqual({ id: 'lot-1' });
+          return { Items: [secondItem] };
+        })
+        .mockResolvedValue({}),
+    } as unknown as DynamoDbDocumentClientService;
+    const repository = new DynamoDbInventoryLotRepository(
+      dynamoDb,
+      makeConfigService('inventory-lots'),
+    );
+
+    await repository.deleteByProductTypeId(ProductTypeId.fromString('type-1'));
+
+    const deletes = (dynamoDb.send as jest.Mock).mock.calls
+      .map(([command]) => command)
+      .filter((command) => command instanceof DeleteCommand)
+      .map((command: DeleteCommand) => command.input.Key);
+    expect(deletes).toEqual([{ id: 'lot-1' }, { id: 'lot-2' }]);
   });
 });
 

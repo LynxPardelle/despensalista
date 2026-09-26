@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import {
@@ -18,14 +18,44 @@ export class MongoUserDeviceRepository implements UserDeviceRepository {
 
   async save(device: UserDevice): Promise<UserDevice> {
     const primitives = device.toPrimitives();
-    const savedDevice = await this.userDeviceModel
-      .findOneAndUpdate(
-        { id: primitives.id },
-        { $set: primitives },
-        { new: true, upsert: true },
-      )
-      .lean()
-      .exec();
+    const session = await this.userDeviceModel.db.startSession();
+    let savedDevice: UserDevicePrimitives | null = null;
+    try {
+      await session.withTransaction(async () => {
+        const now = new Date();
+        const account = await this.userDeviceModel.db
+          .collection('users')
+          .updateOne(
+            {
+              id: primitives.userId,
+              status: 'active',
+              $or: [
+                { deletionFenceExpiresAt: { $exists: false } },
+                { deletionFenceExpiresAt: { $lte: now } },
+              ],
+            },
+            { $inc: { mutationVersion: 1 } },
+            { session },
+          );
+        if (account.matchedCount !== 1) {
+          throw new UnauthorizedException('Account deletion is in progress');
+        }
+        savedDevice = await this.userDeviceModel
+          .findOneAndUpdate(
+            { id: primitives.id },
+            { $set: primitives },
+            { new: true, upsert: true, session },
+          )
+          .lean()
+          .exec();
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (!savedDevice) {
+      throw new UnauthorizedException('Account deletion is in progress');
+    }
 
     return this.toDomain(savedDevice);
   }

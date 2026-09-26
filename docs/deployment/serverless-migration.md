@@ -2,6 +2,10 @@
 
 Date: 2026-07-09 Central Time
 
+> **HISTORICAL SNAPSHOT.** This records the original July migration cut. The
+> current deployment, promotion, IAM, and rollback procedure is
+> `docs/operations/production-runbook.md`.
+
 ## Source Pattern
 
 This migration follows the portfolio AWS flow:
@@ -35,13 +39,10 @@ Each GitHub Environment needs:
 - `AWS_ROLE_ARN`
 - `AWS_REGION`, usually `us-east-1`
 - `COGNITO_DOMAIN_PREFIX`
-- `FRONTEND_BASE_URL`
+- `APP_DOMAIN_NAME`
 
-Production also requires this so the existing Google provider is not removed by
-a prod stack update:
-
-- `GOOGLE_CLIENT_ID`
-- `GOOGLE_CLIENT_SECRET_NAME`
+The current production workflow preserves Google as an externally managed
+provider. OAuth client secrets are not GitHub deployment variables.
 
 ## Local Commands
 

@@ -1,9 +1,9 @@
 # Despensa Lista
 
-Despensa Lista es un MVP para registrar inventario del hogar por tipo base y por
-lote, con foco en caducidades visibles, durabilidad estimada, consumo
-controlado por lote y una ruta de crecimiento razonable para despliegue
-posterior en Dokploy o AWS.
+Despensa Lista es una aplicacion para registrar inventario del hogar por tipo
+base y por lote, con foco en caducidades, durabilidad, compras y consumo. La
+produccion vigente es serverless en AWS; Docker/MongoDB se conserva para
+desarrollo local y la documentacion de Dokploy es historica.
 
 ## Estado actual
 
@@ -24,11 +24,17 @@ posterior en Dokploy o AWS.
 - Archivado/restauracion de tipos y lotes, con borrado permanente guardado
   detras de confirmacion
 - Consumo explicito por lote, sin seleccion automatica
-- Backend NestJS 11 + Fastify + MongoDB/Mongoose
+- Backend NestJS 11 + Fastify + DynamoDB en produccion
+- MongoDB/Mongoose como adaptador de desarrollo local
 - Frontend Angular 21 + NgRx + SSR
 - Flujo de migracion desde la coleccion legacy `products`
 
 ## Stack
+
+La topologia productiva actual es Route53/ACM -> CloudFront -> S3 privado para
+el frontend y CloudFront `/api` -> API Gateway HTTP API -> Lambda Node.js 22 ->
+DynamoDB para la API. Cognito Managed Login gestiona identidad local y Google.
+El codigo versionado vive en `infra/cognito`.
 
 ### Frontend
 
@@ -88,7 +94,7 @@ Esto levanta:
 - backend en `http://localhost:39173/api`
 - frontend en `http://localhost:48673`
 - volumen persistente nombrado
-- `healthcheck`
+- replica set MongoDB `rs0` de un nodo y `healthcheck` que espera al primario
 - usuario root separado del usuario de aplicacion
 - usuario de aplicacion con permisos `readWrite` solo sobre `despensalista`
 - `restart: unless-stopped` para los tres servicios
@@ -127,6 +133,17 @@ contenedor, tambien sigue siendo valido:
 ```bash
 docker compose --env-file .env.docker.local up -d mongodb
 ```
+
+El replica set se inicializa automáticamente y conserva los datos existentes.
+El keyfile interno se genera en el volumen, con permisos `400`; no se guarda en
+Git. Las compras y consumos usan transacciones, por eso una instancia MongoDB
+standalone ya no es compatible. Dentro de Docker se descubre `mongodb:27017`;
+fuera de Docker usa el `DATABASE_URL` de abajo con `directConnection=true` y
+deja `MONGO_HOST` sin definir. Este nodo único es para desarrollo, no alta
+disponibilidad. Los compose de producción usan DynamoDB y no agregan MongoDB.
+
+Comprueba la inicialización con `docker compose --env-file .env.docker.local ps`
+y el contrato de healthcheck con `node --test docker/mongodb/replica-health.test.mjs`.
 
 ### Solucion de problemas del stack Docker local
 
@@ -171,7 +188,7 @@ Ejemplo de `backend/.env`:
 ```env
 NODE_ENV=development
 PORT=3000
-DATABASE_URL=mongodb://despensalista_app:change-this-app-password@127.0.0.1:37917/despensalista?authSource=despensalista
+DATABASE_URL=mongodb://despensalista_app:change-this-app-password@127.0.0.1:37917/despensalista?authSource=despensalista&replicaSet=rs0&directConnection=true
 DATABASE_NAME=despensalista
 API_PREFIX=api
 CORS_ORIGIN=http://localhost:48673
@@ -388,8 +405,8 @@ Verificacion de replenishment, reglas por tipo y archivado:
 
 ## Seguridad
 
-- El backend usa Fastify y fuerza `fastify@5.8.5` con `overrides` para evitar
-  el advisory que afectaba a `5.8.4`.
+- El backend usa Fastify 5 a traves de NestJS y mantiene el lockfile auditado;
+  no fija una version vulnerable mediante `overrides`.
 - MongoDB en Docker queda expuesto solo en `127.0.0.1:37917`.
 - Las rutas principales de pantry, lotes, tipos base y productos legacy usan
   `AccessTokenGuard` y derivan el usuario desde `@CurrentUser()`, no desde
@@ -399,11 +416,9 @@ Verificacion de replenishment, reglas por tipo y archivado:
   carreras en la ruta normal de la aplicacion.
 - Las estimaciones de durabilidad se calculan dinamicamente al leer el overview
   y no mutan cantidades ni borran lotes de forma automatica.
-- Riesgo residual: el flujo de recuperacion de password usa `LogMailSenderService`
-  en desarrollo; falta integrar un proveedor real de email antes de produccion.
-- Riesgo residual: el skill `audit` pide `/impeccable`, pero ese skill no esta
-  disponible en esta sesion. La auditoria se ejecuto manualmente siguiendo sus
-  criterios verificables.
+- En AWS, Cognito entrega registro y recuperacion con el remitente verificado
+  `no-reply@despensalista.lynxpardelle.com`; mientras SES siga sin acceso de
+  produccion se conserva la cuota administrada de 50 mensajes diarios.
 
 ## Skills evaluadas en esta pasada
 
@@ -421,13 +436,13 @@ Verificacion de replenishment, reglas por tipo y archivado:
   - no se pudo usar porque el wrapper local devolvio el error exacto
     `config profile 'code-reviewer' not found`
 
-## Dokploy
+## Dokploy (legado)
 
-Para Dokploy no hace falta usar el flujo local de desarrollo con `ng serve` y
-watchers. Usa `docker-compose.prod.yml`, que construye imagenes de runtime,
-sirve el frontend SSR en un proceso Node estable y mantiene el backend solo en
-la red interna. Produccion usa DynamoDB administrado por AWS; MongoDB queda para
-desarrollo/local.
+**No ejecutes esta ruta contra AWS.** La produccion actual ya no usa Dokploy, la
+instancia EC2 fue retirada y estos archivos no son un mecanismo de rollback. Se
+conservan como evidencia y para una prueba Compose local aislada. Historicamente,
+`docker-compose.prod.yml` construia imagenes de runtime, servia el frontend SSR
+en un proceso Node estable y mantenia el backend solo en la red interna.
 
 - Backend: configura `PERSISTENCE_PROVIDER=dynamodb`, `AWS_REGION`,
   `DYNAMODB_*_TABLE`, `API_PREFIX`, `CORS_ORIGIN`, `HELMET_ENABLED` y
@@ -436,8 +451,8 @@ desarrollo/local.
   para que el proxy del servidor apunte al backend correcto.
 - Frontend SSR/proxy: el navegador llama `/api` en el mismo dominio del
   frontend; el servidor SSR reenvia esas llamadas a `BACKEND_URL`.
-- Si quieres una topologia de produccion local o una base para Dokploy segun el
-  spec aprobado del `2026-04-23`, usa `docker-compose.prod.yml`.
+- Para una topologia de produccion **solo local** segun el spec del
+  `2026-04-23`, usa `docker-compose.prod.yml`.
 - Ese compose mantiene `frontend` SSR publico, `backend` solo por red interna y
   DynamoDB como persistencia externa.
 - Variables obligatorias para ese flujo: `PERSISTENCE_PROVIDER=dynamodb`,
@@ -452,10 +467,9 @@ desarrollo/local.
 - Variables utiles para override: `DATABASE_NAME`, `FRONTEND_PORT`,
   `CORS_ORIGIN`, `API_PREFIX`, `BACKEND_URL`, `AUTH_COOKIE_SECURE`,
   `AUTH_COOKIE_SAME_SITE` y `AUTH_COOKIE_DOMAIN`.
-- Revisa `docs/deployment/dokploy.md` y copia
-  `.env.production.example` a un archivo local no versionado para pruebas.
-- En la EC2 de Dokploy, agrega `docker-compose.dokploy.yml` al comando de
-  Compose para conectar el frontend a `dokploy-network`.
+- `docs/deployment/dokploy.md` es un archivo historico, no una guia operativa.
+- La referencia a `docker-compose.dokploy.yml` y `dokploy-network` solo explica
+  el host retirado; no recrees una EC2 ni esa red para Despensa Lista.
 - Smoke local de produccion:
 
 ```bash

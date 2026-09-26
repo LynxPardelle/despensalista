@@ -11,6 +11,7 @@ describe('CognitoProfileSyncService', () => {
     findByAuthSubject: jest.fn(),
     findByEmail: jest.fn(),
     findByUsername: jest.fn(),
+    beginAccountDeletion: jest.fn(),
     delete: jest.fn(),
   });
 

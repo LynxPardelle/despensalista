@@ -1,3 +1,4 @@
+import { getUserErrorMessage } from '../../shared/user-error';
 import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
@@ -9,7 +10,7 @@ import {
 import { CommonModule, DOCUMENT, isPlatformBrowser } from '@angular/common';
 import { HttpErrorResponse } from '@angular/common/http';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
-import { ActivatedRoute, RouterModule } from '@angular/router';
+import { ActivatedRoute, Router, RouterModule } from '@angular/router';
 import { finalize } from 'rxjs/operators';
 import { AuthFacade } from '../../core/services/auth.facade';
 import { PantryService } from '../../core/services/pantry.service';
@@ -59,6 +60,7 @@ export class ProfilePageComponent implements OnInit {
   private readonly pantryService = inject(PantryService);
   private readonly authFacade = inject(AuthFacade);
   private readonly route = inject(ActivatedRoute);
+  private readonly router = inject(Router);
   private readonly document = inject(DOCUMENT);
   private readonly platformId = inject(PLATFORM_ID);
   private readonly changeDetector = inject(ChangeDetectorRef);
@@ -227,13 +229,15 @@ export class ProfilePageComponent implements OnInit {
   ngOnInit(): void {
     if (isPlatformBrowser(this.platformId)) {
       this.loadProfile();
-      this.loadHouseholdWorkspace();
       this.loadMonetizationDiscoveryEvents();
       const inviteToken = this.route.snapshot.queryParamMap.get(
         'householdInvite',
       );
       if (inviteToken) {
         this.householdAcceptForm.patchValue({ token: inviteToken });
+        this.acceptHouseholdInvite();
+      } else {
+        this.loadHouseholdWorkspace();
       }
     }
   }
@@ -547,6 +551,7 @@ export class ProfilePageComponent implements OnInit {
   }
 
   acceptHouseholdInvite(): void {
+    if (this.householdAccepting) return;
     if (this.householdAcceptForm.invalid) {
       this.householdAcceptForm.markAllAsTouched();
       this.householdError = 'Pega un token de invitacion valido.';
@@ -571,6 +576,14 @@ export class ProfilePageComponent implements OnInit {
           this.householdWorkspace = workspace;
           this.householdAcceptForm.reset({ token: '' });
           this.householdMessage = 'Invitacion aceptada.';
+          if (this.route.snapshot.queryParamMap.has('householdInvite')) {
+            void this.router.navigate([], {
+              relativeTo: this.route,
+              queryParams: { householdInvite: null },
+              queryParamsHandling: 'merge',
+              replaceUrl: true,
+            });
+          }
           this.changeDetector.markForCheck();
         },
         error: (error) => {
@@ -745,17 +758,7 @@ export class ProfilePageComponent implements OnInit {
   }
 
   private getErrorMessage(error: unknown): string {
-    if (error instanceof HttpErrorResponse) {
-      const apiMessage =
-        typeof error.error?.message === 'string' ? error.error.message : null;
-      return apiMessage ?? error.message;
-    }
-
-    if (error instanceof Error) {
-      return error.message;
-    }
-
-    return 'No se pudo completar la solicitud.';
+    return getUserErrorMessage(error);
   }
 
   private loadMonetizationDiscoveryEvents(): void {

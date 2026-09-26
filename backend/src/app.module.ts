@@ -13,6 +13,7 @@ import {
   COGNITO_USER_ADMIN,
   INVENTORY_LOT_DAO,
   INVENTORY_LOT_REPOSITORY,
+  PANTRY_MUTATION_PORT,
   HOUSEHOLD_REPOSITORY,
   PRODUCT_DAO,
   PRODUCT_REPOSITORY,
@@ -85,6 +86,8 @@ import { CognitoTokenClientService } from './infrastructure/auth/cognito/cognito
 import { CognitoTokenVerifierService } from './infrastructure/auth/cognito/cognito-token-verifier.service';
 import { CognitoUserAdminService } from './infrastructure/auth/cognito/cognito-user-admin.service';
 import { DynamoDbDocumentClientService } from './infrastructure/database/dynamodb/dynamodb-document-client.service';
+import { DynamoDbPantryMutationAdapter } from './infrastructure/database/dynamodb/dynamodb-pantry-mutation.adapter';
+import { MongoPantryMutationAdapter } from './infrastructure/database/mongodb/mongodb-pantry-mutation.adapter';
 import { DynamoDbInventoryLotRepository } from './infrastructure/database/dynamodb/dynamodb-inventory-lot.repository';
 import { DynamoDbHouseholdRepository } from './infrastructure/database/dynamodb/dynamodb-household.repository';
 import { DynamoDbProductRepository } from './infrastructure/database/dynamodb/dynamodb-product.repository';
@@ -215,6 +218,7 @@ const databaseImports = useDynamoDb
 const databaseClassProviders = useDynamoDb
   ? [
       DynamoDbDocumentClientService,
+      DynamoDbPantryMutationAdapter,
       DynamoDbUserDao,
       DynamoDbUserPreferencesDao,
       DynamoDbHouseholdRepository,
@@ -228,6 +232,7 @@ const databaseClassProviders = useDynamoDb
     ]
   : [
       MongoUserDao,
+      MongoPantryMutationAdapter,
       MongoUserPreferencesDao,
       MongoHouseholdRepository,
       MongoProductRepository,
@@ -311,6 +316,10 @@ const wasteEventRepositoryProvider = useDynamoDb
           otherwise: Joi.string().optional(),
         }),
         API_PREFIX: Joi.string().default('api'),
+        ORIGIN_VERIFY_HEADER_NAME: Joi.string()
+          .pattern(/^[a-z0-9-]+$/)
+          .optional(),
+        ORIGIN_VERIFY_HEADER_VALUE: Joi.string().min(16).optional(),
         CORS_ORIGIN: Joi.string().default('http://localhost:4200'),
         HELMET_ENABLED: Joi.string().valid('true', 'false').default('true'),
         RATE_LIMIT_ENABLED: Joi.string().valid('true', 'false').default('true'),
@@ -507,6 +516,12 @@ const wasteEventRepositoryProvider = useDynamoDb
     RevokeShoppingShareUseCase,
     DeleteShoppingListUseCase,
     ...databaseClassProviders,
+    {
+      provide: PANTRY_MUTATION_PORT,
+      useExisting: useDynamoDb
+        ? DynamoDbPantryMutationAdapter
+        : MongoPantryMutationAdapter,
+    },
     {
       provide: USER_DAO,
       useExisting: userDaoProvider,

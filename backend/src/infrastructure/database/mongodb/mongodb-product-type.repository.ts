@@ -9,7 +9,6 @@ import {
   ProductTypePrimitives,
 } from '../../../domain/entities/product-type.entity';
 import {
-  MAX_ACTIVE_PRODUCT_TYPES_PER_USER,
   MAX_ARCHIVED_PANTRY_PAGE_SIZE,
   MAX_ARCHIVED_PRODUCT_TYPES_PER_USER,
   MAX_PRODUCT_TYPE_SEARCH_RESULTS,
@@ -125,7 +124,6 @@ export class MongoProductTypeRepository implements ProductTypeRepository {
     const productTypes = await this.productTypeModel
       .find({ userId: userId.toString(), archivedAt: { $exists: false } })
       .sort({ baseName: 1 })
-      .limit(MAX_ACTIVE_PRODUCT_TYPES_PER_USER)
       .lean()
       .exec();
 
@@ -135,11 +133,17 @@ export class MongoProductTypeRepository implements ProductTypeRepository {
   }
 
   async findArchivedByUserId(userId: UserId): Promise<ProductType[]> {
-    const page = await this.findArchivedPageByUserId(userId, {
-      limit: MAX_ARCHIVED_PRODUCT_TYPES_PER_USER,
-    });
-
-    return page.items;
+    const items: ProductType[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.findArchivedPageByUserId(userId, {
+        limit: MAX_ARCHIVED_PANTRY_PAGE_SIZE,
+        cursor,
+      });
+      items.push(...page.items);
+      cursor = page.nextCursor;
+    } while (cursor);
+    return items;
   }
 
   async findArchivedPageByUserId(

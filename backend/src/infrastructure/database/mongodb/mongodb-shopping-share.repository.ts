@@ -16,19 +16,6 @@ export class MongoShoppingShareRepository implements ShoppingShareRepository {
     private readonly shoppingShareModel: Model<ShoppingShareDocument>,
   ) {}
 
-  async save(share: ShoppingShare): Promise<ShoppingShare> {
-    const primitives = share.toPrimitives();
-    const savedShare = await this.shoppingShareModel
-      .findOneAndUpdate({ id: primitives.id }, primitives, {
-        new: true,
-        upsert: true,
-      })
-      .lean()
-      .exec();
-
-    return this.toDomain(savedShare);
-  }
-
   async findByTokenHash(tokenHash: string): Promise<ShoppingShare | null> {
     const share = await this.shoppingShareModel
       .findOne({ tokenHash })

@@ -1,0 +1,21 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowOnlyDespensaListaProductionCognito",
+      "Effect": "Allow",
+      "Principal": { "Service": "email.cognito-idp.amazonaws.com" },
+      "Action": ["ses:SendEmail", "ses:SendRawEmail"],
+      "Resource": "arn:aws:ses:us-east-1:765932874577:identity/despensalista.lynxpardelle.com",
+      "Condition": {
+        "StringEquals": {
+          "aws:SourceAccount": "765932874577",
+          "ses:FromAddress": "no-reply@despensalista.lynxpardelle.com"
+        },
+        "ArnEquals": {
+          "aws:SourceArn": "arn:aws:cognito-idp:us-east-1:765932874577:userpool/us-east-1_BmNImLALI"
+        }
+      }
+    }
+  ]
+}

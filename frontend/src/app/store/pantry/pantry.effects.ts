@@ -1,3 +1,4 @@
+import { getUserErrorMessage } from '../../shared/user-error';
 import { inject, Injectable } from '@angular/core';
 import { HttpErrorResponse } from '@angular/common/http';
 import { Actions, createEffect, ofType } from '@ngrx/effects';
@@ -30,16 +31,6 @@ export class PantryEffects {
   );
 
   private getErrorMessage(error: unknown): string {
-    if (error instanceof HttpErrorResponse) {
-      const apiMessage =
-        typeof error.error?.message === 'string' ? error.error.message : null;
-      return apiMessage ?? error.message;
-    }
-
-    if (error instanceof Error) {
-      return error.message;
-    }
-
-    return 'No se pudo cargar la despensa.';
+    return getUserErrorMessage(error);
   }
 }

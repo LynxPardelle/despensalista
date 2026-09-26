@@ -1,5 +1,7 @@
+import { makePantryMutationMock } from '../ports/pantry-mutation.mock';
 import { BadRequestException } from '@nestjs/common';
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
+import { ProductRepository } from '../../domain/repositories/product.repository';
 import { InventoryLotRepository } from '../../domain/repositories/inventory-lot.repository';
 import { ShoppingListRepository } from '../../domain/repositories/shopping-list.repository';
 import { ShoppingShareRepository } from '../../domain/repositories/shopping-share.repository';
@@ -8,10 +10,32 @@ import { UserId } from '../../domain/value-objects/user-id.vo';
 import { DeletePantryDataUseCase } from './delete-pantry-data.use-case';
 
 describe('DeletePantryDataUseCase', () => {
+  it('retains a one-day mutation tombstone for account deletion but not normal pantry reset', async () => {
+    const { useCase, pantryMutationPort } = makeUseCase();
+    const now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      await useCase.execute({
+        userId: 'user-1',
+        confirmationText: 'ELIMINAR',
+        accountDeletion: true,
+      });
+      expect(
+        pantryMutationPort.completePantryDeletion,
+      ).toHaveBeenLastCalledWith('user-1', new Date(now + 24 * 60 * 60 * 1000));
+      await useCase.execute({ userId: 'user-1', confirmationText: 'ELIMINAR' });
+      expect(
+        pantryMutationPort.completePantryDeletion,
+      ).toHaveBeenLastCalledWith('user-1', undefined);
+    } finally {
+      clock.mockRestore();
+    }
+  });
   it('requires explicit confirmation before deleting all pantry data for a user', async () => {
     const {
       useCase,
       productTypeRepository,
+      productRepository,
       inventoryLotRepository,
       shoppingListRepository,
       shoppingShareRepository,
@@ -25,16 +49,18 @@ describe('DeletePantryDataUseCase', () => {
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(productTypeRepository.deleteByUserId).not.toHaveBeenCalled();
+    expect(productRepository.deleteByUserId).not.toHaveBeenCalled();
     expect(inventoryLotRepository.deleteByUserId).not.toHaveBeenCalled();
     expect(shoppingListRepository.deleteByOwnerUserId).not.toHaveBeenCalled();
     expect(shoppingShareRepository.deleteByOwnerUserId).not.toHaveBeenCalled();
     expect(wasteEventRepository.deleteByUserId).not.toHaveBeenCalled();
   });
 
-  it('deletes saved lists and share links before inventory lots and product types', async () => {
+  it('deletes saved lists, inventory data, product types, and legacy products', async () => {
     const {
       useCase,
       productTypeRepository,
+      productRepository,
       inventoryLotRepository,
       shoppingListRepository,
       shoppingShareRepository,
@@ -72,6 +98,9 @@ describe('DeletePantryDataUseCase', () => {
       UserId.fromString('user-1'),
     );
     expect(productTypeRepository.deleteByUserId).toHaveBeenCalledWith(
+      UserId.fromString('user-1'),
+    );
+    expect(productRepository.deleteByUserId).toHaveBeenCalledWith(
       UserId.fromString('user-1'),
     );
     expect(
@@ -115,6 +144,9 @@ function makeUseCase(
   const productTypeRepository = {
     deleteByUserId: jest.fn().mockResolvedValue(counts.deletedProductTypeCount),
   } as unknown as jest.Mocked<ProductTypeRepository>;
+  const productRepository = {
+    deleteByUserId: jest.fn().mockResolvedValue(6),
+  } as unknown as jest.Mocked<ProductRepository>;
   const inventoryLotRepository = {
     deleteByUserId: jest
       .fn()
@@ -133,21 +165,26 @@ function makeUseCase(
   const wasteEventRepository = {
     deleteByUserId: jest.fn().mockResolvedValue(counts.deletedWasteEventCount),
   } as unknown as jest.Mocked<WasteEventRepository>;
+  const pantryMutationPort = makePantryMutationMock();
   const useCase = new DeletePantryDataUseCase(
     productTypeRepository,
     inventoryLotRepository,
     shoppingShareRepository,
     shoppingListRepository,
     wasteEventRepository,
+    productRepository,
+    pantryMutationPort,
   );
 
   return {
     useCase,
     productTypeRepository,
+    productRepository,
     inventoryLotRepository,
     shoppingListRepository,
     shoppingShareRepository,
     wasteEventRepository,
+    pantryMutationPort,
   };
 }
 

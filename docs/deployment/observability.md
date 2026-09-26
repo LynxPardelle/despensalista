@@ -22,7 +22,11 @@ The snapshot includes request counts, error counts, slow-request counts, average
 
 ## Current Limitations
 
-- No external alert destination is wired yet.
-- No durable metrics backend is configured yet.
-- Route snapshots are process-local and restart-local.
-- The next observability step should connect these signals to the chosen production monitoring stack.
+- This optional `/api/metrics` snapshot has no external exporter or durable
+  backend; its route aggregates are process-local and reset with Lambda.
+- It is not the production alert path. The versioned serverless stack uses
+  bounded CloudWatch API/Lambda logs and four standard production alarms; SNS
+  delivery still requires an operator to confirm a real subscription.
+- Public availability is checked by the hourly GitHub smoke instead of paid
+  CloudWatch Synthetics. See `docs/operations/production-runbook.md` for the
+  current controls and cost boundary.

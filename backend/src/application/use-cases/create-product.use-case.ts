@@ -1,19 +1,19 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { Product } from '../../domain/entities/product.entity';
-import { ProductRepository } from '../../domain/repositories/product.repository';
 import { SchedulingService } from '../../domain/services/scheduling.service';
 import { UserId } from '../../domain/value-objects/user-id.vo';
 import { UsageRate } from '../../domain/value-objects/usage-rate.vo';
 import { QuantityUnit, ProductCategory } from '../../domain/enums';
 import { Period } from '../../domain/enums/period.enum';
 import { CreateProductCommand } from '../ports/commands/create-product.command';
-import { PRODUCT_REPOSITORY, SCHEDULING_SERVICE } from '../tokens';
+import { PANTRY_MUTATION_PORT, SCHEDULING_SERVICE } from '../tokens';
+import { PantryMutationPort } from '../ports/pantry-mutation.port';
 
 @Injectable()
 export class CreateProductUseCase {
   constructor(
-    @Inject(PRODUCT_REPOSITORY)
-    private readonly productRepository: ProductRepository,
+    @Inject(PANTRY_MUTATION_PORT)
+    private readonly pantryMutationPort: PantryMutationPort,
     @Inject(SCHEDULING_SERVICE)
     private readonly schedulingService: SchedulingService,
   ) {}
@@ -46,6 +46,6 @@ export class CreateProductUseCase {
     product.calculateNextPurchaseDate(this.schedulingService);
 
     // Persistir
-    return await this.productRepository.save(product);
+    return this.pantryMutationPort.createProduct(product);
   }
 }

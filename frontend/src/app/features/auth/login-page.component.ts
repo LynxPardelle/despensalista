@@ -56,7 +56,7 @@ export class LoginPageComponent implements OnInit {
   getLoginRedirectStatusMessage(): string {
     return `Abriendo ${this.getProviderDisplayName(
       this.pendingProvider ?? 'COGNITO',
-    )} en el flujo seguro de Cognito.`;
+    )} para iniciar sesión.`;
   }
 
   hasSocialProviders(options: LoginProviderOption[]): boolean {
@@ -82,7 +82,7 @@ export class LoginPageComponent implements OnInit {
     const labels: Record<string, string> = {
       Google: 'Entrar con Google',
       Facebook: 'Entrar con Facebook',
-      COGNITO: 'Entrar con correo en Cognito',
+      COGNITO: 'Entrar con correo',
     };
 
     return labels[provider] ?? `Entrar con ${provider}`;
@@ -92,7 +92,7 @@ export class LoginPageComponent implements OnInit {
     const labels: Record<string, string> = {
       Google: 'Google',
       Facebook: 'Facebook',
-      COGNITO: 'Cognito',
+      COGNITO: 'correo',
     };
 
     return labels[provider] ?? provider;
@@ -103,7 +103,7 @@ export class LoginPageComponent implements OnInit {
       cognito_state:
         'El inicio de sesion caduco o se abrio otro intento. Vuelve a elegir tu proveedor.',
       cognito_callback:
-        'Cognito no devolvio una respuesta completa. Vuelve a iniciar sesion.',
+        'No recibimos la confirmación de acceso. Vuelve a iniciar sesión.',
     };
 
     return error

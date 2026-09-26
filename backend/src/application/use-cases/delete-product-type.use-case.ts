@@ -9,7 +9,12 @@ import { InventoryLotRepository } from '../../domain/repositories/inventory-lot.
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
 import { ProductTypeId } from '../../domain/value-objects/product-type-id.vo';
 import { UserId } from '../../domain/value-objects/user-id.vo';
-import { INVENTORY_LOT_REPOSITORY, PRODUCT_TYPE_REPOSITORY } from '../tokens';
+import {
+  INVENTORY_LOT_REPOSITORY,
+  PRODUCT_TYPE_REPOSITORY,
+  PANTRY_MUTATION_PORT,
+} from '../tokens';
+import { PantryMutationPort } from '../ports/pantry-mutation.port';
 
 export interface DeleteProductTypeCommand {
   productTypeId: string;
@@ -24,6 +29,8 @@ export class DeleteProductTypeUseCase {
     private readonly productTypeRepository: ProductTypeRepository,
     @Inject(INVENTORY_LOT_REPOSITORY)
     private readonly inventoryLotRepository: InventoryLotRepository,
+    @Inject(PANTRY_MUTATION_PORT)
+    private readonly pantryMutationPort: PantryMutationPort,
   ) {}
 
   async execute(command: DeleteProductTypeCommand): Promise<void> {
@@ -44,8 +51,16 @@ export class DeleteProductTypeUseCase {
       throw new BadRequestException((error as Error).message);
     }
 
+    await this.pantryMutationPort.beginProductTypeDeletion(productType);
+    const lots = await this.inventoryLotRepository.findByProductTypeId(
+      productType.id,
+    );
+    for (const lot of lots)
+      await this.pantryMutationPort.deleteInventoryLot(lot);
+    // Sweep archived/legacy lots first so a failed cleanup leaves the type as
+    // a durable retry anchor instead of producing unreachable orphan records.
     await this.inventoryLotRepository.deleteByProductTypeId(productType.id);
-    await this.productTypeRepository.delete(productType.id);
+    await this.pantryMutationPort.deleteProductType(productType);
   }
 
   private async findOwnedProductType(
