@@ -42,9 +42,18 @@ interface MonetizationDiscoveryEvent {
   createdAt: string;
 }
 
+interface PendingPantryDeletionIdempotencyKey {
+  ownerUserId: string;
+  key: string;
+  createdAt: string;
+}
+
 const MONETIZATION_EVENTS_STORAGE_KEY =
   'despensalista.monetizationDiscoveryEvents.v1';
 const MONETIZATION_EVENT_LIMIT = 20;
+const PANTRY_DELETION_IDEMPOTENCY_KEY_STORAGE_KEY =
+  'despensalista.pendingPantryDeletionIdempotencyKey.v1';
+const PANTRY_DELETION_IDEMPOTENCY_KEY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Component({
   selector: 'app-profile-page',
@@ -94,6 +103,8 @@ export class ProfilePageComponent implements OnInit {
   monetizationEvents: MonetizationDiscoveryEvent[] = [];
   monetizationStatus: string | null = null;
   monetizationError: string | null = null;
+  private pendingPantryDeletionIdempotencyKey: PendingPantryDeletionIdempotencyKey | null =
+    null;
 
   readonly monetizationPlans: MonetizationPlan[] = [
     {
@@ -230,9 +241,8 @@ export class ProfilePageComponent implements OnInit {
     if (isPlatformBrowser(this.platformId)) {
       this.loadProfile();
       this.loadMonetizationDiscoveryEvents();
-      const inviteToken = this.route.snapshot.queryParamMap.get(
-        'householdInvite',
-      );
+      const inviteToken =
+        this.route.snapshot.queryParamMap.get('householdInvite');
       if (inviteToken) {
         this.householdAcceptForm.patchValue({ token: inviteToken });
         this.acceptHouseholdInvite();
@@ -358,12 +368,21 @@ export class ProfilePageComponent implements OnInit {
       return;
     }
 
+    let idempotencyKey: string;
+    try {
+      idempotencyKey = this.getOrCreatePantryDeletionIdempotencyKey();
+    } catch (error) {
+      this.deleteError = this.getErrorMessage(error);
+      this.deleteMessage = null;
+      return;
+    }
+
     this.deletingPantryData = true;
     this.deleteError = null;
     this.deleteMessage = null;
 
     this.profileService
-      .deletePantryData({ confirmationText })
+      .deletePantryData({ confirmationText }, idempotencyKey)
       .pipe(
         finalize(() => {
           this.deletingPantryData = false;
@@ -372,6 +391,7 @@ export class ProfilePageComponent implements OnInit {
       )
       .subscribe({
         next: (result) => {
+          this.clearPantryDeletionIdempotencyKey(idempotencyKey);
           this.deletePantryDataForm.reset({ confirmationText: '' });
           this.deleteMessage = `Datos eliminados: ${result.deletedInventoryLotCount} lotes, ${result.deletedProductTypeCount} tipos base, ${result.deletedShoppingListCount} listas guardadas, ${result.deletedShoppingShareCount} enlaces compartidos y ${result.deletedWasteEventCount} eventos de merma.`;
           this.changeDetector.markForCheck();
@@ -388,7 +408,8 @@ export class ProfilePageComponent implements OnInit {
       this.deleteAccountForm.controls.confirmationText.value.trim();
 
     if (confirmationText !== 'ELIMINAR CUENTA') {
-      this.deleteAccountError = 'Escribe ELIMINAR CUENTA para borrar la cuenta.';
+      this.deleteAccountError =
+        'Escribe ELIMINAR CUENTA para borrar la cuenta.';
       return;
     }
 
@@ -702,10 +723,10 @@ export class ProfilePageComponent implements OnInit {
     };
 
     const previousEvents = this.monetizationEvents;
-    this.monetizationEvents = [
-      event,
-      ...this.monetizationEvents,
-    ].slice(0, MONETIZATION_EVENT_LIMIT);
+    this.monetizationEvents = [event, ...this.monetizationEvents].slice(
+      0,
+      MONETIZATION_EVENT_LIMIT,
+    );
 
     try {
       this.persistMonetizationDiscoveryEvents();
@@ -761,6 +782,127 @@ export class ProfilePageComponent implements OnInit {
     return getUserErrorMessage(error);
   }
 
+  private getOrCreatePantryDeletionIdempotencyKey(): string {
+    const ownerUserId = this.profile?.id;
+    if (!ownerUserId) {
+      throw new Error(
+        'No se pudo identificar la cuenta que solicita el borrado.',
+      );
+    }
+    if (
+      this.pendingPantryDeletionIdempotencyKey?.ownerUserId === ownerUserId &&
+      this.isCurrentPantryDeletionIdempotencyKey(
+        this.pendingPantryDeletionIdempotencyKey,
+      )
+    ) {
+      return this.pendingPantryDeletionIdempotencyKey.key;
+    }
+
+    const storage = this.document.defaultView?.localStorage;
+    if (!storage) {
+      throw new Error(
+        'No se puede conservar el identificador seguro del borrado en este navegador.',
+      );
+    }
+
+    const persisted = this.parsePantryDeletionIdempotencyKey(
+      storage.getItem(PANTRY_DELETION_IDEMPOTENCY_KEY_STORAGE_KEY),
+    );
+    if (
+      persisted?.ownerUserId === ownerUserId &&
+      this.isCurrentPantryDeletionIdempotencyKey(persisted)
+    ) {
+      this.pendingPantryDeletionIdempotencyKey = persisted;
+      return persisted.key;
+    }
+
+    const pending = {
+      ownerUserId,
+      key: this.createIdempotencyKey(),
+      createdAt: new Date().toISOString(),
+    };
+    storage.setItem(
+      PANTRY_DELETION_IDEMPOTENCY_KEY_STORAGE_KEY,
+      JSON.stringify(pending),
+    );
+    this.pendingPantryDeletionIdempotencyKey = pending;
+    return pending.key;
+  }
+
+  private clearPantryDeletionIdempotencyKey(idempotencyKey: string): void {
+    const storage = this.document.defaultView?.localStorage;
+    const persisted = this.parsePantryDeletionIdempotencyKey(
+      storage?.getItem(PANTRY_DELETION_IDEMPOTENCY_KEY_STORAGE_KEY) ?? null,
+    );
+    if (persisted?.key === idempotencyKey) {
+      storage?.removeItem(PANTRY_DELETION_IDEMPOTENCY_KEY_STORAGE_KEY);
+    }
+    if (this.pendingPantryDeletionIdempotencyKey?.key === idempotencyKey) {
+      this.pendingPantryDeletionIdempotencyKey = null;
+    }
+  }
+
+  private parsePantryDeletionIdempotencyKey(
+    raw: string | null,
+  ): PendingPantryDeletionIdempotencyKey | null {
+    if (!raw) {
+      return null;
+    }
+    try {
+      const value: unknown = JSON.parse(raw);
+      if (!value || typeof value !== 'object') {
+        return null;
+      }
+      const pending = value as Partial<PendingPantryDeletionIdempotencyKey>;
+      return typeof pending.ownerUserId === 'string' &&
+        typeof pending.key === 'string' &&
+        this.isUuid(pending.key) &&
+        typeof pending.createdAt === 'string'
+        ? (pending as PendingPantryDeletionIdempotencyKey)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private isCurrentPantryDeletionIdempotencyKey(
+    pending: PendingPantryDeletionIdempotencyKey,
+  ): boolean {
+    const age = Date.now() - new Date(pending.createdAt).getTime();
+    return (
+      Number.isFinite(age) &&
+      age >= 0 &&
+      age < PANTRY_DELETION_IDEMPOTENCY_KEY_TTL_MS
+    );
+  }
+
+  private createIdempotencyKey(): string {
+    const crypto = this.document.defaultView?.crypto;
+    if (!crypto) {
+      throw new Error(
+        'Este navegador no permite crear un identificador seguro para el borrado.',
+      );
+    }
+    if (typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'));
+    return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex
+      .slice(6, 8)
+      .join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`;
+  }
+
+  private isUuid(value: string): boolean {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    );
+  }
+
   private loadMonetizationDiscoveryEvents(): void {
     const storage = this.document.defaultView?.localStorage;
 
@@ -774,9 +916,8 @@ export class ProfilePageComponent implements OnInit {
 
       this.monetizationEvents = Array.isArray(parsedEvents)
         ? parsedEvents
-            .filter(
-              (event): event is MonetizationDiscoveryEvent =>
-                this.isMonetizationDiscoveryEvent(event),
+            .filter((event): event is MonetizationDiscoveryEvent =>
+              this.isMonetizationDiscoveryEvent(event),
             )
             .slice(0, MONETIZATION_EVENT_LIMIT)
         : [];

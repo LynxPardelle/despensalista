@@ -56,17 +56,21 @@ export class ProfileService {
 
   deletePantryData(
     request: DeletePantryDataRequest,
+    idempotencyKey: string,
   ): Observable<DeletePantryDataResult> {
     return this.http.delete<DeletePantryDataResult>(
       `${this.profileUrl}/pantry-data`,
       {
         body: request,
+        headers: { 'Idempotency-Key': idempotencyKey },
         withCredentials: true,
       },
     );
   }
 
-  deleteAccount(request: DeleteAccountRequest): Observable<DeleteAccountResult> {
+  deleteAccount(
+    request: DeleteAccountRequest,
+  ): Observable<DeleteAccountResult> {
     return this.http.delete<DeleteAccountResult>(`${this.profileUrl}/account`, {
       body: request,
       withCredentials: true,
@@ -97,11 +101,10 @@ export class ProfileService {
     request: CreateHouseholdInviteRequest,
   ): Observable<CreateHouseholdInviteResult> {
     return this.http
-      .post<{ invite: ApiHouseholdInvite; token: string }>(
-        `${this.householdUrl}/invites`,
-        request,
-        { withCredentials: true },
-      )
+      .post<{
+        invite: ApiHouseholdInvite;
+        token: string;
+      }>(`${this.householdUrl}/invites`, request, { withCredentials: true })
       .pipe(
         map((result) => ({
           invite: this.normalizeHouseholdInvite(result.invite),

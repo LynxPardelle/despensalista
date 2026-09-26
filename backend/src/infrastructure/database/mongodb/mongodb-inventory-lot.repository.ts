@@ -19,6 +19,7 @@ import { InventoryLotRepository } from '../../../domain/repositories/inventory-l
 import { InventoryLotId } from '../../../domain/value-objects/inventory-lot-id.vo';
 import { ProductTypeId } from '../../../domain/value-objects/product-type-id.vo';
 import { UserId } from '../../../domain/value-objects/user-id.vo';
+import { decodeArchiveCursor } from '../archive-cursor';
 import { InventoryLotDocument } from './schemas/inventory-lot.schema';
 
 type PersistedInventoryLot = Omit<
@@ -129,7 +130,7 @@ export class MongoInventoryLotRepository implements InventoryLotRepository {
     options: CursorPageOptions,
   ): Promise<CursorPage<InventoryLot>> {
     const limit = clampLimit(options.limit);
-    const cursor = decodeMongoArchiveCursor(options.cursor);
+    const cursor = decodeMongoArchiveCursor(options.cursor, userId.toString());
     const cursorFilter = cursor
       ? {
           $or: [
@@ -177,6 +178,18 @@ export class MongoInventoryLotRepository implements InventoryLotRepository {
     return lots.map((lot) => this.toDomain(lot as PersistedInventoryLot));
   }
 
+  async findAllByProductTypeId(
+    productTypeId: ProductTypeId,
+  ): Promise<InventoryLot[]> {
+    const lots = await this.inventoryLotModel
+      .find({ productTypeId: productTypeId.toString() })
+      .sort({ updatedAt: -1 })
+      .lean()
+      .exec();
+
+    return lots.map((lot) => this.toDomain(lot as PersistedInventoryLot));
+  }
+
   async reassignUserOwnership(
     fromUserId: UserId,
     toUserId: UserId,
@@ -193,12 +206,6 @@ export class MongoInventoryLotRepository implements InventoryLotRepository {
 
   async delete(id: InventoryLotId): Promise<void> {
     await this.inventoryLotModel.deleteOne({ id: id.toString() }).exec();
-  }
-
-  async deleteByProductTypeId(productTypeId: ProductTypeId): Promise<void> {
-    await this.inventoryLotModel
-      .deleteMany({ productTypeId: productTypeId.toString() })
-      .exec();
   }
 
   async deleteByUserId(userId: UserId): Promise<number> {
@@ -250,7 +257,7 @@ function clampLimit(limit: number): number {
 }
 
 function encodeMongoArchiveCursor(
-  item: Pick<PersistedInventoryLot, 'archivedAt' | 'id'> | undefined,
+  item: Pick<PersistedInventoryLot, 'archivedAt' | 'id' | 'userId'> | undefined,
 ): string | undefined {
   if (!item?.archivedAt) {
     return undefined;
@@ -260,6 +267,7 @@ function encodeMongoArchiveCursor(
     JSON.stringify({
       archivedAt: new Date(item.archivedAt).toISOString(),
       id: item.id,
+      userId: item.userId,
     }),
     'utf8',
   ).toString('base64url');
@@ -267,21 +275,14 @@ function encodeMongoArchiveCursor(
 
 function decodeMongoArchiveCursor(
   cursor: string | undefined,
+  expectedUserId: string,
 ): MongoArchiveCursor | undefined {
-  if (!cursor) {
-    return undefined;
-  }
-
-  const parsed = JSON.parse(
-    Buffer.from(cursor, 'base64url').toString('utf8'),
-  ) as {
-    archivedAt?: string;
-    id?: string;
-  };
-
-  if (!parsed.archivedAt || !parsed.id) {
-    throw new Error('Invalid archived inventory lot cursor');
-  }
+  const parsed = decodeArchiveCursor(
+    cursor,
+    expectedUserId,
+    'Invalid archived inventory lot cursor',
+  );
+  if (!parsed) return undefined;
 
   return {
     archivedAt: new Date(parsed.archivedAt),

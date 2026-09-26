@@ -40,11 +40,17 @@
 - HTTP API con CORS restringido al frontend y Lambda Node.js 22 ARM64.
 - Memoria por defecto: 512 MiB; timeout: 15 s.
 - Cada release publica una version Lambda y sirve mediante el alias `live`;
-  produccion usa CodeDeploy Lambda canary y alarmas de rollback.
+  produccion usa CodeDeploy `ALL_AT_ONCE` con alarmas de rollback. Antes del
+  cambio de alias, el workflow fija temporalmente reserved concurrency en cero,
+  espera el timeout mas cinco segundos, elimina de forma condicionada solamente
+  cuotas `PANTRY_QUOTA` sin fence activo y restaura la concurrencia previa. Este
+  drenaje corre solo cuando cambia `PantryQuotaSchemaVersion` o el alias vivo fue
+  revertido; la version actual del contrato es `2`.
 - API/Lambda tienen logs con retencion acotada. Cuatro alarmas productivas
   cubren errores/throttling Lambda, API 5xx y CloudFront 5xx.
-- La API aplica throttling. Reserved concurrency y DLQ no se agregaron porque
-  el flujo HTTP es sincrono y no hay una cola asincrona que reprocesar.
+- La API aplica throttling. No hay reserved concurrency permanente ni DLQ porque
+  el flujo HTTP es sincrono; reserved concurrency cero se usa solamente durante
+  el drenaje controlado de una release productiva.
 
 ## GitHub Actions y AWS OIDC
 

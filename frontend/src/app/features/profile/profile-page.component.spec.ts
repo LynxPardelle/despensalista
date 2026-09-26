@@ -20,6 +20,9 @@ describe('ProfilePageComponent', () => {
     window.localStorage.removeItem(
       'despensalista.monetizationDiscoveryEvents.v1',
     );
+    window.localStorage.removeItem(
+      'despensalista.pendingPantryDeletionIdempotencyKey.v1',
+    );
 
     authFacade = jasmine.createSpyObj<AuthFacade>('AuthFacade', ['logout']);
     profileService = jasmine.createSpyObj<ProfileService>('ProfileService', [
@@ -278,16 +281,24 @@ describe('ProfilePageComponent', () => {
     profileService.getHouseholdWorkspace.calls.reset();
     profileService.acceptHouseholdInvite.calls.reset();
     component.ngOnInit();
-    expect(profileService.acceptHouseholdInvite).toHaveBeenCalledWith('fresh-invite-token');
+    expect(profileService.acceptHouseholdInvite).toHaveBeenCalledWith(
+      'fresh-invite-token',
+    );
     expect(profileService.getHouseholdWorkspace).not.toHaveBeenCalled();
     expect(component.householdMessage).toBe('Invitacion aceptada.');
   });
 
   it('preserves the existing household when joining another is rejected', () => {
     const current = component.householdWorkspace;
-    profileService.acceptHouseholdInvite.and.returnValue(throwError(() => new HttpErrorResponse({
-      status: 400, error: { message: 'User already belongs to a household' },
-    })));
+    profileService.acceptHouseholdInvite.and.returnValue(
+      throwError(
+        () =>
+          new HttpErrorResponse({
+            status: 400,
+            error: { message: 'User already belongs to a household' },
+          }),
+      ),
+    );
     component.householdAcceptForm.setValue({ token: 'other-household-token' });
     component.acceptHouseholdInvite();
     expect(component.householdWorkspace).toBe(current);
@@ -352,7 +363,9 @@ describe('ProfilePageComponent', () => {
 
     expect(component.monetizationEvents.length).toBe(0);
     expect(
-      window.localStorage.getItem('despensalista.monetizationDiscoveryEvents.v1'),
+      window.localStorage.getItem(
+        'despensalista.monetizationDiscoveryEvents.v1',
+      ),
     ).toBeNull();
   });
 
@@ -428,7 +441,9 @@ describe('ProfilePageComponent', () => {
   });
 
   it('accepts invites and lets owners revoke invites or remove members', () => {
-    component.householdAcceptForm.patchValue({ token: 'invite-token-safe-123' });
+    component.householdAcceptForm.patchValue({
+      token: 'invite-token-safe-123',
+    });
     component.acceptHouseholdInvite();
 
     expect(profileService.acceptHouseholdInvite).toHaveBeenCalledWith(
@@ -490,19 +505,118 @@ describe('ProfilePageComponent', () => {
 
     component.deletePantryData();
 
-    expect(profileService.deletePantryData).toHaveBeenCalledWith({
-      confirmationText: 'ELIMINAR',
-    });
+    expect(profileService.deletePantryData).toHaveBeenCalledWith(
+      { confirmationText: 'ELIMINAR' },
+      jasmine.any(String),
+    );
     expect(component.deleteMessage).toBe(
       'Datos eliminados: 5 lotes, 3 tipos base, 1 listas guardadas, 2 enlaces compartidos y 1 eventos de merma.',
     );
+  });
+
+  it('persists and reuses the pantry deletion key until a retry succeeds', () => {
+    profileService.deletePantryData.and.returnValues(
+      throwError(() => new Error('response lost')),
+      of({
+        deletedInventoryLotCount: 5,
+        deletedProductTypeCount: 3,
+        deletedShoppingListCount: 1,
+        deletedShoppingShareCount: 2,
+        deletedWasteEventCount: 1,
+      }),
+    );
+    component.deletePantryDataForm.patchValue({
+      confirmationText: 'ELIMINAR',
+    });
+
+    component.deletePantryData();
+    const firstKey = profileService.deletePantryData.calls.argsFor(0)[1];
+    expect(firstKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(
+          'despensalista.pendingPantryDeletionIdempotencyKey.v1',
+        )!,
+      ),
+    ).toEqual(
+      jasmine.objectContaining({
+        ownerUserId: 'user-1',
+        key: firstKey,
+        createdAt: jasmine.any(String),
+      }),
+    );
+
+    component.deletePantryData();
+
+    expect(profileService.deletePantryData.calls.argsFor(1)[1]).toBe(firstKey);
+    expect(
+      window.localStorage.getItem(
+        'despensalista.pendingPantryDeletionIdempotencyKey.v1',
+      ),
+    ).toBeNull();
+  });
+
+  it('does not reuse a pending pantry deletion key across accounts', () => {
+    profileService.deletePantryData.and.returnValues(
+      throwError(() => new Error('response lost for account A')),
+      throwError(() => new Error('response lost for account B')),
+    );
+    component.deletePantryDataForm.patchValue({
+      confirmationText: 'ELIMINAR',
+    });
+
+    component.deletePantryData();
+    const accountAKey = profileService.deletePantryData.calls.argsFor(0)[1];
+    component.profile = { ...component.profile!, id: 'user-2' };
+    component.deletePantryData();
+    const accountBKey = profileService.deletePantryData.calls.argsFor(1)[1];
+
+    expect(accountBKey).not.toBe(accountAKey);
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(
+          'despensalista.pendingPantryDeletionIdempotencyKey.v1',
+        )!,
+      ),
+    ).toEqual(
+      jasmine.objectContaining({
+        ownerUserId: 'user-2',
+        key: accountBKey,
+      }),
+    );
+  });
+
+  it('replaces a pending pantry deletion key after the receipt window expires', () => {
+    const expiredKey = '9b29fb9a-ce30-473f-abaf-f8d987634f55';
+    window.localStorage.setItem(
+      'despensalista.pendingPantryDeletionIdempotencyKey.v1',
+      JSON.stringify({
+        ownerUserId: 'user-1',
+        key: expiredKey,
+        createdAt: new Date(
+          Date.now() - 7 * 24 * 60 * 60 * 1000 - 1,
+        ).toISOString(),
+      }),
+    );
+    component.deletePantryDataForm.patchValue({
+      confirmationText: 'ELIMINAR',
+    });
+
+    component.deletePantryData();
+    const currentKey = profileService.deletePantryData.calls.argsFor(0)[1];
+
+    expect(currentKey).not.toBe(expiredKey);
   });
 
   it('keeps the pantry deletion button disabled until the exact confirmation is entered', () => {
     fixture.detectChanges();
 
     const deleteButton = Array.from(
-      fixture.nativeElement.querySelectorAll('.danger-panel button[type="submit"]'),
+      fixture.nativeElement.querySelectorAll(
+        '.danger-panel button[type="submit"]',
+      ),
     ).at(1) as HTMLButtonElement;
 
     expect(deleteButton.disabled).toBeTrue();
@@ -540,7 +654,9 @@ describe('ProfilePageComponent', () => {
     fixture.detectChanges();
 
     const accountDeleteButton = Array.from(
-      fixture.nativeElement.querySelectorAll('.danger-panel button[type="submit"]'),
+      fixture.nativeElement.querySelectorAll(
+        '.danger-panel button[type="submit"]',
+      ),
     ).at(-1) as HTMLButtonElement;
 
     expect(accountDeleteButton.disabled).toBeTrue();

@@ -46,11 +46,14 @@ test('deploy workflows serialize by stage and verify after deployment', async ()
     assert.match(workflow, new RegExp(`test "\\$GITHUB_REF_NAME" = ${stage}`));
     assert.match(workflow, /Post-deploy smoke/);
     assert.match(workflow, /release-artifact\.mjs verify/);
+    assert.match(workflow, /RELEASE_ID=.*\.release\/release-manifest\.json/);
+    assert.match(workflow, /--context releaseId="\$RELEASE_ID"/);
     assert.match(workflow, /releaseId|release-id|release_id/i);
     assert.match(workflow, /deployment-state\.mjs capture/);
     assert.match(workflow, new RegExp(`deployment-state\\.mjs reconcile ${stage} \\.release`));
     assert.match(workflow, /steps\.smoke\.outcome == 'failure'/);
     assert.match(workflow, /steps\.reconcile\.outcome == 'failure'/);
+    assert.match(workflow, /steps\.deploy\.outcome == 'failure'/);
     assert.match(workflow, /deployment-state\.mjs restore/);
     assert.match(workflow, new RegExp(`deployment-state\\.mjs record ${stage} \\.release deployment-receipt`));
     assert.match(workflow, new RegExp(
@@ -58,6 +61,14 @@ test('deploy workflows serialize by stage and verify after deployment', async ()
     ));
     assert.ok(workflow.indexOf('Post-deploy smoke') < workflow.indexOf('Record exact published deployment'));
     assert.ok(workflow.indexOf('deployment-state.mjs reconcile') < workflow.indexOf('Post-deploy smoke'));
+    if (stage !== 'prod') {
+      assert.match(workflow, new RegExp(`deployment-state\\.mjs activate ${stage} \\.release`));
+      assert.ok(
+        workflow.indexOf(`deployment-state.mjs activate ${stage} .release`) <
+          workflow.indexOf(`deployment-state.mjs reconcile ${stage} .release`),
+      );
+      assert.match(workflow, /steps\.activate\.outcome == 'failure'/);
+    }
     assert.ok(workflow.indexOf('Record exact published deployment') < workflow.indexOf('Upload exact rollback receipt'));
     assert.match(workflow, /--change-set-name despensalista-(dev|tst|prod)-release/);
     assert.doesNotMatch(workflow, /vars\.FRONTEND_BASE_URL/);
@@ -91,6 +102,105 @@ test('builds once in dev and promotes the immutable artifact to tst and prod', a
   }
 });
 
+test('durably drains the old production Lambda before an all-at-once schema cutover', async () => {
+  const prod = await readWorkflow('deploy-serverless-prod.yml');
+  const deploymentState = await readFile(
+    path.join(repositoryRoot, '.github', 'scripts', 'deployment-state.mjs'),
+    'utf8',
+  );
+  const armDrain = deploymentState.slice(
+    deploymentState.indexOf('export async function armProductionDrain'),
+    deploymentState.indexOf('export async function releaseProductionDrain'),
+  );
+  assert.ok(
+    armDrain.indexOf('createPendingProductionDrainMarker') <
+      armDrain.indexOf("'s3', 'sync'"),
+  );
+  assert.ok(
+    armDrain.indexOf("'s3', 'sync'") <
+      armDrain.indexOf('transitionProductionDrainMarker'),
+  );
+  assert.ok(
+    armDrain.indexOf('transitionProductionDrainMarker') <
+      armDrain.indexOf('drainProductionWriters'),
+  );
+  assert.match(deploymentState, /\/despensalista\/prod\/deployment-drain/);
+  assert.match(prod, /deployment-state\.mjs recover-drain prod(?:\r?\n|$)/);
+  assert.doesNotMatch(prod, /deployment-state\.mjs recover-drain prod \.release/);
+  assert.ok(
+    prod.indexOf('deployment-state.mjs recover-drain prod') <
+      prod.indexOf('deployment-state.mjs capture prod .rollback'),
+  );
+  assert.match(prod, /deployment-state\.mjs arm-drain prod \.rollback \.release/);
+  assert.ok(
+    prod.indexOf('deployment-state.mjs capture prod .rollback') <
+      prod.indexOf('deployment-state.mjs arm-drain prod .rollback .release'),
+  );
+  assert.ok(
+    prod.indexOf('deployment-state.mjs arm-drain prod .rollback .release') <
+      prod.indexOf('test "$quota_schema_version" = "2"'),
+  );
+  const quotaStep = prod.slice(
+    prod.indexOf('- name: Drain old Lambda writers and invalidate legacy pantry quotas'),
+    prod.indexOf('- name: Deploy prod releaseId'),
+  );
+  assert.ok(
+    quotaStep.indexOf('if test -z "$function_name"') <
+      quotaStep.indexOf('aws cloudformation describe-stacks'),
+  );
+  assert.match(deploymentState, /await wait\(\(timeout \+ 5\) \* 1000\)/);
+  assert.match(
+    prod,
+    /if: always\(\) && steps\.drain\.outcome == 'success' && steps\.deploy\.outcome == 'success' && steps\.activate\.outcome == 'success' && steps\.verify\.outcome == 'success' && steps\.reconcile\.outcome == 'success' && steps\.mark_drain\.outcome == 'success'/,
+  );
+  assert.match(prod, /deployment-state\.mjs release-drain prod/);
+  assert.match(prod, /steps\.drain\.outcome == 'failure'/);
+  assert.match(prod, /steps\.activate\.outcome == 'failure'/);
+  assert.match(prod, /steps\.mark_drain\.outcome == 'failure'/);
+  assert.match(prod, /steps\.release_drain\.outcome == 'failure'/);
+  assert.ok(
+    prod.indexOf('Deploy prod releaseId') <
+      prod.indexOf('deployment-state.mjs activate-drain prod'),
+  );
+  assert.ok(
+    prod.indexOf('deployment-state.mjs activate-drain prod') <
+      prod.indexOf('deployment-state.mjs verify prod .release'),
+  );
+  assert.ok(
+    prod.indexOf('deployment-state.mjs verify prod .release') <
+      prod.indexOf('deployment-state.mjs reconcile prod .release'),
+  );
+  assert.ok(
+    prod.indexOf('deployment-state.mjs reconcile prod .release') <
+      prod.indexOf('deployment-state.mjs mark-drain-verified prod'),
+  );
+  assert.ok(
+    prod.indexOf('deployment-state.mjs mark-drain-verified prod') <
+      prod.indexOf('deployment-state.mjs release-drain prod'),
+  );
+  assert.ok(
+    prod.indexOf('deployment-state.mjs release-drain prod') <
+      prod.indexOf('Post-deploy smoke'),
+  );
+  assert.ok(
+    prod.indexOf('Post-deploy smoke') <
+      prod.indexOf('deployment-state.mjs finalize-drain prod'),
+  );
+  assert.doesNotMatch(prod, /aws lambda delete-function-concurrency/);
+  assert.match(prod, /OutputKey=='PantryQuotaSchemaVersion'/);
+  assert.match(prod, /test "\$quota_schema_version" = "2"/);
+  assert.match(prod, /test "\$live_version" = "\$published_version"/);
+  assert.equal(
+    (
+      prod.match(
+        /attribute_not_exists\(#deleting\) OR #deleting = :notDeleting/g,
+      ) ?? []
+    ).length,
+    2,
+  );
+  assert.match(prod, /":notDeleting":\{"BOOL":false\}/);
+});
+
 test('provides scheduled zero-AWS-cost smoke and release rollback workflows', async () => {
   const smoke = await readWorkflow('production-smoke.yml');
   const rollback = await readWorkflow('rollback-serverless.yml');
@@ -117,6 +227,15 @@ test('provides scheduled zero-AWS-cost smoke and release rollback workflows', as
   );
   assert.match(rollback, /tr '\[:upper:\]' '\[:lower:\]'/);
   assert.match(rollback, /deployment-receipt\/deployment-receipt\.json "\$RELEASE_SHA"/);
+  assert.match(rollback, /deployment-state\.mjs recover-drain prod/);
+  assert.ok(
+    rollback.indexOf('aws-actions/configure-aws-credentials@') <
+      rollback.indexOf('deployment-state.mjs recover-drain prod'),
+  );
+  assert.ok(
+    rollback.indexOf('deployment-state.mjs recover-drain prod') <
+      rollback.indexOf('deployment-state.mjs release "$STAGE"'),
+  );
   assert.match(rollback, /release-artifact\.mjs apply/);
   assert.match(rollback, /Post-rollback smoke/);
   assert.doesNotMatch(rollback, /vars\.FRONTEND_BASE_URL/);

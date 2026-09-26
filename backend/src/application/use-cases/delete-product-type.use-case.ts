@@ -52,14 +52,11 @@ export class DeleteProductTypeUseCase {
     }
 
     await this.pantryMutationPort.beginProductTypeDeletion(productType);
-    const lots = await this.inventoryLotRepository.findByProductTypeId(
+    const lots = await this.inventoryLotRepository.findAllByProductTypeId(
       productType.id,
     );
     for (const lot of lots)
       await this.pantryMutationPort.deleteInventoryLot(lot);
-    // Sweep archived/legacy lots first so a failed cleanup leaves the type as
-    // a durable retry anchor instead of producing unreachable orphan records.
-    await this.inventoryLotRepository.deleteByProductTypeId(productType.id);
     await this.pantryMutationPort.deleteProductType(productType);
   }
 

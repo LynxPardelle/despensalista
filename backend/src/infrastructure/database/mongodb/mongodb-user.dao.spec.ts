@@ -28,7 +28,9 @@ describe('Mongo user deletion and delayed Cognito callbacks', () => {
     jest.restoreAllMocks();
     await model?.deleteMany({});
     await connection?.collection('account_revocations').deleteMany({});
+    await connection?.collection('account_deletion_jobs').deleteMany({});
     await connection?.collection('pantry_quotas').deleteMany({});
+    await connection?.collection('households').deleteMany({});
   });
   afterAll(async () => {
     await connection?.close();
@@ -84,5 +86,103 @@ describe('Mongo user deletion and delayed Cognito callbacks', () => {
       }),
     ).rejects.toBeInstanceOf(UnauthorizedException);
     expect(await dao.findById(UserId.fromString('linked-sub'))).toBeNull();
+  });
+
+  it('keeps the original subject snapshot available until local deletion commits', async () => {
+    const original = User.fromPrimitives({
+      id: 'local-user',
+      email: 'owner@example.com',
+      username: 'Owner',
+      authSubjectIds: ['cognito-sub', 'linked-sub'],
+      status: UserAccountStatus.ACTIVE,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await dao.save(original);
+    await connection.collection('households').insertOne({
+      pk: 'HOUSEHOLD#household-1#MEMBER#local-user',
+      entityType: 'HOUSEHOLD_MEMBERSHIP',
+      householdId: 'household-1',
+      userId: 'local-user',
+      role: 'editor',
+    });
+    const first = await dao.beginAccountDeletion(
+      original.id,
+      new Date('9999-12-31T23:59:59.999Z'),
+      { householdId: 'household-1', householdRole: 'editor' },
+    );
+    expect(first).toMatchObject({ pantryDeletionToken: expect.any(String) });
+    expect((await dao.findById(original.id))?.isAccountDeletionPending()).toBe(
+      true,
+    );
+    await connection.collection('pantry_quotas').insertOne({
+      _id: 'local-user' as never,
+      ownerUserId: 'local-user',
+      quotaSchemaVersion: 2,
+      mutationEpoch: 1,
+      deleting: true,
+      deletionToken: (first as unknown as { pantryDeletionToken: string })
+        .pantryDeletionToken,
+      retainFence: true,
+    });
+    await model.updateOne(
+      { id: original.id.toString() },
+      { $set: { authSubjectIds: ['later-value'] } },
+    );
+
+    await expect(
+      dao.beginAccountDeletion(
+        original.id,
+        new Date('9999-12-31T23:59:59.999Z'),
+      ),
+    ).resolves.toEqual(first);
+    await expect(dao.findPendingAccountDeletions(1)).resolves.toEqual([first]);
+
+    await expect(
+      dao.claimPendingAccountDeletion(
+        new Date(first!.startedAt.getTime() + 119_999),
+        new Date(first!.startedAt.getTime() + 240_000),
+      ),
+    ).resolves.toBeNull();
+
+    const firstAttemptAt = new Date(first!.startedAt.getTime() + 120_000);
+    const leaseExpiresAt = new Date(firstAttemptAt.getTime() + 120_000);
+    const claimed = await dao.claimPendingAccountDeletion(
+      firstAttemptAt,
+      leaseExpiresAt,
+    );
+    expect(claimed).toEqual({
+      ...first,
+      attempts: 0,
+      leaseToken: expect.any(String),
+    });
+
+    const retryAt = new Date(firstAttemptAt.getTime() + 60_000);
+    await dao.deferAccountDeletion(claimed!, retryAt);
+    await expect(
+      dao.claimPendingAccountDeletion(
+        new Date(retryAt.getTime() - 1),
+        leaseExpiresAt,
+      ),
+    ).resolves.toBeNull();
+    await expect(
+      dao.claimPendingAccountDeletion(
+        retryAt,
+        new Date(retryAt.getTime() + 120_000),
+      ),
+    ).resolves.toEqual({
+      ...first,
+      attempts: 1,
+      leaseToken: expect.any(String),
+    });
+
+    await dao.delete(original.id);
+    expect(await dao.findById(original.id)).toBeNull();
+    expect(
+      await connection.collection('account_deletion_jobs').countDocuments(),
+    ).toBe(0);
+    expect(await connection.collection('pantry_quotas').countDocuments()).toBe(
+      0,
+    );
   });
 });

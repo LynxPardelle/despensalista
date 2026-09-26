@@ -134,6 +134,8 @@ export class DynamoDbUserDeviceRepository implements UserDeviceRepository {
     let exclusiveStartKey: Record<string, unknown> | undefined;
 
     do {
+      // ponytail: O(shared users table) preserves privacy today; keep device IDs in a
+      // transactionally maintained per-user manifest before table growth.
       const result = await this.dynamoDb.send(
         new ScanCommand({
           TableName: this.tableName,

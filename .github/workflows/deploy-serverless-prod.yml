@@ -107,11 +107,62 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
+      - name: Recover an interrupted production writer drain
+        run: node .github/scripts/deployment-state.mjs recover-drain prod
+
       - name: Snapshot current published release
         run: node .github/scripts/deployment-state.mjs capture prod .rollback
 
       - name: Validate infrastructure against AWS
         run: npm --prefix infra/cognito run build
+
+      - name: Arm durable production recovery
+        id: arm
+        run: node .github/scripts/deployment-state.mjs arm-drain prod .rollback .release
+
+      - name: Drain old Lambda writers and invalidate legacy pantry quotas
+        id: drain
+        run: |
+          set -euo pipefail
+          live_version="$(jq -r '.version // empty' .rollback/state.json)"
+          published_version="$(jq -r '.deploymentVersion // empty' .rollback/state.json)"
+          function_name="$(jq -r '.functionName // empty' .rollback/state.json)"
+          if test -z "$function_name"; then
+            echo "armed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          quota_schema_version="$(aws cloudformation describe-stacks \
+            --stack-name despensalista-prod-serverless-backend \
+            --query "Stacks[0].Outputs[?OutputKey=='PantryQuotaSchemaVersion'].OutputValue | [0]" \
+            --output text)"
+          if test "$quota_schema_version" = "2" && \
+            test "$live_version" = "$published_version"; then
+            exit 0
+          fi
+          users_table="$(aws cloudformation describe-stacks \
+            --stack-name despensalista-prod-serverless-backend \
+            --query "Stacks[0].Outputs[?OutputKey=='DynamoDbUsersTable'].OutputValue | [0]" \
+            --output text)"
+          aws dynamodb scan \
+            --table-name "$users_table" \
+            --consistent-read \
+            --filter-expression '#entityType = :quota AND (attribute_not_exists(#deleting) OR #deleting = :notDeleting)' \
+            --expression-attribute-names '{"#entityType":"entityType","#deleting":"deleting"}' \
+            --expression-attribute-values '{":quota":{"S":"PANTRY_QUOTA"},":notDeleting":{"BOOL":false}}' \
+            --projection-expression pk \
+            --query 'Items[].pk.S' \
+            --output json |
+            jq -r '.[]' |
+            while IFS= read -r pk; do
+              key="$(jq -cn --arg pk "$pk" '{pk:{S:$pk}}')"
+              aws dynamodb delete-item \
+                --table-name "$users_table" \
+                --key "$key" \
+                --condition-expression '#entityType = :quota AND (attribute_not_exists(#deleting) OR #deleting = :notDeleting)' \
+                --expression-attribute-names '{"#entityType":"entityType","#deleting":"deleting"}' \
+                --expression-attribute-values '{":quota":{"S":"PANTRY_QUOTA"},":notDeleting":{"BOOL":false}}' \
+                >/dev/null
+            done
 
       - name: Deploy prod releaseId
         id: deploy
@@ -123,11 +174,14 @@ jobs:
         run: |
           set -euo pipefail
           FRONTEND_BASE_URL="https://$APP_DOMAIN_NAME"
+          RELEASE_ID="$(jq -r '.releaseId' ../../.release/release-manifest.json)"
+          test "$(printf '%s' "$RELEASE_ID" | grep -Ec '^[0-9a-f]{12}$')" -eq 1
           npx cdk deploy --all --require-approval never --change-set-name despensalista-prod-release \
             --context projectName=despensalista \
             --context stage=prod \
             --context awsRegion="$AWS_REGION" \
             --context includeServerlessBackend=true \
+            --context releaseId="$RELEASE_ID" \
             --context backendArtifactPath=../../backend/lambda.zip \
             --context removalPolicy=retain \
             --context deletionProtection=true \
@@ -137,9 +191,26 @@ jobs:
             --context serverlessFrontendBaseUrl="$FRONTEND_BASE_URL" \
             --context externallyManagedSocialProviders=Google
 
+      - name: Activate exact backend release while writers remain drained
+        id: activate
+        run: node .github/scripts/deployment-state.mjs activate-drain prod
+
+      - name: Verify exact backend release while writers remain drained
+        id: verify
+        run: node .github/scripts/deployment-state.mjs verify prod .release
+
       - name: Reconcile exact published release
         id: reconcile
         run: node .github/scripts/deployment-state.mjs reconcile prod .release
+
+      - name: Mark reconciled production release verified
+        id: mark_drain
+        run: node .github/scripts/deployment-state.mjs mark-drain-verified prod
+
+      - name: Restore production Lambda concurrency
+        id: release_drain
+        if: always() && steps.drain.outcome == 'success' && steps.deploy.outcome == 'success' && steps.activate.outcome == 'success' && steps.verify.outcome == 'success' && steps.reconcile.outcome == 'success' && steps.mark_drain.outcome == 'success'
+        run: node .github/scripts/deployment-state.mjs release-drain prod
 
       - name: Post-deploy smoke
         id: smoke
@@ -147,8 +218,11 @@ jobs:
           APP_DOMAIN_NAME: ${{ vars.APP_DOMAIN_NAME || 'despensalista.lynxpardelle.com' }}
         run: node .github/scripts/smoke.mjs --base-url "https://$APP_DOMAIN_NAME" --attempts 18 --delay-ms 10000
 
+      - name: Finalize durable production recovery
+        run: node .github/scripts/deployment-state.mjs finalize-drain prod
+
       - name: Restore previous frontend and backend after failed publish or smoke
-        if: failure() && (steps.reconcile.outcome == 'failure' || steps.smoke.outcome == 'failure')
+        if: failure() && (steps.arm.outcome == 'failure' || steps.drain.outcome == 'failure' || steps.deploy.outcome == 'failure' || steps.activate.outcome == 'failure' || steps.verify.outcome == 'failure' || steps.reconcile.outcome == 'failure' || steps.mark_drain.outcome == 'failure' || steps.release_drain.outcome == 'failure' || steps.smoke.outcome == 'failure')
         run: node .github/scripts/deployment-state.mjs restore prod .rollback
 
       - name: Record exact published deployment

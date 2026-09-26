@@ -141,6 +141,10 @@ standalone ya no es compatible. Dentro de Docker se descubre `mongodb:27017`;
 fuera de Docker usa el `DATABASE_URL` de abajo con `directConnection=true` y
 deja `MONGO_HOST` sin definir. Este nodo único es para desarrollo, no alta
 disponibilidad. Los compose de producción usan DynamoDB y no agregan MongoDB.
+Al desplegar una nueva versión del esquema de cuotas MongoDB, detén primero
+todos los escritores y deja que la primera mutación complete el backfill antes
+de reanudarlos; no se admite un rolling deploy entre binarios con contratos de
+cuota distintos.
 
 Comprueba la inicialización con `docker compose --env-file .env.docker.local ps`
 y el contrato de healthcheck con `node --test docker/mongodb/replica-health.test.mjs`.

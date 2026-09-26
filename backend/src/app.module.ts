@@ -50,6 +50,7 @@ import {
 } from './application/use-cases/shopping-list.use-cases';
 import { DeleteInventoryLotUseCase } from './application/use-cases/delete-inventory-lot.use-case';
 import { DeleteAccountUseCase } from './application/use-cases/delete-account.use-case';
+import { ResumeAccountDeletionsUseCase } from './application/use-cases/resume-account-deletions.use-case';
 import { DeletePantryDataUseCase } from './application/use-cases/delete-pantry-data.use-case';
 import { DeleteProductTypeUseCase } from './application/use-cases/delete-product-type.use-case';
 import { GetArchivedPantryItemsUseCase } from './application/use-cases/get-archived-pantry-items.use-case';
@@ -368,7 +369,7 @@ const wasteEventRepositoryProvider = useDynamoDb
           .positive()
           .default(365),
         ARCHIVED_RECORD_AUTO_DELETE_ENABLED: Joi.string()
-          .valid('true', 'false')
+          .valid('false')
           .default('false'),
         TEMPORARY_SHOPPING_SHARE_RETENTION_DAYS: Joi.number()
           .integer()
@@ -503,6 +504,7 @@ const wasteEventRepositoryProvider = useDynamoDb
     DeleteProductTypeUseCase,
     DeletePantryDataUseCase,
     DeleteAccountUseCase,
+    ResumeAccountDeletionsUseCase,
     SignOutAllSessionsUseCase,
     ArchiveInventoryLotUseCase,
     RestoreInventoryLotUseCase,

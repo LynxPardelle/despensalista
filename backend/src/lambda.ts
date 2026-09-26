@@ -7,6 +7,7 @@ import {
 import type { InjectOptions } from 'light-my-request';
 import { AppModule } from './app.module';
 import { configureApp } from './app.setup';
+import { ResumeAccountDeletionsUseCase } from './application/use-cases/resume-account-deletions.use-case';
 
 interface ApiGatewayHttpEvent {
   body?: string;
@@ -22,6 +23,11 @@ interface ApiGatewayHttpEvent {
       sourceIp?: string;
     };
   };
+}
+
+interface AccountDeletionWorkerEvent {
+  source: 'despensalista.account-deletion-worker';
+  'detail-type': 'resume';
 }
 
 interface LambdaContext {
@@ -42,21 +48,42 @@ export async function closeCachedAppForTest(): Promise<void> {
   cachedApp = undefined;
 }
 
-export async function handler(
+export function handler(
   event: ApiGatewayHttpEvent,
   context?: LambdaContext,
-): Promise<ApiGatewayHttpResponse> {
+): Promise<ApiGatewayHttpResponse>;
+export function handler(
+  event: AccountDeletionWorkerEvent,
+  context?: LambdaContext,
+): Promise<{ processed: number }>;
+export async function handler(
+  event: ApiGatewayHttpEvent | AccountDeletionWorkerEvent,
+  context?: LambdaContext,
+): Promise<ApiGatewayHttpResponse | { processed: number }> {
   if (context) {
     context.callbackWaitsForEmptyEventLoop = false;
   }
 
   const app = await getApp();
+  if (isAccountDeletionWorkerEvent(event)) {
+    return app.get(ResumeAccountDeletionsUseCase).execute();
+  }
   const response = await app
     .getHttpAdapter()
     .getInstance()
     .inject(toInjectOptions(event));
 
   return toApiGatewayResponse(response);
+}
+
+function isAccountDeletionWorkerEvent(
+  event: ApiGatewayHttpEvent | AccountDeletionWorkerEvent,
+): event is AccountDeletionWorkerEvent {
+  return (
+    'source' in event &&
+    event.source === 'despensalista.account-deletion-worker' &&
+    event['detail-type'] === 'resume'
+  );
 }
 
 async function getApp(): Promise<NestFastifyApplication> {

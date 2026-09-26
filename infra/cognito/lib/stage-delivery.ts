@@ -44,7 +44,7 @@ export function applyRuntimeBoundary(stack: cdk.Stack, project: string, stage: s
   ));
 }
 
-export function createStageDeliveryControls(stack: cdk.Stack, project: string, stage: string, userPoolArn: string): void {
+export function createStageDeliveryControls(stack: cdk.Stack, project: string, stage: string): void {
   const prefix = `${project}-${stage}`;
   const inventory = deliveryInventory(stage);
   const arn = (service: string, resource: string, resourceName: string, region = stack.region) =>
@@ -58,7 +58,12 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
   const tableArn = arn('dynamodb', 'table', `${prefix}-*`);
   const logArn = `arn:${stack.partition}:logs:${stack.region}:${stack.account}:log-group:`;
   const logResources = [`${logArn}/aws/lambda/${prefix}-*`, `${logArn}/aws/apigateway/${prefix}-*`];
-  const secretArn = arn('secretsmanager', 'secret', `${project}/${stage === 'prod' ? 'prod' : 'nonprod'}/cloudfront-origin-verification-*`).replace(':secret/', ':secret:');
+  const secretArn = arn('secretsmanager', 'secret', `${project}/${stage}/cloudfront-origin-verification-*`).replace(':secret/', ':secret:');
+  const userPoolArn = arn('cognito-idp', 'userpool', '*');
+  const userPoolConditions = { StringEquals: {
+    'aws:ResourceTag/Project': project,
+    'aws:ResourceTag/Stage': stage,
+  } };
   const distributionArn = inventory.distributionId ? arn('cloudfront', 'distribution', inventory.distributionId, '') : undefined;
   const scoped = (actions: string[], resources: string[], conditions?: iam.Conditions) => new iam.PolicyStatement({ actions, resources, conditions });
 
@@ -66,7 +71,9 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
     bucketName: assetsName, blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
     encryption: s3.BucketEncryption.S3_MANAGED, enforceSSL: true,
     removalPolicy: cdk.RemovalPolicy.RETAIN,
-    lifecycleRules: [{ expiration: cdk.Duration.days(90), abortIncompleteMultipartUploadAfter: cdk.Duration.days(1) }],
+    lifecycleRules: [stage === 'prod'
+      ? { abortIncompleteMultipartUploadAfter: cdk.Duration.days(1) }
+      : { expiration: cdk.Duration.days(90), abortIncompleteMultipartUploadAfter: cdk.Duration.days(1) }],
   });
   new ssm.StringParameter(stack, 'DeliveryBootstrapVersion', {
     parameterName: `/${project}/${stage}/cdk-bootstrap-version`, stringValue: '30',
@@ -77,11 +84,14 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
   // Neither application roles nor the deployment executor can alter this policy.
   const runtimeStatements = [
     scoped(['dynamodb:BatchGetItem', 'dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:BatchWriteItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:DescribeTable', 'dynamodb:ConditionCheckItem', 'dynamodb:TransactWriteItems'], [tableArn, `${tableArn}/index/*`]),
-    scoped(['cognito-idp:AdminDeleteUser', 'cognito-idp:AdminUserGlobalSignOut', 'cognito-idp:ListUsers'], [userPoolArn]),
+    scoped(['cognito-idp:AdminDeleteUser', 'cognito-idp:AdminUserGlobalSignOut'], [userPoolArn], userPoolConditions),
     scoped(['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents', 'logs:PutRetentionPolicy', 'logs:DeleteRetentionPolicy', 'logs:DescribeLogStreams'], logResources),
     scoped(['logs:DescribeLogGroups', 'cloudwatch:DescribeAlarms'], ['*']),
     scoped(['s3:GetObject*', 's3:PutObject*', 's3:DeleteObject*', 's3:ListBucket*', 's3:GetBucketLocation'], [assetsArn, `${assetsArn}/*`, webArn, `${webArn}/*`]),
-    scoped(['lambda:GetFunction*', 'lambda:GetAlias', 'lambda:UpdateAlias', 'lambda:InvokeFunction'], [functionArn]),
+    scoped(
+      ['lambda:GetFunction*', 'lambda:GetAlias', 'lambda:GetProvisionedConcurrencyConfig', 'lambda:UpdateAlias', 'lambda:InvokeFunction'],
+      [functionArn, `${functionArn}:*`],
+    ),
     scoped(['sns:Publish'], [`arn:${stack.partition}:sns:${stack.region}:${stack.account}:${prefix}-*`]),
     scoped(['cloudfront:CreateInvalidation', 'cloudfront:GetInvalidation'], [arn('cloudfront', 'distribution', '*', '')], { StringEquals: { 'aws:ResourceTag/Project': project, 'aws:ResourceTag/Stage': stage } }),
   ];
@@ -116,15 +126,29 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
   execution.addToPolicy(scoped(['iam:GetPolicy', 'iam:GetPolicyVersion'], [boundaryArn]));
   execution.addToPolicy(scoped(['lambda:*'], [functionArn, `arn:${stack.partition}:lambda:${stack.region}:${stack.account}:layer:${prefix}-*`]));
   execution.addToPolicy(scoped(['dynamodb:*'], [tableArn, `${tableArn}/*`]));
-  execution.addToPolicy(scoped(['cognito-idp:*'], [userPoolArn]));
+  execution.addToPolicy(scoped(['cognito-idp:*'], [userPoolArn], userPoolConditions));
   execution.addToPolicy(scoped(['s3:*'], [webArn, `${webArn}/*`]));
   execution.addToPolicy(scoped(['s3:GetObject', 's3:GetBucketLocation', 's3:ListBucket'], [assetsArn, `${assetsArn}/*`]));
   execution.addToPolicy(scoped(['logs:*'], logResources));
-  execution.addToPolicy(scoped(['logs:DescribeLogGroups', 'logs:DescribeResourcePolicies', 'cloudwatch:DescribeAlarms', 'cloudwatch:GetMetricData', 'cloudwatch:GetMetricStatistics'], ['*']));
+  // These reads and control-plane actions do not support resource ARNs. Keep
+  // them in one statement so the protected role stays below IAM's policy size
+  // limit without widening any permission.
+  execution.addToPolicy(scoped([
+    'logs:DescribeLogGroups',
+    'logs:DescribeResourcePolicies',
+    'cloudwatch:DescribeAlarms',
+    'cloudwatch:GetMetricData',
+    'cloudwatch:GetMetricStatistics',
+    'logs:PutResourcePolicy',
+    'logs:DeleteResourcePolicy',
+    'codedeploy:CreateCloudFormationDeployment',
+    'codedeploy:StopDeployment',
+    'secretsmanager:GetRandomPassword',
+  ], ['*']));
   execution.addToPolicy(scoped(['cloudwatch:*'], [`arn:${stack.partition}:cloudwatch:${stack.region}:${stack.account}:alarm:${prefix}-*`]));
   execution.addToPolicy(scoped(['sns:*'], [`arn:${stack.partition}:sns:${stack.region}:${stack.account}:${prefix}-*`]));
-  execution.addToPolicy(scoped(['codedeploy:*'], [arn('codedeploy', 'application', `${prefix}-*`).replace(':application/', ':application:'), arn('codedeploy', 'deploymentgroup', `${prefix}-*/*`).replace(':deploymentgroup/', ':deploymentgroup:'), arn('codedeploy', 'deploymentconfig', 'CodeDeployDefault.LambdaCanary10Percent5Minutes').replace(':deploymentconfig/', ':deploymentconfig:')]));
-  execution.addToPolicy(scoped(['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret', 'secretsmanager:UpdateSecret', 'secretsmanager:TagResource', 'secretsmanager:UntagResource'], [secretArn]));
+  execution.addToPolicy(scoped(['codedeploy:*'], [arn('codedeploy', 'application', `${prefix}-*`).replace(':application/', ':application:'), arn('codedeploy', 'deploymentgroup', `${prefix}-*/*`).replace(':deploymentgroup/', ':deploymentgroup:'), arn('codedeploy', 'deploymentconfig', 'CodeDeployDefault.LambdaAllAtOnce').replace(':deploymentconfig/', ':deploymentconfig:')]));
+  execution.addToPolicy(scoped(['secretsmanager:CreateSecret', 'secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret', 'secretsmanager:UpdateSecret', 'secretsmanager:TagResource', 'secretsmanager:UntagResource'], [secretArn]));
   const fixedCloudFrontResources = [
     distributionArn,
     inventory.originAccessControlId && arn('cloudfront', 'origin-access-control', inventory.originAccessControlId, ''),
@@ -152,6 +176,17 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
     'ForAllValues:StringEquals': { 'route53:ChangeResourceRecordSetsRecordTypes': ['A', 'AAAA', 'CNAME'], 'route53:ChangeResourceRecordSetsActions': ['CREATE', 'UPSERT', 'DELETE'] },
   }));
   if (stage === 'prod') execution.addToPolicy(scoped(['ses:GetEmailIdentity', 'ses:PutEmailIdentityDkimSigningAttributes', 'ses:PutEmailIdentityFeedbackAttributes', 'ses:PutEmailIdentityMailFromAttributes', 'ses:TagResource', 'ses:UntagResource', 'ses:ListTagsForResource'], [arn('ses', 'identity', domain)]));
+  if (stage === 'prod') execution.addToPolicy(scoped([
+    'events:PutRule',
+    'events:DescribeRule',
+    'events:ListTargetsByRule',
+    'events:ListTagsForResource',
+    'events:DeleteRule',
+    'events:PutTargets',
+    'events:RemoveTargets',
+    'events:TagResource',
+    'events:UntagResource',
+  ], [arn('events', 'rule', `${prefix}-account-deletion-resume`)]));
 
   const oidc = iam.OpenIdConnectProvider.fromOpenIdConnectProviderArn(stack, 'GitHubOidcProvider', arn('iam', 'oidc-provider', 'token.actions.githubusercontent.com', ''));
   const github = new iam.Role(stack, 'GitHubDeploymentRole', {
@@ -171,6 +206,31 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
   github.addToPolicy(scoped(['ssm:GetParameter'], [arn('ssm', 'parameter', `${project}/${stage}/cdk-bootstrap-version`)]));
   github.addToPolicy(scoped(['s3:GetObject*', 's3:PutObject', 's3:DeleteObject', 's3:ListBucket', 's3:GetBucketLocation'], [assetsArn, `${assetsArn}/*`, webArn, `${webArn}/*`]));
   github.addToPolicy(scoped(['lambda:GetAlias', 'lambda:UpdateAlias', 'lambda:ListVersionsByFunction', 'lambda:GetFunction', 'lambda:PublishVersion'], [functionArn]));
+  if (stage === 'prod') {
+    const backendFunctionArn = `arn:${stack.partition}:lambda:${stack.region}:${stack.account}:function:${prefix}-backend-api`;
+    const usersTableArn = arn('dynamodb', 'table', `${prefix}-users`);
+    github.addToPolicy(scoped([
+      'ssm:GetParameter',
+      'ssm:PutParameter',
+    ], [arn('ssm', 'parameter', `${project}/prod/deployment-drain`)]));
+    github.addToPolicy(scoped([
+      'lambda:GetFunctionConcurrency',
+      'lambda:GetFunctionConfiguration',
+      'lambda:PutFunctionConcurrency',
+      'lambda:DeleteFunctionConcurrency',
+    ], [backendFunctionArn]));
+    github.addToPolicy(scoped(['dynamodb:Scan'], [usersTableArn], {
+      'ForAllValues:StringEquals': {
+        'dynamodb:Attributes': ['pk', 'entityType', 'deleting'],
+      },
+      StringEquals: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
+    }));
+    github.addToPolicy(scoped(['dynamodb:DeleteItem'], [usersTableArn], {
+      'ForAllValues:StringLike': {
+        'dynamodb:LeadingKeys': ['PANTRY_QUOTA#*'],
+      },
+    }));
+  }
   if (distributionArn) github.addToPolicy(scoped(['cloudfront:CreateInvalidation', 'cloudfront:GetInvalidation'], [distributionArn]));
   new cdk.CfnOutput(stack, 'GitHubDeploymentRoleArn', { value: github.roleArn });
   new cdk.CfnOutput(stack, 'CloudFormationExecutionRoleArn', { value: execution.roleArn });

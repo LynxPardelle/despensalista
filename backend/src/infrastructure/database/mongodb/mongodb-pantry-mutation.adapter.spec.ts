@@ -5,15 +5,18 @@ import { ProductType } from '../../../domain/entities/product-type.entity';
 import { ProductCategory, QuantityUnit } from '../../../domain/enums';
 import {
   IdempotencyPayloadConflictError,
+  PantryMutationConflictError,
   PantryQuotaExceededError,
 } from '../../../application/ports/pantry-mutation.port';
 import { UserId } from '../../../domain/value-objects/user-id.vo';
 import { ShoppingList } from '../../../domain/entities/shopping-list.entity';
 import { Product } from '../../../domain/entities/product.entity';
 import { ShoppingShare } from '../../../domain/entities/shopping-share.entity';
+import { WasteEvent } from '../../../domain/entities/waste-event.entity';
 import { ProductStatus } from '../../../domain/enums';
 import { Period } from '../../../domain/enums/period.enum';
 import { hashShoppingShareToken } from '../../../application/utils/shopping-share-token';
+import { DeleteProductTypeUseCase } from '../../../application/use-cases/delete-product-type.use-case';
 import {
   InventoryLotDocument,
   InventoryLotSchema,
@@ -27,6 +30,8 @@ import {
   WasteEventSchema,
 } from './schemas/waste-event.schema';
 import { MongoPantryMutationAdapter } from './mongodb-pantry-mutation.adapter';
+import { MongoInventoryLotRepository } from './mongodb-inventory-lot.repository';
+import { MongoProductTypeRepository } from './mongodb-product-type.repository';
 
 describe('MongoPantryMutationAdapter', () => {
   let replSet: MongoMemoryReplSet;
@@ -193,6 +198,72 @@ describe('MongoPantryMutationAdapter', () => {
     ).toMatchObject({ activeInventoryLots: 1 });
   });
 
+  it('rejects a checkout key whose receipt expired instead of leaking a duplicate-key error', async () => {
+    const type = makeProductType();
+    await adapter.createProductType(type);
+    const lot = InventoryLot.create(
+      UserId.fromString('user-1'),
+      type.id,
+      undefined,
+      2,
+      QuantityUnit.PIECE,
+    );
+    const mutation = {
+      receipt: receipt('close_shopping_purchase'),
+      lots: [lot],
+      productTypes: [{ expected: type, updated: type, changed: false }],
+    };
+
+    await adapter.checkout(mutation);
+    await connection.collection('pantry_operations').deleteMany({});
+
+    await expect(adapter.checkout(mutation)).rejects.toThrow(
+      'Idempotency-Key expired or is ambiguous',
+    );
+    expect(await lotModel.countDocuments()).toBe(1);
+  });
+
+  it('rejects a consume-with-waste key whose receipt expired without applying it twice', async () => {
+    await adapter.createProductType(makeProductType());
+    const lot = makeLot(2);
+    await adapter.createInventoryLot(lot);
+    const operationReceipt = receipt('consume_inventory_lot');
+    const wasteEvent = WasteEvent.fromPrimitives({
+      id: 'waste-fixed',
+      userId: 'user-1',
+      productTypeId: 'type-1',
+      inventoryLotId: 'lot-1',
+      productName: 'Leche',
+      quantity: 1,
+      unit: QuantityUnit.PIECE,
+      reason: 'expired',
+      occurredAt: new Date('2026-09-01T00:00:00.000Z'),
+      createdAt: new Date('2026-09-01T00:00:00.000Z'),
+    });
+    const firstExpected = InventoryLot.fromPrimitives(lot.toPrimitives());
+    lot.consume(1);
+    await adapter.consume({
+      receipt: operationReceipt,
+      expectedLot: firstExpected,
+      updatedLot: lot,
+      wasteEvent,
+    });
+    await connection.collection('pantry_operations').deleteMany({});
+    const stored = await lotModel.findOne({ id: 'lot-1' }).lean();
+    const secondExpected = InventoryLot.fromPrimitives(stored as never);
+
+    await expect(
+      adapter.consume({
+        receipt: operationReceipt,
+        expectedLot: secondExpected,
+        updatedLot: null,
+        wasteEvent,
+      }),
+    ).rejects.toThrow('Idempotency-Key expired or is ambiguous');
+    expect((await lotModel.findOne({ id: 'lot-1' }).lean())?.quantity).toBe(1);
+    expect(await wasteModel.countDocuments()).toBe(1);
+  });
+
   it('rejects concurrent consumption instead of losing a quantity update', async () => {
     const lot = makeLot(3);
     await lotModel.create(lot.toPrimitives());
@@ -234,7 +305,11 @@ describe('MongoPantryMutationAdapter', () => {
       await connection
         .collection('pantry_quotas')
         .findOne({ ownerUserId: 'user-1' }),
-    ).toMatchObject({ activeInventoryLots: 0 });
+    ).toMatchObject({
+      activeInventoryLots: 0,
+      archivedInventoryLots: 1,
+      archivedLotsByProductType: { 'type-1': 1 },
+    });
     expected = InventoryLot.fromPrimitives(lot.toPrimitives());
     lot.restore();
     await adapter.restoreInventoryLot(expected, lot);
@@ -242,35 +317,323 @@ describe('MongoPantryMutationAdapter', () => {
       await connection
         .collection('pantry_quotas')
         .findOne({ ownerUserId: 'user-1' }),
-    ).toMatchObject({ activeInventoryLots: 1 });
+    ).toMatchObject({
+      activeInventoryLots: 1,
+      archivedInventoryLots: 0,
+      archivedLotsByProductType: { 'type-1': 0 },
+    });
     await adapter.deleteInventoryLot(lot);
     expect(
       await connection
         .collection('pantry_quotas')
         .findOne({ ownerUserId: 'user-1' }),
-    ).toMatchObject({ activeInventoryLots: 0 });
-    await adapter.beginPantryDeletion('user-1');
+    ).toMatchObject({
+      activeInventoryLots: 0,
+      archivedInventoryLots: 0,
+    });
+    const deletionToken = await adapter.beginPantryDeletion('user-1');
     await expect(adapter.createInventoryLot(lot)).rejects.toBeInstanceOf(
-      PantryQuotaExceededError,
+      PantryMutationConflictError,
     );
-    await adapter.completePantryDeletion('user-1');
-    expect(await connection.collection('pantry_quotas').countDocuments()).toBe(
-      0,
-    );
+    await adapter.completePantryDeletion('user-1', deletionToken);
+    expect(
+      await connection
+        .collection('pantry_quotas')
+        .findOne({ ownerUserId: 'user-1' }),
+    ).toMatchObject({
+      activeProductTypes: 0,
+      archivedProductTypes: 0,
+      activeInventoryLots: 0,
+      archivedInventoryLots: 0,
+      lotsByProductType: {},
+      archivedLotsByProductType: {},
+    });
     expect(
       await connection.collection('pantry_operations').countDocuments(),
     ).toBe(0);
   });
 
-  it('retains only a 24-hour account deletion lock and prevents late writes or reset unlocking', async () => {
-    const until = new Date(Date.now() + 86400_000);
+  it('moves product types between active and archived quotas on archive and restore', async () => {
     const type = makeProductType();
     await adapter.createProductType(type);
-    await adapter.beginPantryDeletion('user-1', until);
+    let expected = ProductType.fromPrimitives(type.toPrimitives());
+    type.archive();
+
+    await adapter.archiveProductType(expected, type);
+    expect(
+      await connection
+        .collection('pantry_quotas')
+        .findOne({ ownerUserId: 'user-1' }),
+    ).toMatchObject({ activeProductTypes: 0, archivedProductTypes: 1 });
+
+    expected = ProductType.fromPrimitives(type.toPrimitives());
+    type.restore();
+    await adapter.restoreProductType(expected, type);
+    expect(
+      await connection
+        .collection('pantry_quotas')
+        .findOne({ ownerUserId: 'user-1' }),
+    ).toMatchObject({ activeProductTypes: 1, archivedProductTypes: 0 });
+  });
+
+  it('admits only one concurrent lot archive at the archived quota boundary', async () => {
+    const type = makeProductType();
+    await adapter.createProductType(type);
+    const lots = [makeLot(1, 'lot-a'), makeLot(1, 'lot-b')];
+    await adapter.createInventoryLot(lots[0]);
+    await adapter.createInventoryLot(lots[1]);
+    await connection
+      .collection('pantry_quotas')
+      .updateOne(
+        { ownerUserId: 'user-1' },
+        { $set: { archivedInventoryLots: 249 } },
+      );
+    const expected = lots.map((lot) =>
+      InventoryLot.fromPrimitives(lot.toPrimitives()),
+    );
+    lots.forEach((lot) => lot.archive());
+
+    const results = await Promise.allSettled([
+      adapter.archiveInventoryLot(expected[0], lots[0]),
+      adapter.archiveInventoryLot(expected[1], lots[1]),
+    ]);
+
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      await lotModel.countDocuments({ archivedAt: { $exists: true } }),
+    ).toBe(1);
+    expect(
+      await connection
+        .collection('pantry_quotas')
+        .findOne({ ownerUserId: 'user-1' }),
+    ).toMatchObject({
+      activeInventoryLots: 1,
+      archivedInventoryLots: 250,
+    });
+  });
+
+  it('admits only one concurrent product type archive at the archived quota boundary', async () => {
+    const types = [makeProductType('type-a'), makeProductType('type-b')];
+    await adapter.createProductType(types[0]);
+    await adapter.createProductType(types[1]);
+    await connection
+      .collection('pantry_quotas')
+      .updateOne(
+        { ownerUserId: 'user-1' },
+        { $set: { archivedProductTypes: 249 } },
+      );
+    const expected = types.map((type) =>
+      ProductType.fromPrimitives(type.toPrimitives()),
+    );
+    types.forEach((type) => type.archive());
+
+    const results = await Promise.allSettled([
+      adapter.archiveProductType(expected[0], types[0]),
+      adapter.archiveProductType(expected[1], types[1]),
+    ]);
+
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      await typeModel.countDocuments({ archivedAt: { $exists: true } }),
+    ).toBe(1);
+    expect(
+      await connection
+        .collection('pantry_quotas')
+        .findOne({ ownerUserId: 'user-1' }),
+    ).toMatchObject({
+      activeProductTypes: 1,
+      archivedProductTypes: 250,
+    });
+  });
+
+  it('decrements archived lot and product type quotas during permanent cascade deletion', async () => {
+    const type = makeProductType();
+    await adapter.createProductType(type);
+    const lot = makeLot(1);
+    await adapter.createInventoryLot(lot);
+    const expectedLot = InventoryLot.fromPrimitives(lot.toPrimitives());
+    lot.archive();
+    await adapter.archiveInventoryLot(expectedLot, lot);
+    const expectedType = ProductType.fromPrimitives(type.toPrimitives());
+    type.archive();
+    await adapter.archiveProductType(expectedType, type);
+
+    await new DeleteProductTypeUseCase(
+      new MongoProductTypeRepository(typeModel),
+      new MongoInventoryLotRepository(lotModel),
+      adapter,
+    ).execute({
+      productTypeId: type.id.toString(),
+      userId: 'user-1',
+      confirmationText: type.baseName,
+    });
+
+    expect(await lotModel.countDocuments()).toBe(0);
+    expect(await typeModel.countDocuments()).toBe(0);
+    expect(
+      await connection
+        .collection('pantry_quotas')
+        .findOne({ ownerUserId: 'user-1' }),
+    ).toMatchObject({
+      activeProductTypes: 0,
+      archivedProductTypes: 0,
+      activeInventoryLots: 0,
+      archivedInventoryLots: 0,
+    });
+  });
+
+  it('serializes concurrent mutations behind an authoritative quota migration', async () => {
+    const type = makeProductType();
+    const activeLot = makeLot(1, 'active-lot');
+    const archivedLot = makeLot(1, 'archived-lot');
+    const newLot = makeLot(1, 'new-lot');
+    archivedLot.archive();
+    await typeModel.create({
+      ...type.toPrimitives(),
+      normalizedBaseName: type.baseName.trim().toLocaleLowerCase('es'),
+      activeName: type.baseName.trim().toLocaleLowerCase('es'),
+    });
+    await lotModel.create([
+      activeLot.toPrimitives(),
+      archivedLot.toPrimitives(),
+    ]);
+    await connection.collection('pantry_quotas').insertOne({
+      _id: 'user-1' as never,
+      ownerUserId: 'user-1',
+      activeProductTypes: 1,
+      archivedProductTypes: 0,
+      activeInventoryLots: 1,
+      archivedInventoryLots: 99,
+      savedShoppingLists: 0,
+      lotsByProductType: { 'type-1': 1 },
+      archivedLotsByProductType: { 'type-1': 99 },
+      updatedAt: new Date(),
+    });
+    const expected = InventoryLot.fromPrimitives(activeLot.toPrimitives());
+    activeLot.archive();
+
+    await Promise.all([
+      adapter.archiveInventoryLot(expected, activeLot),
+      adapter.createInventoryLot(newLot),
+    ]);
+
+    expect(
+      await connection
+        .collection('pantry_quotas')
+        .findOne({ ownerUserId: 'user-1' }),
+    ).toMatchObject({
+      quotaSchemaVersion: 2,
+      mutationEpoch: 0,
+      deleting: false,
+      activeProductTypes: 1,
+      archivedProductTypes: 0,
+      activeInventoryLots: 1,
+      archivedInventoryLots: 2,
+      lotsByProductType: { 'type-1': 1 },
+      archivedLotsByProductType: { 'type-1': 2 },
+    });
+  });
+
+  it('rejects a writer that captured the quota epoch before deletion reset', async () => {
+    await adapter.createProductType(makeProductType('seed'));
+    const runtimeAdapter = adapter as unknown as {
+      runAtomicMutation: (...args: unknown[]) => Promise<unknown>;
+    };
+    const runAtomicMutation = runtimeAdapter.runAtomicMutation.bind(
+      adapter,
+    ) as typeof runtimeAdapter.runAtomicMutation;
+    let resumeWriter!: () => void;
+    let writerReady!: () => void;
+    const writerGate = new Promise<void>((resolve) => (resumeWriter = resolve));
+    const ready = new Promise<void>((resolve) => (writerReady = resolve));
+    runtimeAdapter.runAtomicMutation = async (...args: unknown[]) => {
+      writerReady();
+      await writerGate;
+      return runAtomicMutation(...args);
+    };
+
+    const lateWrite = adapter.createProductType(makeProductType('late'));
+    await ready;
+    const deletionToken = await adapter.beginPantryDeletion('user-1');
     await typeModel.deleteMany({ userId: 'user-1' });
-    await adapter.completePantryDeletion('user-1');
-    await expect(adapter.createProductType(type)).rejects.toThrow();
-    await adapter.completePantryDeletion('user-1', until);
+    await adapter.completePantryDeletion('user-1', deletionToken);
+    resumeWriter();
+
+    await expect(lateWrite).rejects.toThrow('Pantry');
+    runtimeAdapter.runAtomicMutation = runAtomicMutation;
+    expect(await typeModel.countDocuments({ userId: 'user-1' })).toBe(0);
+    expect(
+      await connection
+        .collection('pantry_quotas')
+        .findOne({ ownerUserId: 'user-1' }),
+    ).toMatchObject({
+      quotaSchemaVersion: 2,
+      mutationEpoch: 1,
+      deleting: false,
+      activeProductTypes: 0,
+    });
+  });
+
+  it('prevents another deletion from sweeping data written after the owner completes', async () => {
+    const type = makeProductType();
+    await adapter.createProductType(type);
+    const runtimeAdapter = adapter as unknown as {
+      beginPantryDeletion: (
+        ownerUserId: string,
+        options?: { deletionToken?: string; retainFence?: boolean },
+      ) => Promise<string>;
+      completePantryDeletion: (
+        ownerUserId: string,
+        deletionToken: string,
+        retainFence?: boolean,
+      ) => Promise<void>;
+    };
+    await expect(
+      runtimeAdapter.beginPantryDeletion('user-1', {
+        deletionToken: 'owner-token',
+      }),
+    ).resolves.toBe('owner-token');
+    await expect(
+      runtimeAdapter.beginPantryDeletion('user-1', {
+        deletionToken: 'other-token',
+      }),
+    ).rejects.toBeInstanceOf(PantryMutationConflictError);
+    await typeModel.deleteMany({ userId: 'user-1' });
+    await runtimeAdapter.completePantryDeletion('user-1', 'owner-token');
+
+    const newType = makeProductType('after-reset');
+    await adapter.createProductType(newType);
+    await expect(
+      runtimeAdapter.completePantryDeletion('user-1', 'other-token'),
+    ).rejects.toBeInstanceOf(PantryMutationConflictError);
+    expect(await typeModel.countDocuments({ userId: 'user-1' })).toBe(1);
+  });
+
+  it('retains an account deletion fence without a 24-hour TTL', async () => {
+    const runtimeAdapter = adapter as unknown as {
+      beginPantryDeletion: (
+        ownerUserId: string,
+        options?: { deletionToken?: string; retainFence?: boolean },
+      ) => Promise<string>;
+      completePantryDeletion: (
+        ownerUserId: string,
+        deletionToken: string,
+        retainFence?: boolean,
+      ) => Promise<void>;
+    };
+    await runtimeAdapter.beginPantryDeletion('user-1', {
+      deletionToken: 'account-delete-token',
+      retainFence: true,
+    });
+    await runtimeAdapter.completePantryDeletion(
+      'user-1',
+      'account-delete-token',
+      true,
+    );
     expect(
       await connection
         .collection('pantry_quotas')
@@ -278,19 +641,205 @@ describe('MongoPantryMutationAdapter', () => {
     ).toEqual({
       _id: 'user-1',
       ownerUserId: 'user-1',
+      quotaSchemaVersion: 2,
+      mutationEpoch: 1,
       deleting: true,
-      expiresAt: until,
+      deletionToken: 'account-delete-token',
+      deletionStartedAt: expect.any(Date),
+      retainFence: true,
     });
-    await adapter.completePantryDeletion('user-1');
-    await expect(adapter.createProductType(type)).rejects.toThrow();
-    expect(await typeModel.countDocuments()).toBe(0);
-    const indexes = await connection.collection('pantry_quotas').indexes();
-    expect(
-      indexes.find((index) => index.name === 'pantry_deletion_lock_ttl'),
-    ).toMatchObject({ key: { expiresAt: 1 }, expireAfterSeconds: 0 });
+    await expect(
+      adapter.createProductType(makeProductType('after-25-hours')),
+    ).rejects.toBeInstanceOf(PantryMutationConflictError);
     expect(
       await connection.collection('pantry_operations').countDocuments(),
     ).toBe(0);
+  });
+
+  it('fails completion when the owned fence changes during the final CAS', async () => {
+    const runtimeAdapter = adapter as unknown as {
+      beginPantryDeletion: (
+        ownerUserId: string,
+        options?: { deletionToken?: string },
+      ) => Promise<string>;
+      completePantryDeletion: (
+        ownerUserId: string,
+        deletionToken: string,
+      ) => Promise<void>;
+    };
+    await runtimeAdapter.beginPantryDeletion('user-1', {
+      deletionToken: 'owner-token',
+    });
+    const quotas = connection.collection('pantry_quotas');
+    jest.spyOn(quotas, 'replaceOne').mockResolvedValueOnce({
+      acknowledged: true,
+      matchedCount: 0,
+      modifiedCount: 0,
+      upsertedCount: 0,
+      upsertedId: null,
+    });
+
+    await expect(
+      runtimeAdapter.completePantryDeletion('user-1', 'owner-token'),
+    ).rejects.toBeInstanceOf(PantryMutationConflictError);
+  });
+
+  it('takes over an abandoned normal reset after the Lambda safety margin', async () => {
+    const runtimeAdapter = adapter as unknown as {
+      beginPantryDeletion: (
+        ownerUserId: string,
+        options?: { deletionToken?: string },
+      ) => Promise<string>;
+    };
+    await runtimeAdapter.beginPantryDeletion('user-1', {
+      deletionToken: 'abandoned-token',
+    });
+    await connection
+      .collection('pantry_quotas')
+      .updateOne(
+        { _id: 'user-1' as never },
+        { $set: { deletionStartedAt: new Date(Date.now() - 61_000) } },
+      );
+
+    await expect(
+      runtimeAdapter.beginPantryDeletion('user-1', {
+        deletionToken: 'takeover-token',
+      }),
+    ).resolves.toBe('takeover-token');
+    expect(
+      await connection
+        .collection('pantry_quotas')
+        .findOne({ _id: 'user-1' as never }),
+    ).toMatchObject({
+      deleting: true,
+      deletionToken: 'takeover-token',
+      mutationEpoch: 2,
+      retainFence: false,
+    });
+  });
+
+  it('promotes an abandoned normal reset to the durable account-deletion fence', async () => {
+    const runtimeAdapter = adapter as unknown as {
+      beginPantryDeletion: (
+        ownerUserId: string,
+        options?: { deletionToken?: string; retainFence?: boolean },
+      ) => Promise<string>;
+      completePantryDeletion: (
+        ownerUserId: string,
+        deletionToken: string,
+        retainFence?: boolean,
+      ) => Promise<void>;
+    };
+    await runtimeAdapter.beginPantryDeletion('user-1', {
+      deletionToken: 'abandoned-reset-token',
+    });
+    await connection
+      .collection('pantry_quotas')
+      .updateOne(
+        { _id: 'user-1' as never },
+        { $set: { deletionStartedAt: new Date(Date.now() - 61_000) } },
+      );
+
+    await expect(
+      runtimeAdapter.beginPantryDeletion('user-1', {
+        deletionToken: 'account-job-token',
+        retainFence: true,
+      }),
+    ).resolves.toBe('account-job-token');
+    expect(
+      await connection
+        .collection('pantry_quotas')
+        .findOne({ _id: 'user-1' as never }),
+    ).toMatchObject({
+      deleting: true,
+      deletionToken: 'account-job-token',
+      mutationEpoch: 2,
+      retainFence: true,
+    });
+
+    await runtimeAdapter.completePantryDeletion(
+      'user-1',
+      'account-job-token',
+      true,
+    );
+    expect(
+      await connection
+        .collection('pantry_quotas')
+        .findOne({ _id: 'user-1' as never }),
+    ).toMatchObject({
+      deleting: true,
+      deletionToken: 'account-job-token',
+      mutationEpoch: 2,
+      retainFence: true,
+    });
+  });
+
+  it('rebuilds quota before aborting a failed normal reset', async () => {
+    const runtimeAdapter = adapter as unknown as {
+      beginPantryDeletion: (
+        ownerUserId: string,
+        options?: { deletionToken?: string },
+      ) => Promise<string>;
+      abortPantryDeletion: (
+        ownerUserId: string,
+        deletionToken: string,
+      ) => Promise<void>;
+    };
+    const type = makeProductType('remaining');
+    await adapter.createProductType(type);
+    await runtimeAdapter.beginPantryDeletion('user-1', {
+      deletionToken: 'owner-token',
+    });
+
+    await runtimeAdapter.abortPantryDeletion('user-1', 'owner-token');
+
+    expect(
+      await connection
+        .collection('pantry_quotas')
+        .findOne({ _id: 'user-1' as never }),
+    ).toMatchObject({
+      deleting: false,
+      mutationEpoch: 1,
+      activeProductTypes: 1,
+    });
+    await expect(
+      adapter.createProductType(makeProductType('after-abort')),
+    ).resolves.toBeDefined();
+  });
+
+  it('keeps a completed reset receipt while later pantry data is written', async () => {
+    const runtimeAdapter = adapter as unknown as {
+      beginPantryDeletion: (
+        ownerUserId: string,
+        options?: { deletionToken?: string },
+      ) => Promise<string>;
+      completePantryDeletion: (
+        ownerUserId: string,
+        deletionToken: string,
+        retainFence: boolean,
+        receipt: ReturnType<typeof deleteReceipt>,
+      ) => Promise<void>;
+    };
+    const original = makeProductType('before-reset');
+    await adapter.createProductType(original);
+    const receipt = deleteReceipt();
+    await runtimeAdapter.beginPantryDeletion('user-1', {
+      deletionToken: receipt.operationId,
+    });
+    await typeModel.deleteMany({ userId: 'user-1' });
+    await runtimeAdapter.completePantryDeletion(
+      'user-1',
+      receipt.operationId,
+      false,
+      receipt,
+    );
+    const later = makeProductType('after-reset');
+    await adapter.createProductType(later);
+
+    await expect(adapter.findReceipt(receipt)).resolves.toMatchObject({
+      response: receipt.response,
+    });
+    expect(await typeModel.countDocuments({ id: later.id.toString() })).toBe(1);
   });
 
   it('enforces active product-name uniqueness concurrently', async () => {
@@ -347,10 +896,7 @@ describe('MongoPantryMutationAdapter', () => {
     product.updateQuantity(1);
     share.revoke('user-1');
 
-    await adapter.beginPantryDeletion(
-      'user-1',
-      new Date(Date.now() + 86_400_000),
-    );
+    await adapter.beginPantryDeletion('user-1', { retainFence: true });
     await connection.collection('products').deleteMany({ userId: 'user-1' });
     await connection
       .collection('shoppingShares')
@@ -424,11 +970,34 @@ function receipt(
   };
 }
 
-function makeLot(quantity: number): InventoryLot {
+function deleteReceipt() {
+  const createdAt = new Date();
+  return {
+    operationId: 'reset-operation',
+    ownerUserId: 'user-1',
+    operation: 'delete_pantry_data' as const,
+    requestHash: 'delete-request-hash',
+    response: {
+      deletedInventoryLotCount: 5,
+      deletedProductTypeCount: 3,
+      deletedShoppingListCount: 1,
+      deletedShoppingShareCount: 2,
+      deletedWasteEventCount: 4,
+    },
+    createdAt,
+    expiresAt: new Date(createdAt.getTime() + 7 * 86400_000),
+  };
+}
+
+function makeLot(
+  quantity: number,
+  id = 'lot-1',
+  productTypeId = 'type-1',
+): InventoryLot {
   return InventoryLot.fromPrimitives({
-    id: 'lot-1',
+    id,
     userId: 'user-1',
-    productTypeId: 'type-1',
+    productTypeId,
     quantity,
     unit: QuantityUnit.PIECE,
     createdAt: new Date('2026-09-01T00:00:00.000Z'),
@@ -436,11 +1005,11 @@ function makeLot(quantity: number): InventoryLot {
   });
 }
 
-function makeProductType(): ProductType {
+function makeProductType(id = 'type-1'): ProductType {
   return ProductType.fromPrimitives({
-    id: 'type-1',
+    id,
     userId: 'user-1',
-    baseName: 'Leche',
+    baseName: `Leche ${id}`,
     category: ProductCategory.FOOD,
     defaultUnit: QuantityUnit.PIECE,
     createdAt: new Date('2026-09-01T00:00:00.000Z'),

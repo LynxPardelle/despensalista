@@ -69,11 +69,11 @@ desplegados y verificados; la tabla anterior solo describe el contrato.
 
 ## Operacion de bajo costo
 
-- Logs API/Lambda con retencion acotada y hasta cuatro alarmas estandar en
-  produccion.
+- Logs API/Lambda con retencion acotada, cuatro alarmas operativas y una alarma
+  sin acciones para el guard de correo en produccion.
 - Smoke publico horario en GitHub Actions; sin CloudWatch Synthetics.
-- Un secreto de verificacion de origen para produccion y otro compartido solo
-  entre `dev`/`tst`.
+- Un secreto de verificacion de origen independiente para cada stage: `dev`,
+  `tst` y `prod`.
 - Ensayo PITR de las cuatro tablas completado el 2026-09-25; no sustituye un
   failover completo cronometrado.
 

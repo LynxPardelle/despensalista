@@ -9,13 +9,17 @@ import {
   TransactWriteCommand,
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb';
+import { randomUUID } from 'node:crypto';
 import {
   CloseShoppingPurchaseMutation,
   ConsumeInventoryLotMutation,
   IdempotencyPayloadConflictError,
   IdempotentMutationResult,
+  PantryDeletionReceipt,
+  PantryDeletionResult,
   PantryMutationConflictError,
   PantryMutationPort,
+  PantryDeletionRequest,
   PantryOperationLookup,
   PantryOperationReceipt,
   PantryQuotaExceededError,
@@ -23,6 +27,8 @@ import {
 import {
   MAX_ACTIVE_INVENTORY_LOTS_PER_USER,
   MAX_ACTIVE_PRODUCT_TYPES_PER_USER,
+  MAX_ARCHIVED_INVENTORY_LOTS_PER_USER,
+  MAX_ARCHIVED_PRODUCT_TYPES_PER_USER,
   MAX_INVENTORY_LOTS_PER_PRODUCT_TYPE,
   MAX_SAVED_SHOPPING_LISTS_PER_USER,
 } from '../../../application/constants/query-limits';
@@ -53,12 +59,14 @@ type TransactionItems = NonNullable<TransactWriteCommandInput['TransactItems']>;
 
 interface PantryOperationItem {
   pk: string;
+  gsi2pk: string;
+  gsi2sk: string;
   entityType: 'PANTRY_OPERATION';
   operationId: string;
   ownerUserId: string;
   operation: PantryOperationReceipt['operation'];
   requestHash: string;
-  response: PersistedLot | PersistedLot[] | null;
+  response: PersistedLot | PersistedLot[] | PantryDeletionResult | null;
   createdAt: string;
   expiresAt: string;
   expiresAtEpochSeconds: number;
@@ -68,13 +76,23 @@ interface PantryQuotaItem {
   pk: string;
   entityType: 'PANTRY_QUOTA';
   ownerUserId: string;
+  quotaSchemaVersion: number;
+  mutationEpoch: number;
+  deleting: false;
   activeProductTypes: number;
+  archivedProductTypes: number;
   activeInventoryLots: number;
+  archivedInventoryLots: number;
   savedShoppingLists: number;
   lotsByProductType: Record<string, number>;
+  archivedLotsByProductType: Record<string, number>;
   productTypeNames: Record<string, string>;
   updatedAt: string;
 }
+
+const PANTRY_QUOTA_SCHEMA_VERSION = 2;
+// ponytail: 60s is safely above the production Lambda's 15s timeout; use a durable worker lease if that runtime ceiling changes.
+const PANTRY_DELETION_TAKEOVER_MS = 60_000;
 
 type PersistedLot = Omit<
   InventoryLotPrimitives,
@@ -143,7 +161,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
   async consume(
     mutation: ConsumeInventoryLotMutation,
   ): Promise<IdempotentMutationResult<InventoryLotPrimitives | null>> {
-    await this.ensureQuota(mutation.receipt.ownerUserId);
+    const quotaEpoch = await this.ensureQuota(mutation.receipt.ownerUserId);
     const response = mutation.updatedLot?.toPrimitives() ?? null;
     const transactionItems: TransactionItems = [
       receiptPut(this.usersTable, mutation.receipt, response),
@@ -219,13 +237,14 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       response,
       transactionItems,
       quotaIndex,
+      quotaEpoch,
     );
   }
 
   async checkout(
     mutation: CloseShoppingPurchaseMutation,
   ): Promise<IdempotentMutationResult<InventoryLotPrimitives[]>> {
-    await this.ensureQuota(mutation.receipt.ownerUserId);
+    const quotaEpoch = await this.ensureQuota(mutation.receipt.ownerUserId);
     const response = mutation.lots.map((lot) => lot.toPrimitives());
     const transactionItems: TransactionItems = [
       receiptPut(this.usersTable, mutation.receipt, response),
@@ -282,11 +301,12 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       response,
       transactionItems,
       transactionItems.length - 1,
+      quotaEpoch,
     );
   }
 
   async createInventoryLot(lot: InventoryLot): Promise<InventoryLot> {
-    await this.ensureQuota(lot.userId.toString());
+    const quotaEpoch = await this.ensureQuota(lot.userId.toString());
     const productTypeId = lot.productTypeId.toString();
     const transactionItems: TransactionItems = [
       {
@@ -308,6 +328,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       transactionItems,
       1,
       'Pantry inventory lot quota exceeded',
+      quotaEpoch,
     );
     return lot;
   }
@@ -316,7 +337,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
     expected: InventoryLot,
     archived: InventoryLot,
   ): Promise<InventoryLot> {
-    await this.ensureQuota(expected.userId.toString());
+    const quotaEpoch = await this.ensureQuota(expected.userId.toString());
     const transactionItems: TransactionItems = [
       conditionalLotPut(
         this.inventoryLotsTable,
@@ -327,7 +348,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
     ];
     if (!expected.archivedAt && archived.archivedAt) {
       transactionItems.push(
-        decrementLotQuota(
+        archiveLotQuota(
           this.usersTable,
           expected.userId.toString(),
           expected.productTypeId.toString(),
@@ -351,6 +372,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       transactionItems,
       quotaIndex,
       'Pantry quota is inconsistent',
+      quotaEpoch,
     );
     return archived;
   }
@@ -359,7 +381,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
     expected: InventoryLot,
     restored: InventoryLot,
   ): Promise<InventoryLot> {
-    await this.ensureQuota(expected.userId.toString());
+    const quotaEpoch = await this.ensureQuota(expected.userId.toString());
     const transactionItems: TransactionItems = [
       conditionalLotPut(
         this.inventoryLotsTable,
@@ -370,7 +392,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
     ];
     if (expected.archivedAt && !restored.archivedAt) {
       transactionItems.push(
-        incrementSingleLotQuota(
+        restoreLotQuota(
           this.usersTable,
           expected.userId.toString(),
           expected.productTypeId.toString(),
@@ -390,12 +412,13 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       transactionItems,
       quotaIndex,
       'Pantry inventory lot quota exceeded',
+      quotaEpoch,
     );
     return restored;
   }
 
   async createProductType(productType: ProductType): Promise<ProductType> {
-    await this.ensureQuota(productType.userId.toString());
+    const quotaEpoch = await this.ensureQuota(productType.userId.toString());
     const transactionItems: TransactionItems = [
       {
         Put: {
@@ -410,6 +433,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       transactionItems,
       1,
       'Active product type quota exceeded',
+      quotaEpoch,
     );
     return productType;
   }
@@ -418,7 +442,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
     expected: ProductType,
     archived: ProductType,
   ): Promise<ProductType> {
-    await this.ensureQuota(expected.userId.toString());
+    const quotaEpoch = await this.ensureQuota(expected.userId.toString());
     const transactionItems: TransactionItems = [
       conditionalProductTypePut(
         this.productTypesTable,
@@ -428,7 +452,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       ),
     ];
     if (!expected.archivedAt && archived.archivedAt) {
-      transactionItems.push(productTypeQuota(this.usersTable, archived, -1));
+      transactionItems.push(archiveProductTypeQuota(this.usersTable, archived));
     } else {
       transactionItems.push(
         quotaAvailable(this.usersTable, expected.userId.toString()),
@@ -438,6 +462,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       transactionItems,
       transactionItems.length - 1,
       'Pantry quota is inconsistent',
+      quotaEpoch,
     );
     return archived;
   }
@@ -446,7 +471,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
     expected: ProductType,
     restored: ProductType,
   ): Promise<ProductType> {
-    await this.ensureQuota(expected.userId.toString());
+    const quotaEpoch = await this.ensureQuota(expected.userId.toString());
     const transactionItems: TransactionItems = [
       conditionalProductTypePut(
         this.productTypesTable,
@@ -456,7 +481,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       ),
     ];
     if (expected.archivedAt && !restored.archivedAt) {
-      transactionItems.push(productTypeQuota(this.usersTable, restored, 1));
+      transactionItems.push(restoreProductTypeQuota(this.usersTable, restored));
     } else {
       transactionItems.push(
         quotaAvailable(this.usersTable, expected.userId.toString()),
@@ -466,12 +491,13 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       transactionItems,
       transactionItems.length - 1,
       'Active product type quota exceeded',
+      quotaEpoch,
     );
     return restored;
   }
 
   async createShoppingList(list: ShoppingList): Promise<ShoppingList> {
-    await this.ensureQuota(list.ownerUserId);
+    const quotaEpoch = await this.ensureQuota(list.ownerUserId);
     const transactionItems: TransactionItems = [
       {
         Put: {
@@ -492,13 +518,14 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       transactionItems,
       1,
       'Saved shopping list quota exceeded',
+      quotaEpoch,
     );
     return list;
   }
 
   async createProduct(product: Product): Promise<Product> {
     const ownerUserId = product.userId.toString();
-    await this.ensureQuota(ownerUserId);
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
     await this.commitQuotaMutation(
       [
         {
@@ -512,13 +539,14 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       ],
       1,
       'Pantry is being deleted',
+      quotaEpoch,
     );
     return product;
   }
 
   async updateProduct(expected: Product, updated: Product): Promise<Product> {
     const ownerUserId = expected.userId.toString();
-    await this.ensureQuota(ownerUserId);
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
     await this.commitQuotaMutation(
       [
         {
@@ -538,12 +566,13 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       ],
       1,
       'Pantry is being deleted',
+      quotaEpoch,
     );
     return updated;
   }
 
   async createShoppingShare(share: ShoppingShare): Promise<ShoppingShare> {
-    await this.ensureQuota(share.ownerUserId);
+    const quotaEpoch = await this.ensureQuota(share.ownerUserId);
     await this.commitQuotaMutation(
       [
         {
@@ -557,6 +586,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       ],
       1,
       'Pantry is being deleted',
+      quotaEpoch,
     );
     return share;
   }
@@ -566,7 +596,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
     updated: ShoppingShare,
   ): Promise<ShoppingShare> {
     const expectedPrimitives = expected.toPrimitives();
-    await this.ensureQuota(expected.ownerUserId);
+    const quotaEpoch = await this.ensureQuota(expected.ownerUserId);
     await this.commitQuotaMutation(
       [
         {
@@ -586,12 +616,13 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       ],
       1,
       'Pantry is being deleted',
+      quotaEpoch,
     );
     return updated;
   }
 
   async deleteShoppingList(list: ShoppingList): Promise<void> {
-    await this.ensureQuota(list.ownerUserId);
+    const quotaEpoch = await this.ensureQuota(list.ownerUserId);
     const primitives = list.toPrimitives();
     const transactionItems: TransactionItems = [
       {
@@ -617,11 +648,12 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       transactionItems,
       1,
       'Pantry quota is inconsistent',
+      quotaEpoch,
     );
   }
 
   async deleteInventoryLot(lot: InventoryLot): Promise<void> {
-    await this.ensureQuota(lot.userId.toString());
+    const quotaEpoch = await this.ensureQuota(lot.userId.toString());
     const items: TransactionItems = [
       {
         Delete: {
@@ -637,7 +669,12 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
         },
       },
       lot.archivedAt
-        ? quotaAvailable(this.usersTable, lot.userId.toString())
+        ? decrementArchivedLotQuota(
+            this.usersTable,
+            lot.userId.toString(),
+            lot.productTypeId.toString(),
+            new Date(),
+          )
         : decrementLotQuota(
             this.usersTable,
             lot.userId.toString(),
@@ -645,11 +682,16 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
             new Date(),
           ),
     ];
-    await this.commitQuotaMutation(items, 1, 'Pantry quota is inconsistent');
+    await this.commitQuotaMutation(
+      items,
+      1,
+      'Pantry quota is inconsistent',
+      quotaEpoch,
+    );
   }
 
   async deleteProductType(productType: ProductType): Promise<void> {
-    await this.ensureQuota(productType.userId.toString());
+    const quotaEpoch = await this.ensureQuota(productType.userId.toString());
     await this.commitQuotaMutation(
       [
         {
@@ -665,25 +707,17 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
             },
           },
         },
-        {
-          ConditionCheck: {
-            TableName: this.usersTable,
-            Key: { pk: quotaKey(productType.userId.toString()) },
-            ConditionExpression:
-              'attribute_not_exists(deleting) AND (attribute_not_exists(lotsByProductType.#type) OR lotsByProductType.#type = :zero)',
-            ExpressionAttributeNames: { '#type': productType.id.toString() },
-            ExpressionAttributeValues: { ':zero': 0 },
-          },
-        },
+        deleteArchivedProductTypeQuota(this.usersTable, productType),
       ],
       1,
       'Product type still has active inventory',
+      quotaEpoch,
     );
   }
 
   async beginProductTypeDeletion(productType: ProductType): Promise<void> {
     const ownerUserId = productType.userId.toString();
-    await this.ensureQuota(ownerUserId);
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
     await this.commitQuotaMutation(
       [
         {
@@ -705,6 +739,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       ],
       1,
       'Pantry is being deleted',
+      quotaEpoch,
     );
   }
 
@@ -712,7 +747,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
     expected: ProductType,
     updated: ProductType,
   ): Promise<ProductType> {
-    await this.ensureQuota(expected.userId.toString());
+    const quotaEpoch = await this.ensureQuota(expected.userId.toString());
     await this.commitQuotaMutation(
       [
         conditionalProductTypePut(
@@ -725,93 +760,262 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       ],
       1,
       'Pantry is being deleted',
+      quotaEpoch,
     );
     return updated;
   }
 
   async beginPantryDeletion(
     ownerUserId: string,
-    preserveDeletionLockUntil?: Date,
-  ): Promise<void> {
-    await this.ensureQuota(ownerUserId);
-    await this.dynamoDb.send(
-      new UpdateCommand({
-        TableName: this.usersTable,
-        Key: { pk: quotaKey(ownerUserId) },
-        UpdateExpression: preserveDeletionLockUntil
-          ? 'SET deleting = :deleting, expiresAt = :expiresAt, expiresAtEpochSeconds = :expiresAtEpochSeconds'
-          : 'SET deleting = :deleting',
-        ExpressionAttributeValues: {
-          ':deleting': true,
-          ...(preserveDeletionLockUntil
-            ? {
-                ':expiresAt': preserveDeletionLockUntil.toISOString(),
-                ':expiresAtEpochSeconds': Math.floor(
-                  preserveDeletionLockUntil.getTime() / 1000,
-                ),
-              }
-            : {}),
-        },
-      }),
-    );
+    request: PantryDeletionRequest = {},
+  ): Promise<string> {
+    const deletionToken = request.deletionToken ?? randomUUID();
+    const retainFence = request.retainFence === true;
+    const deletionStartedAt = new Date().toISOString();
+    const existing = await this.getQuota(ownerUserId);
+    if (existing?.deleting && typeof existing.migrationToken !== 'string') {
+      if (
+        retainFence &&
+        existing.deletionToken === deletionToken &&
+        existing.retainFence === retainFence
+      ) {
+        return deletionToken;
+      }
+      const existingStartedAt =
+        typeof existing.deletionStartedAt === 'string'
+          ? existing.deletionStartedAt
+          : undefined;
+      if (
+        existing.retainFence === false &&
+        typeof existing.mutationEpoch === 'number' &&
+        existingStartedAt &&
+        Date.parse(existingStartedAt) < Date.now() - PANTRY_DELETION_TAKEOVER_MS
+      ) {
+        try {
+          await this.dynamoDb.send(
+            new UpdateCommand({
+              TableName: this.usersTable,
+              Key: { pk: quotaKey(ownerUserId) },
+              UpdateExpression:
+                'SET mutationEpoch = :nextEpoch, deletionToken = :deletionToken, deletionStartedAt = :deletionStartedAt, retainFence = :nextRetainFence',
+              ConditionExpression:
+                'quotaSchemaVersion = :quotaSchemaVersion AND mutationEpoch = :mutationEpoch AND deleting = :deleting AND retainFence = :previousRetainFence AND deletionToken = :previousDeletionToken AND deletionStartedAt = :previousStartedAt',
+              ExpressionAttributeValues: {
+                ':quotaSchemaVersion': PANTRY_QUOTA_SCHEMA_VERSION,
+                ':mutationEpoch': existing.mutationEpoch,
+                ':nextEpoch': existing.mutationEpoch + 1,
+                ':deleting': true,
+                ':previousRetainFence': false,
+                ':nextRetainFence': retainFence,
+                ':previousDeletionToken': existing.deletionToken,
+                ':previousStartedAt': existingStartedAt,
+                ':deletionToken': deletionToken,
+                ':deletionStartedAt': deletionStartedAt,
+              },
+            }),
+          );
+          return deletionToken;
+        } catch (error) {
+          if (!isConditionalCheckFailed(error)) throw error;
+        }
+      }
+      throw new PantryMutationConflictError('Pantry is already being deleted');
+    }
+    const mutationEpoch = await this.ensureQuota(ownerUserId);
+    try {
+      await this.dynamoDb.send(
+        new UpdateCommand({
+          TableName: this.usersTable,
+          Key: { pk: quotaKey(ownerUserId) },
+          UpdateExpression:
+            'SET deleting = :deleting, mutationEpoch = :nextEpoch, deletionToken = :deletionToken, deletionStartedAt = :deletionStartedAt, retainFence = :retainFence REMOVE expiresAt, expiresAtEpochSeconds',
+          ConditionExpression:
+            'quotaSchemaVersion = :quotaSchemaVersion AND mutationEpoch = :mutationEpoch AND deleting = :notDeleting',
+          ExpressionAttributeValues: {
+            ':deleting': true,
+            ':notDeleting': false,
+            ':quotaSchemaVersion': PANTRY_QUOTA_SCHEMA_VERSION,
+            ':mutationEpoch': mutationEpoch,
+            ':nextEpoch': mutationEpoch + 1,
+            ':deletionToken': deletionToken,
+            ':deletionStartedAt': deletionStartedAt,
+            ':retainFence': retainFence,
+          },
+        }),
+      );
+      return deletionToken;
+    } catch (error) {
+      if (!isConditionalCheckFailed(error)) throw error;
+      const winner = await this.getQuota(ownerUserId);
+      if (
+        winner?.deleting === true &&
+        winner.deletionToken === deletionToken &&
+        retainFence &&
+        winner.retainFence === true
+      ) {
+        return deletionToken;
+      }
+      throw new PantryMutationConflictError('Pantry is already being deleted');
+    }
   }
 
   async completePantryDeletion(
     ownerUserId: string,
-    preserveDeletionLockUntil?: Date,
+    deletionToken: string,
+    retainFence = false,
+    receipt?: PantryDeletionReceipt,
   ): Promise<void> {
-    // The regular repositories use GSIs; a strongly consistent final sweep includes just-committed writes.
-    for (const table of [
-      this.inventoryLotsTable,
-      this.productTypesTable,
-      this.productsTable,
+    const fence = await this.dynamoDb.send(
+      new GetCommand({
+        TableName: this.usersTable,
+        Key: { pk: quotaKey(ownerUserId) },
+        ConsistentRead: true,
+      }),
+    );
+    const mutationEpoch =
+      typeof fence.Item?.mutationEpoch === 'number'
+        ? fence.Item.mutationEpoch
+        : undefined;
+    const deletionStartedAt =
+      typeof fence.Item?.deletionStartedAt === 'string'
+        ? fence.Item.deletionStartedAt
+        : undefined;
+    if (
+      fence.Item?.quotaSchemaVersion !== PANTRY_QUOTA_SCHEMA_VERSION ||
+      fence.Item?.deleting !== true ||
+      typeof mutationEpoch !== 'number' ||
+      (retainFence && !deletionStartedAt) ||
+      fence.Item?.deletionToken !== deletionToken ||
+      fence.Item?.retainFence !== retainFence ||
+      (receipt !== undefined &&
+        (retainFence ||
+          receipt.ownerUserId !== ownerUserId ||
+          receipt.operationId !== deletionToken))
+    ) {
+      throw new PantryMutationConflictError('Pantry deletion fence is missing');
+    }
+
+    for (const { tableName, itemKey } of [
+      { tableName: this.inventoryLotsTable, itemKey: 'id' },
+      { tableName: this.productTypesTable, itemKey: 'id' },
+      { tableName: this.productsTable, itemKey: 'id' },
     ]) {
-      const remaining = await this.scanAll(table, ownerUserId);
-      for (const item of remaining) {
+      for (const item of await this.scanOwned(tableName, ownerUserId)) {
         await this.dynamoDb.send(
-          new DeleteCommand({ TableName: table, Key: { id: item.id } }),
+          new DeleteCommand({
+            TableName: tableName,
+            Key: { [itemKey]: item[itemKey] },
+          }),
         );
       }
     }
-    const items = await this.scanAll(this.usersTable, ownerUserId);
-    for (const item of items.filter((item) =>
-      ['PANTRY_OPERATION', 'SHOPPING_LIST', 'SHOPPING_SHARE'].includes(
-        String(item.entityType),
-      ),
+    const userItems = await this.scanOwned(this.usersTable, ownerUserId);
+    for (const item of userItems.filter(
+      (item) =>
+        ['SHOPPING_LIST', 'SHOPPING_SHARE'].includes(String(item.entityType)) ||
+        (item.entityType === 'PANTRY_OPERATION' &&
+          (retainFence || item.operation !== 'delete_pantry_data')),
     )) {
-      await this.dynamoDb.send(
-        new DeleteCommand({ TableName: this.usersTable, Key: { pk: item.pk } }),
-      );
-    }
-    if (preserveDeletionLockUntil) {
-      await this.dynamoDb.send(
-        new PutCommand({
-          TableName: this.usersTable,
-          Item: {
-            pk: quotaKey(ownerUserId),
-            entityType: 'PANTRY_QUOTA',
-            ownerUserId,
-            deleting: true,
-            expiresAt: preserveDeletionLockUntil.toISOString(),
-            expiresAtEpochSeconds: Math.floor(
-              preserveDeletionLockUntil.getTime() / 1000,
-            ),
-          },
-        }),
-      );
-      return;
-    }
-    try {
       await this.dynamoDb.send(
         new DeleteCommand({
           TableName: this.usersTable,
-          Key: { pk: quotaKey(ownerUserId) },
-          // A normal reset finishing late must not unlock a concurrently deleted account.
-          ConditionExpression: 'attribute_not_exists(expiresAtEpochSeconds)',
+          Key: { pk: item.pk },
+        }),
+      );
+    }
+    const item = retainFence
+      ? {
+          pk: quotaKey(ownerUserId),
+          entityType: 'PANTRY_QUOTA',
+          ownerUserId,
+          quotaSchemaVersion: PANTRY_QUOTA_SCHEMA_VERSION,
+          mutationEpoch,
+          deleting: true,
+          deletionToken,
+          deletionStartedAt: deletionStartedAt!,
+          retainFence: true,
+        }
+      : emptyQuotaItem(ownerUserId, mutationEpoch);
+    const quotaRelease = {
+      Put: {
+        TableName: this.usersTable,
+        Item: item,
+        ConditionExpression:
+          'deleting = :deleting AND quotaSchemaVersion = :quotaSchemaVersion AND mutationEpoch = :mutationEpoch AND deletionToken = :deletionToken AND retainFence = :retainFence',
+        ExpressionAttributeValues: {
+          ':deleting': true,
+          ':quotaSchemaVersion': PANTRY_QUOTA_SCHEMA_VERSION,
+          ':mutationEpoch': mutationEpoch,
+          ':deletionToken': deletionToken,
+          ':retainFence': retainFence,
+        },
+      },
+    } satisfies TransactionItems[number];
+    try {
+      if (receipt) {
+        await this.dynamoDb.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              quotaRelease,
+              receiptPut(this.usersTable, receipt, receipt.response),
+            ],
+          }),
+        );
+      } else {
+        await this.dynamoDb.send(new PutCommand(quotaRelease.Put));
+      }
+    } catch (error) {
+      if (!isConditionalCheckFailed(error) && !isTransactionCanceled(error)) {
+        throw error;
+      }
+      throw new PantryMutationConflictError(
+        'Pantry deletion fence changed during cleanup',
+      );
+    }
+  }
+
+  async abortPantryDeletion(
+    ownerUserId: string,
+    deletionToken: string,
+  ): Promise<void> {
+    const fence = await this.getQuota(ownerUserId);
+    const mutationEpoch =
+      typeof fence?.mutationEpoch === 'number'
+        ? fence.mutationEpoch
+        : undefined;
+    if (
+      fence?.quotaSchemaVersion !== PANTRY_QUOTA_SCHEMA_VERSION ||
+      fence.deleting !== true ||
+      fence.retainFence !== false ||
+      fence.deletionToken !== deletionToken ||
+      typeof mutationEpoch !== 'number'
+    ) {
+      throw new PantryMutationConflictError('Pantry deletion fence is missing');
+    }
+
+    const quota = await this.buildQuota(ownerUserId);
+    quota.mutationEpoch = mutationEpoch;
+    try {
+      await this.dynamoDb.send(
+        new PutCommand({
+          TableName: this.usersTable,
+          Item: quota,
+          ConditionExpression:
+            'deleting = :deleting AND quotaSchemaVersion = :quotaSchemaVersion AND mutationEpoch = :mutationEpoch AND deletionToken = :deletionToken AND retainFence = :retainFence',
+          ExpressionAttributeValues: {
+            ':deleting': true,
+            ':quotaSchemaVersion': PANTRY_QUOTA_SCHEMA_VERSION,
+            ':mutationEpoch': mutationEpoch,
+            ':deletionToken': deletionToken,
+            ':retainFence': false,
+          },
         }),
       );
     } catch (error) {
       if (!isConditionalCheckFailed(error)) throw error;
+      throw new PantryMutationConflictError(
+        'Pantry deletion fence changed during recovery',
+      );
     }
   }
 
@@ -819,7 +1023,9 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
     transactionItems: TransactionItems,
     quotaActionIndex: number,
     quotaMessage: string,
+    quotaEpoch: number,
   ): Promise<void> {
+    bindQuotaFence(transactionItems[quotaActionIndex], quotaEpoch);
     for (const action of transactionItems) {
       const item = action.Put?.Item;
       if (item?.archivedAt && typeof item.archivedAt === 'string') {
@@ -856,7 +1062,9 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
     response: T,
     transactionItems: TransactionItems,
     quotaActionIndex: number,
+    quotaEpoch: number,
   ): Promise<IdempotentMutationResult<T>> {
+    bindQuotaFence(transactionItems[quotaActionIndex], quotaEpoch);
     try {
       await this.dynamoDb.send(
         new TransactWriteCommand({
@@ -884,22 +1092,115 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
     }
   }
 
-  private async ensureQuota(ownerUserId: string): Promise<void> {
-    const existing = await this.dynamoDb.send(
+  private async ensureQuota(ownerUserId: string): Promise<number> {
+    const existing = await this.getQuota(ownerUserId);
+    if (isCurrentQuota(existing)) return existing.mutationEpoch;
+    if (existing?.deleting && typeof existing.migrationToken !== 'string') {
+      throw new PantryMutationConflictError('Pantry is being deleted');
+    }
+    return this.migrateQuota(ownerUserId);
+  }
+
+  private async getQuota(
+    ownerUserId: string,
+  ): Promise<Record<string, unknown> | undefined> {
+    const result = await this.dynamoDb.send(
       new GetCommand({
         TableName: this.usersTable,
         Key: { pk: quotaKey(ownerUserId) },
         ConsistentRead: true,
       }),
     );
-    if (existing.Item) {
-      return;
+    return result.Item as Record<string, unknown> | undefined;
+  }
+
+  private async migrateQuota(ownerUserId: string): Promise<number> {
+    let migrationToken: string | undefined;
+    for (let attempt = 0; attempt < 3 && !migrationToken; attempt += 1) {
+      const current = await this.getQuota(ownerUserId);
+      if (isCurrentQuota(current)) return current.mutationEpoch;
+      if (current?.deleting) {
+        if (typeof current.migrationToken === 'string') {
+          migrationToken = current.migrationToken;
+          break;
+        }
+        throw new PantryMutationConflictError('Pantry is being deleted');
+      }
+
+      const candidate = randomUUID();
+      try {
+        if (current) {
+          await this.dynamoDb.send(
+            new UpdateCommand({
+              TableName: this.usersTable,
+              Key: { pk: quotaKey(ownerUserId) },
+              UpdateExpression:
+                'SET deleting = :deleting, migrationToken = :migrationToken',
+              ConditionExpression:
+                'attribute_not_exists(deleting) OR deleting = :notDeleting',
+              ExpressionAttributeValues: {
+                ':deleting': true,
+                ':notDeleting': false,
+                ':migrationToken': candidate,
+              },
+            }),
+          );
+        } else {
+          await this.dynamoDb.send(
+            new PutCommand({
+              TableName: this.usersTable,
+              Item: {
+                pk: quotaKey(ownerUserId),
+                entityType: 'PANTRY_QUOTA',
+                ownerUserId,
+                deleting: true,
+                migrationToken: candidate,
+              },
+              ConditionExpression: 'attribute_not_exists(pk)',
+            }),
+          );
+        }
+        migrationToken = candidate;
+      } catch (error) {
+        if (!isConditionalCheckFailed(error)) throw error;
+      }
+    }
+    if (!migrationToken) {
+      throw new PantryMutationConflictError(
+        'Pantry quota migration is already running; retry the mutation',
+      );
     }
 
+    const quota = await this.buildQuota(ownerUserId);
+    try {
+      await this.dynamoDb.send(
+        new PutCommand({
+          TableName: this.usersTable,
+          Item: quota,
+          ConditionExpression:
+            'deleting = :deleting AND migrationToken = :migrationToken',
+          ExpressionAttributeValues: {
+            ':deleting': true,
+            ':migrationToken': migrationToken,
+          },
+        }),
+      );
+      return quota.mutationEpoch;
+    } catch (error) {
+      if (!isConditionalCheckFailed(error)) throw error;
+      const current = await this.getQuota(ownerUserId);
+      if (isCurrentQuota(current)) return current.mutationEpoch;
+      throw new PantryMutationConflictError(
+        'Pantry quota migration changed; retry the mutation',
+      );
+    }
+  }
+
+  private async buildQuota(ownerUserId: string): Promise<PantryQuotaItem> {
     const [lots, productTypes, shoppingLists] = await Promise.all([
-      this.scanAll(this.inventoryLotsTable, ownerUserId),
-      this.scanAll(this.productTypesTable, ownerUserId),
-      this.scanAll(this.usersTable, ownerUserId),
+      this.scanOwned(this.inventoryLotsTable, ownerUserId),
+      this.scanOwned(this.productTypesTable, ownerUserId),
+      this.scanOwned(this.usersTable, ownerUserId),
     ]);
     const activeLots = lots.filter(
       (item) =>
@@ -913,6 +1214,18 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
         item.userId === ownerUserId &&
         !item.archivedAt,
     );
+    const archivedLots = lots.filter(
+      (item) =>
+        item.entityType === 'INVENTORY_LOT' &&
+        item.userId === ownerUserId &&
+        Boolean(item.archivedAt),
+    );
+    const archivedProductTypes = productTypes.filter(
+      (item) =>
+        item.entityType === 'PRODUCT_TYPE' &&
+        item.userId === ownerUserId &&
+        Boolean(item.archivedAt),
+    );
     const savedShoppingLists = shoppingLists.filter(
       (item) =>
         item.entityType === 'SHOPPING_LIST' && item.ownerUserId === ownerUserId,
@@ -925,14 +1238,28 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       },
       {},
     );
+    const archivedLotsByProductType = archivedLots.reduce<
+      Record<string, number>
+    >((counts, item) => {
+      const productTypeId = String(item.productTypeId);
+      counts[productTypeId] = (counts[productTypeId] ?? 0) + 1;
+      return counts;
+    }, {});
     const quota: PantryQuotaItem = {
       pk: quotaKey(ownerUserId),
       entityType: 'PANTRY_QUOTA',
       ownerUserId,
+      quotaSchemaVersion: PANTRY_QUOTA_SCHEMA_VERSION,
+      mutationEpoch: 0,
+      // Deliberately present: legacy writers require this attribute to be absent.
+      deleting: false,
       activeProductTypes: activeProductTypes.length,
+      archivedProductTypes: archivedProductTypes.length,
       activeInventoryLots: activeLots.length,
+      archivedInventoryLots: archivedLots.length,
       savedShoppingLists: savedShoppingLists.length,
       lotsByProductType,
+      archivedLotsByProductType,
       productTypeNames: Object.fromEntries(
         activeProductTypes.map((item) => [
           stableRequestHash(
@@ -943,26 +1270,15 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
       ),
       updatedAt: new Date().toISOString(),
     };
-
-    try {
-      await this.dynamoDb.send(
-        new PutCommand({
-          TableName: this.usersTable,
-          Item: quota,
-          ConditionExpression: 'attribute_not_exists(pk)',
-        }),
-      );
-    } catch (error) {
-      if (!isConditionalCheckFailed(error)) {
-        throw error;
-      }
-    }
+    return quota;
   }
 
-  private async scanAll(
+  private async scanOwned(
     tableName: string,
     ownerUserId: string,
   ): Promise<Record<string, unknown>[]> {
+    // ponytail: this is authoritative but O(table size); replace with an owner
+    // manifest/partition before table growth makes rare resets/migrations costly.
     const items: Record<string, unknown>[] = [];
     let exclusiveStartKey: Record<string, unknown> | undefined;
     do {
@@ -970,7 +1286,11 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
         new ScanCommand({
           TableName: tableName,
           ConsistentRead: true,
-          FilterExpression: 'userId = :owner OR ownerUserId = :owner',
+          FilterExpression: '#userId = :owner OR #ownerUserId = :owner',
+          ExpressionAttributeNames: {
+            '#userId': 'userId',
+            '#ownerUserId': 'ownerUserId',
+          },
           ExpressionAttributeValues: { ':owner': ownerUserId },
           ...(exclusiveStartKey
             ? { ExclusiveStartKey: exclusiveStartKey }
@@ -986,10 +1306,58 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
   }
 }
 
+function isCurrentQuota(
+  item: Record<string, unknown> | PantryQuotaItem | undefined,
+): item is PantryQuotaItem {
+  return Boolean(
+    item &&
+    item.quotaSchemaVersion === PANTRY_QUOTA_SCHEMA_VERSION &&
+    item.deleting === false &&
+    typeof item.mutationEpoch === 'number' &&
+    typeof item.activeProductTypes === 'number' &&
+    typeof item.archivedProductTypes === 'number' &&
+    typeof item.activeInventoryLots === 'number' &&
+    typeof item.archivedInventoryLots === 'number' &&
+    typeof item.savedShoppingLists === 'number' &&
+    item.lotsByProductType !== null &&
+    typeof item.lotsByProductType === 'object' &&
+    !Array.isArray(item.lotsByProductType) &&
+    item.archivedLotsByProductType !== null &&
+    typeof item.archivedLotsByProductType === 'object' &&
+    !Array.isArray(item.archivedLotsByProductType) &&
+    item.productTypeNames !== null &&
+    typeof item.productTypeNames === 'object' &&
+    !Array.isArray(item.productTypeNames),
+  );
+}
+
+function emptyQuotaItem(
+  ownerUserId: string,
+  mutationEpoch = 0,
+): PantryQuotaItem {
+  return {
+    pk: quotaKey(ownerUserId),
+    entityType: 'PANTRY_QUOTA',
+    ownerUserId,
+    quotaSchemaVersion: PANTRY_QUOTA_SCHEMA_VERSION,
+    mutationEpoch,
+    deleting: false,
+    activeProductTypes: 0,
+    archivedProductTypes: 0,
+    activeInventoryLots: 0,
+    archivedInventoryLots: 0,
+    savedShoppingLists: 0,
+    lotsByProductType: {},
+    archivedLotsByProductType: {},
+    productTypeNames: {},
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 function receiptPut(
   tableName: string,
   receipt: PantryOperationLookup,
-  response: InventoryLotPrimitives | InventoryLotPrimitives[] | null,
+  response: PantryOperationReceipt['response'],
 ): TransactionItems[number] {
   return {
     Put: {
@@ -1002,20 +1370,25 @@ function receiptPut(
 
 function toOperationItem(
   receipt: PantryOperationLookup,
-  response: InventoryLotPrimitives | InventoryLotPrimitives[] | null,
+  response: PantryOperationReceipt['response'],
 ): PantryOperationItem {
   return {
     pk: operationKey(receipt.operationId),
+    gsi2pk: pantryOperationOwnerKey(receipt.ownerUserId),
+    gsi2sk: `CREATED#${receipt.createdAt.toISOString()}#${receipt.operationId}`,
     entityType: 'PANTRY_OPERATION',
     operationId: receipt.operationId,
     ownerUserId: receipt.ownerUserId,
     operation: receipt.operation,
     requestHash: receipt.requestHash,
-    response: Array.isArray(response)
-      ? response.map(toPersistedLot)
-      : response
-        ? toPersistedLot(response)
-        : null,
+    response:
+      receipt.operation === 'delete_pantry_data'
+        ? (response as PantryDeletionResult)
+        : Array.isArray(response)
+          ? response.map(toPersistedLot)
+          : response
+            ? toPersistedLot(response as InventoryLotPrimitives)
+            : null,
     createdAt: receipt.createdAt.toISOString(),
     expiresAt: receipt.expiresAt.toISOString(),
     expiresAtEpochSeconds: Math.floor(receipt.expiresAt.getTime() / 1000),
@@ -1028,11 +1401,14 @@ function fromOperationItem(item: PantryOperationItem): PantryOperationReceipt {
     ownerUserId: item.ownerUserId,
     operation: item.operation,
     requestHash: item.requestHash,
-    response: Array.isArray(item.response)
-      ? item.response.map(fromPersistedLot)
-      : item.response
-        ? fromPersistedLot(item.response)
-        : null,
+    response:
+      item.operation === 'delete_pantry_data'
+        ? (item.response as PantryDeletionResult)
+        : Array.isArray(item.response)
+          ? item.response.map(fromPersistedLot)
+          : item.response
+            ? fromPersistedLot(item.response as PersistedLot)
+            : null,
     createdAt: new Date(item.createdAt),
     expiresAt: new Date(item.expiresAt),
   };
@@ -1209,6 +1585,57 @@ function incrementSingleLotQuota(
   };
 }
 
+function archiveLotQuota(
+  tableName: string,
+  ownerUserId: string,
+  productTypeId: string,
+  now: Date,
+): TransactionItems[number] {
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { pk: quotaKey(ownerUserId) },
+      UpdateExpression:
+        'SET activeInventoryLots = activeInventoryLots - :delta, archivedInventoryLots = archivedInventoryLots + :delta, lotsByProductType.#productType = lotsByProductType.#productType - :delta, archivedLotsByProductType.#productType = if_not_exists(archivedLotsByProductType.#productType, :zero) + :delta, updatedAt = :updatedAt',
+      ConditionExpression:
+        'activeInventoryLots >= :delta AND archivedInventoryLots < :archivedMaximum AND lotsByProductType.#productType >= :delta AND attribute_not_exists(deleting)',
+      ExpressionAttributeNames: { '#productType': productTypeId },
+      ExpressionAttributeValues: {
+        ':delta': 1,
+        ':zero': 0,
+        ':archivedMaximum': MAX_ARCHIVED_INVENTORY_LOTS_PER_USER,
+        ':updatedAt': now.toISOString(),
+      },
+    },
+  };
+}
+
+function restoreLotQuota(
+  tableName: string,
+  ownerUserId: string,
+  productTypeId: string,
+  now: Date,
+): TransactionItems[number] {
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { pk: quotaKey(ownerUserId) },
+      UpdateExpression:
+        'SET activeInventoryLots = activeInventoryLots + :delta, archivedInventoryLots = archivedInventoryLots - :delta, lotsByProductType.#productType = if_not_exists(lotsByProductType.#productType, :zero) + :delta, archivedLotsByProductType.#productType = archivedLotsByProductType.#productType - :delta, updatedAt = :updatedAt',
+      ConditionExpression:
+        'archivedInventoryLots >= :delta AND archivedLotsByProductType.#productType >= :delta AND activeInventoryLots <= :remainingTotal AND (attribute_not_exists(lotsByProductType.#productType) OR lotsByProductType.#productType <= :remainingType) AND attribute_not_exists(deleting)',
+      ExpressionAttributeNames: { '#productType': productTypeId },
+      ExpressionAttributeValues: {
+        ':delta': 1,
+        ':zero': 0,
+        ':remainingTotal': MAX_ACTIVE_INVENTORY_LOTS_PER_USER - 1,
+        ':remainingType': MAX_INVENTORY_LOTS_PER_PRODUCT_TYPE - 1,
+        ':updatedAt': now.toISOString(),
+      },
+    },
+  };
+}
+
 function incrementSimpleQuota(
   tableName: string,
   ownerUserId: string,
@@ -1262,6 +1689,103 @@ function productTypeQuota(
         ...(delta > 0
           ? { ':maximum': MAX_ACTIVE_PRODUCT_TYPES_PER_USER }
           : { ':one': 1 }),
+      },
+    },
+  };
+}
+
+function archiveProductTypeQuota(
+  tableName: string,
+  productType: ProductType,
+): TransactionItems[number] {
+  const name = stableRequestHash(
+    productType.baseName.trim().toLocaleLowerCase('es'),
+  );
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { pk: quotaKey(productType.userId.toString()) },
+      UpdateExpression:
+        'SET activeProductTypes = activeProductTypes - :one, archivedProductTypes = archivedProductTypes + :one, updatedAt = :updatedAt REMOVE productTypeNames.#name',
+      ConditionExpression:
+        'activeProductTypes >= :one AND archivedProductTypes < :archivedMaximum AND productTypeNames.#name = :id AND attribute_not_exists(deleting)',
+      ExpressionAttributeNames: { '#name': name },
+      ExpressionAttributeValues: {
+        ':one': 1,
+        ':id': productType.id.toString(),
+        ':archivedMaximum': MAX_ARCHIVED_PRODUCT_TYPES_PER_USER,
+        ':updatedAt': productType.updatedAt.toISOString(),
+      },
+    },
+  };
+}
+
+function restoreProductTypeQuota(
+  tableName: string,
+  productType: ProductType,
+): TransactionItems[number] {
+  const name = stableRequestHash(
+    productType.baseName.trim().toLocaleLowerCase('es'),
+  );
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { pk: quotaKey(productType.userId.toString()) },
+      UpdateExpression:
+        'SET activeProductTypes = activeProductTypes + :one, archivedProductTypes = archivedProductTypes - :one, productTypeNames.#name = :id, updatedAt = :updatedAt',
+      ConditionExpression:
+        'archivedProductTypes >= :one AND activeProductTypes < :activeMaximum AND attribute_not_exists(productTypeNames.#name) AND attribute_not_exists(deleting)',
+      ExpressionAttributeNames: { '#name': name },
+      ExpressionAttributeValues: {
+        ':one': 1,
+        ':id': productType.id.toString(),
+        ':activeMaximum': MAX_ACTIVE_PRODUCT_TYPES_PER_USER,
+        ':updatedAt': productType.updatedAt.toISOString(),
+      },
+    },
+  };
+}
+
+function decrementArchivedLotQuota(
+  tableName: string,
+  ownerUserId: string,
+  productTypeId: string,
+  now: Date,
+): TransactionItems[number] {
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { pk: quotaKey(ownerUserId) },
+      UpdateExpression:
+        'SET archivedInventoryLots = archivedInventoryLots - :delta, archivedLotsByProductType.#productType = archivedLotsByProductType.#productType - :delta, updatedAt = :updatedAt',
+      ConditionExpression:
+        'archivedInventoryLots >= :delta AND archivedLotsByProductType.#productType >= :delta AND attribute_not_exists(deleting)',
+      ExpressionAttributeNames: { '#productType': productTypeId },
+      ExpressionAttributeValues: {
+        ':delta': 1,
+        ':updatedAt': now.toISOString(),
+      },
+    },
+  };
+}
+
+function deleteArchivedProductTypeQuota(
+  tableName: string,
+  productType: ProductType,
+): TransactionItems[number] {
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { pk: quotaKey(productType.userId.toString()) },
+      UpdateExpression:
+        'SET archivedProductTypes = archivedProductTypes - :one, updatedAt = :updatedAt',
+      ConditionExpression:
+        'archivedProductTypes >= :one AND attribute_not_exists(deleting) AND (attribute_not_exists(lotsByProductType.#type) OR lotsByProductType.#type = :zero) AND (attribute_not_exists(archivedLotsByProductType.#type) OR archivedLotsByProductType.#type = :zero)',
+      ExpressionAttributeNames: { '#type': productType.id.toString() },
+      ExpressionAttributeValues: {
+        ':one': 1,
+        ':zero': 0,
+        ':updatedAt': new Date().toISOString(),
       },
     },
   };
@@ -1379,6 +1903,10 @@ function shoppingListKey(id: string): string {
   return `SHOPPING_LIST#${id}`;
 }
 
+function pantryOperationOwnerKey(ownerUserId: string): string {
+  return `PANTRY_OPERATION_OWNER#${ownerUserId}`;
+}
+
 function operationKey(operationId: string): string {
   return `PANTRY_OPERATION#${operationId}`;
 }
@@ -1398,6 +1926,30 @@ function quotaAvailable(
       ConditionExpression:
         'attribute_exists(pk) AND attribute_not_exists(deleting)',
     },
+  };
+}
+
+function bindQuotaFence(
+  action: TransactionItems[number],
+  mutationEpoch: number,
+): void {
+  const quotaAction = action.Update ?? action.ConditionCheck;
+  if (
+    !quotaAction?.ConditionExpression?.includes(
+      'attribute_not_exists(deleting)',
+    )
+  ) {
+    throw new Error('Quota mutation is missing its deletion fence');
+  }
+  quotaAction.ConditionExpression = `${quotaAction.ConditionExpression.replace(
+    'attribute_not_exists(deleting)',
+    'deleting = :deleting',
+  )} AND quotaSchemaVersion = :quotaSchemaVersion AND mutationEpoch = :mutationEpoch`;
+  quotaAction.ExpressionAttributeValues = {
+    ...quotaAction.ExpressionAttributeValues,
+    ':deleting': false,
+    ':quotaSchemaVersion': PANTRY_QUOTA_SCHEMA_VERSION,
+    ':mutationEpoch': mutationEpoch,
   };
 }
 

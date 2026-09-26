@@ -2476,6 +2476,13 @@ export class PantryPageComponent implements OnInit {
             this.loadOverview();
             return;
           }
+          if (this.isNonRetryableClientError(error)) {
+            this.removePendingShoppingCheckout(pendingCheckout.id);
+            this.shoppingCheckoutStatus =
+              'El servidor rechazó este cierre y no se reintentará. Corrige los datos y vuelve a intentarlo.';
+            this.persistShoppingTripDraft();
+            return;
+          }
 
           this.shoppingCheckoutStatus = this.getErrorMessage(error);
           this.persistShoppingTripDraft();
@@ -3784,6 +3791,13 @@ export class PantryPageComponent implements OnInit {
             this.changeDetector.markForCheck();
             return;
           }
+          if (this.isNonRetryableClientError(error)) {
+            this.removePendingShoppingCheckout(nextCheckout.id);
+            this.shoppingCheckoutStatus =
+              'El servidor rechazó una compra pendiente. Corrige los datos antes de volver a intentarlo.';
+            this.changeDetector.markForCheck();
+            return;
+          }
 
           this.shoppingCheckoutStatus = this.getErrorMessage(error);
           this.changeDetector.markForCheck();
@@ -4353,6 +4367,13 @@ export class PantryPageComponent implements OnInit {
 
   private isMutationConflict(error: unknown): boolean {
     return error instanceof HttpErrorResponse && error.status === 409;
+  }
+
+  private isNonRetryableClientError(error: unknown): boolean {
+    return error instanceof HttpErrorResponse &&
+      error.status >= 400 &&
+      error.status < 500 &&
+      ![401, 403, 408, 409, 429].includes(error.status);
   }
 
   private runMutation(

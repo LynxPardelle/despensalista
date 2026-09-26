@@ -1,6 +1,7 @@
 import { makePantryMutationMock } from '../ports/pantry-mutation.mock';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { ProductType } from '../../domain/entities/product-type.entity';
+import { InventoryLot } from '../../domain/entities/inventory-lot.entity';
 import { ProductCategory, QuantityUnit } from '../../domain/enums';
 import { InventoryLotRepository } from '../../domain/repositories/inventory-lot.repository';
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
@@ -33,9 +34,9 @@ describe('product type planning settings and archive use cases', () => {
       findArchivedByUserId: jest.fn(),
       findArchivedPageByUserId: jest.fn(),
       findByProductTypeId: jest.fn().mockResolvedValue([]),
+      findAllByProductTypeId: jest.fn().mockResolvedValue([]),
       reassignUserOwnership: jest.fn(),
       delete: jest.fn(),
-      deleteByProductTypeId: jest.fn(),
       deleteByUserId: jest.fn(),
     });
 
@@ -161,7 +162,7 @@ describe('product type planning settings and archive use cases', () => {
         confirmationText: 'Detergente',
       }),
     ).resolves.toBeUndefined();
-    expect(inventoryLotRepository.deleteByProductTypeId).toHaveBeenCalledWith(
+    expect(inventoryLotRepository.findAllByProductTypeId).toHaveBeenCalledWith(
       ProductTypeId.fromString('type-1'),
     );
     expect(productTypeRepository.delete).toHaveBeenCalledWith(
@@ -175,13 +176,26 @@ describe('product type planning settings and archive use cases', () => {
     const productType = makeProductType();
     productType.archive();
     productTypeRepository.findById.mockResolvedValue(productType);
-    inventoryLotRepository.deleteByProductTypeId
-      .mockRejectedValueOnce(new Error('storage unavailable'))
-      .mockResolvedValueOnce(undefined);
+    const archivedLot = InventoryLot.fromPrimitives({
+      id: 'lot-1',
+      userId: 'owner-user',
+      productTypeId: 'type-1',
+      quantity: 1,
+      unit: QuantityUnit.PIECE,
+      archivedAt: new Date('2026-04-02T00:00:00.000Z'),
+      createdAt: new Date('2026-04-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-04-02T00:00:00.000Z'),
+    });
+    inventoryLotRepository.findAllByProductTypeId.mockResolvedValue([
+      archivedLot,
+    ]);
     const pantryMutation = makePantryMutationMock({
       types: productTypeRepository,
       lots: inventoryLotRepository,
     });
+    pantryMutation.deleteInventoryLot
+      .mockRejectedValueOnce(new Error('storage unavailable'))
+      .mockResolvedValueOnce(undefined);
     const useCase = new DeleteProductTypeUseCase(
       productTypeRepository,
       inventoryLotRepository,
@@ -205,7 +219,7 @@ describe('product type planning settings and archive use cases', () => {
         confirmationText: 'Detergente',
       }),
     ).resolves.toBeUndefined();
-    expect(inventoryLotRepository.deleteByProductTypeId).toHaveBeenCalledTimes(
+    expect(inventoryLotRepository.findAllByProductTypeId).toHaveBeenCalledTimes(
       2,
     );
     expect(pantryMutation.beginProductTypeDeletion).toHaveBeenCalledTimes(2);

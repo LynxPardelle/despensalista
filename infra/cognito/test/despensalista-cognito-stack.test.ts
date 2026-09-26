@@ -148,7 +148,134 @@ test('deployment OIDC trust is exact repository and environment, with no bootstr
   template.hasResourceProperties('AWS::Cognito::UserPool', { MfaConfiguration: 'ON' });
 });
 
-test('delivery controls require a protected stage boundary and do not expose global mutation', () => {
+test('only production GitHub delivery can drain the exact backend and delete quota keys', () => {
+  const statementsFor = (stage: 'dev' | 'tst' | 'prod') => {
+    const app = new cdk.App({ context: { stage } });
+    const template = Template.fromStack(
+      new DespensaListaCognitoStack(app, `Cognito-${stage}-cutover-iam`),
+    ).toJSON();
+    return Object.values(template.Resources)
+      .filter(
+        (resource: any) =>
+          resource.Type === 'AWS::IAM::Policy' &&
+          JSON.stringify(resource.Properties.Roles).includes(
+            'GitHubDeploymentRole',
+          ),
+      )
+      .flatMap(
+        (resource: any) => resource.Properties.PolicyDocument.Statement,
+      );
+  };
+
+  for (const stage of ['dev', 'tst'] as const) {
+    const serialized = JSON.stringify(statementsFor(stage));
+    assert.doesNotMatch(serialized, /lambda:PutFunctionConcurrency/);
+    assert.doesNotMatch(serialized, /PANTRY_QUOTA#/);
+    assert.doesNotMatch(serialized, /deployment-drain/);
+  }
+
+  const productionStatements = statementsFor('prod');
+  const concurrency = productionStatements.find((statement: any) =>
+    Array.isArray(statement.Action) &&
+    statement.Action.includes('lambda:PutFunctionConcurrency'),
+  );
+  assert.deepEqual(concurrency.Action, [
+    'lambda:GetFunctionConcurrency',
+    'lambda:GetFunctionConfiguration',
+    'lambda:PutFunctionConcurrency',
+    'lambda:DeleteFunctionConcurrency',
+  ]);
+  assert.match(
+    JSON.stringify(concurrency.Resource),
+    /function:despensalista-prod-backend-api/,
+  );
+  assert.doesNotMatch(JSON.stringify(concurrency.Resource), /backend-api\*/);
+
+  const drainMarker = productionStatements.find((statement: any) =>
+    Array.isArray(statement.Action) &&
+    statement.Action.includes('ssm:PutParameter'),
+  );
+  assert.deepEqual(drainMarker.Action, [
+    'ssm:GetParameter',
+    'ssm:PutParameter',
+  ]);
+  assert.match(JSON.stringify(drainMarker.Resource), /parameter\/despensalista\/prod\/deployment-drain/);
+
+  const scan = productionStatements.find(
+    (statement: any) => statement.Action === 'dynamodb:Scan',
+  );
+  assert.match(
+    JSON.stringify(scan.Resource),
+    /table\/despensalista-prod-users/,
+  );
+  assert.deepEqual(scan.Condition, {
+    'ForAllValues:StringEquals': {
+      'dynamodb:Attributes': ['pk', 'entityType', 'deleting'],
+    },
+    StringEquals: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
+  });
+
+  const deleteQuota = productionStatements.find(
+    (statement: any) => statement.Action === 'dynamodb:DeleteItem',
+  );
+  assert.match(
+    JSON.stringify(deleteQuota.Resource),
+    /table\/despensalista-prod-users/,
+  );
+  assert.deepEqual(deleteQuota.Condition, {
+    'ForAllValues:StringLike': {
+      'dynamodb:LeadingKeys': ['PANTRY_QUOTA#*'],
+    },
+  });
+});
+
+test('only the production CloudFormation executor can manage the exact resume rule', () => {
+  const statementsFor = (stage: 'dev' | 'tst' | 'prod') => {
+    const app = new cdk.App({ context: { stage } });
+    const template = Template.fromStack(
+      new DespensaListaCognitoStack(app, `Cognito-${stage}-resume-rule-iam`),
+    ).toJSON();
+    return Object.values(template.Resources)
+      .filter(
+        (resource: any) =>
+          resource.Type === 'AWS::IAM::Policy' &&
+          JSON.stringify(resource.Properties.Roles).includes(
+            'StageCloudFormationExecutionRole',
+          ),
+      )
+      .flatMap(
+        (resource: any) => resource.Properties.PolicyDocument.Statement,
+      );
+  };
+
+  for (const stage of ['dev', 'tst'] as const) {
+    assert.doesNotMatch(JSON.stringify(statementsFor(stage)), /events:PutRule/);
+  }
+
+  const statement = statementsFor('prod').find(
+    (candidate: any) =>
+      Array.isArray(candidate.Action) &&
+      candidate.Action.includes('events:PutRule'),
+  );
+  assert.deepEqual(statement.Action, [
+    'events:PutRule',
+    'events:DescribeRule',
+    'events:ListTargetsByRule',
+    'events:ListTagsForResource',
+    'events:DeleteRule',
+    'events:PutTargets',
+    'events:RemoveTargets',
+    'events:TagResource',
+    'events:UntagResource',
+  ]);
+  assert.match(
+    JSON.stringify(statement.Resource),
+    /rule\/despensalista-prod-account-deletion-resume/,
+  );
+  assert.doesNotMatch(JSON.stringify(statement.Resource), /resume\*/);
+});
+
+test('delivery controls require a protected stage boundary and only unavoidable global actions', () => {
   const app = new cdk.App({ context: { stage: 'dev' } });
   const template = Template.fromStack(new DespensaListaCognitoStack(app, 'Cognito-boundary')).toJSON();
   const serialized = JSON.stringify(template);
@@ -161,6 +288,55 @@ test('delivery controls require a protected stage boundary and do not expose glo
   assert.doesNotMatch(serialized, /%24%7BToken/);
   const permissionPolicies = Object.values(template.Resources).filter((value: any) => value.Type === 'AWS::IAM::Policy');
   assert.doesNotMatch(JSON.stringify(permissionPolicies), /"Action":"sts:AssumeRole","Effect":"Allow"/);
+  const globalAllowActions = permissionPolicies
+    .filter((policy: any) =>
+      JSON.stringify(policy.Properties.Roles).includes(
+        'StageCloudFormationExecutionRole',
+      ),
+    )
+    .flatMap((policy: any) => policy.Properties.PolicyDocument.Statement)
+    .filter(
+      (statement: any) =>
+        statement.Effect === 'Allow' && statement.Resource === '*',
+    )
+    .flatMap((statement: any) =>
+      Array.isArray(statement.Action) ? statement.Action : [statement.Action],
+    )
+    .sort();
+  assert.deepEqual(globalAllowActions, [
+    'cloudwatch:DescribeAlarms',
+    'cloudwatch:GetMetricData',
+    'cloudwatch:GetMetricStatistics',
+    'codedeploy:CreateCloudFormationDeployment',
+    'codedeploy:StopDeployment',
+    'logs:DeleteResourcePolicy',
+    'logs:DescribeLogGroups',
+    'logs:DescribeResourcePolicies',
+    'logs:PutResourcePolicy',
+    'secretsmanager:GetRandomPassword',
+  ].sort());
+});
+
+test('runtime boundary permits CodeDeploy to inspect and move only stage aliases', () => {
+  const app = new cdk.App({ context: { stage: 'prod' } });
+  const template = Template.fromStack(
+    new DespensaListaCognitoStack(app, 'Cognito-prod-codedeploy-boundary'),
+  ).toJSON();
+  const managedPolicies = Object.values(template.Resources)
+    .filter((value: any) => value.Type === 'AWS::IAM::ManagedPolicy');
+  const statement = managedPolicies
+    .flatMap((value: any) => value.Properties.PolicyDocument.Statement)
+    .find((candidate: any) => {
+      const actions = Array.isArray(candidate.Action)
+        ? candidate.Action
+        : [candidate.Action];
+      return actions.includes('lambda:GetProvisionedConcurrencyConfig');
+    });
+
+  assert.ok(statement);
+  assert.match(JSON.stringify(statement.Resource), /function:despensalista-prod-\*/);
+  assert.match(JSON.stringify(statement.Resource), /function:despensalista-prod-\*:\*/);
+  assert.doesNotMatch(JSON.stringify(statement.Resource), /function:\*/);
 });
 
 test('CloudFormation execution may read only the exact protected delivery roles', () => {
@@ -177,6 +353,114 @@ test('CloudFormation execution may read only the exact protected delivery roles'
   assert.ok(protectedRoleRead);
   assert.match(JSON.stringify(protectedRoleRead.Resource), /role\/despensalista-dev-github-deploy/);
   assert.doesNotMatch(JSON.stringify(protectedRoleRead.Resource), /\*/);
+});
+
+test('CloudFormation execution may access only its stage origin secret', () => {
+  for (const stage of ['dev', 'tst', 'prod'] as const) {
+    const app = new cdk.App({ context: { stage } });
+    const template = Template.fromStack(
+      new DespensaListaCognitoStack(app, `Cognito-${stage}-origin-secret`),
+    ).toJSON();
+    const secretStatements = Object.values(template.Resources)
+      .filter((value: any) => value.Type === 'AWS::IAM::Policy')
+      .flatMap((value: any) => value.Properties.PolicyDocument.Statement)
+      .filter((statement: any) => {
+        const actions = Array.isArray(statement.Action)
+          ? statement.Action
+          : [statement.Action];
+        return actions.includes('secretsmanager:GetSecretValue');
+    });
+
+    assert.equal(secretStatements.length, 1);
+    assert.ok(secretStatements[0].Action.includes('secretsmanager:CreateSecret'));
+    const resourceParts = secretStatements[0].Resource['Fn::Join'][1];
+    assert.equal(
+      resourceParts.at(-1),
+      `:secret:despensalista/${stage}/cloudfront-origin-verification-*`,
+    );
+    assert.doesNotMatch(JSON.stringify(secretStatements[0]), /\/nonprod\//);
+    const randomPasswordStatements = Object.values(template.Resources)
+      .filter((value: any) => value.Type === 'AWS::IAM::Policy')
+      .flatMap((value: any) => value.Properties.PolicyDocument.Statement)
+      .filter((statement: any) => {
+        const actions = Array.isArray(statement.Action)
+          ? statement.Action
+          : [statement.Action];
+        return actions.includes('secretsmanager:GetRandomPassword');
+      });
+    assert.equal(randomPasswordStatements.length, 1);
+    assert.equal(randomPasswordStatements[0].Resource, '*');
+  }
+});
+
+test('runtime identity cleanup cannot enumerate Cognito users', () => {
+  const app = new cdk.App({ context: { stage: 'prod' } });
+  const template = Template.fromStack(
+    new DespensaListaCognitoStack(app, 'Cognito-prod-no-user-enumeration'),
+  ).toJSON();
+  const policies = JSON.stringify(template.Resources);
+
+  assert.match(policies, /cognito-idp:AdminDeleteUser/);
+  assert.match(policies, /cognito-idp:AdminUserGlobalSignOut/);
+  assert.doesNotMatch(policies, /cognito-idp:ListUsers/);
+});
+
+test('production retains deploy assets needed by CloudFormation rollback', () => {
+  const lifecycleFor = (stage: 'dev' | 'prod') => {
+    const app = new cdk.App({ context: { stage } });
+    const template = Template.fromStack(
+      new DespensaListaCognitoStack(app, `Cognito-${stage}-asset-retention`),
+    ).toJSON();
+    const bucket = Object.entries(template.Resources).find(
+      ([logicalId, resource]: [string, any]) =>
+        logicalId.startsWith('DeliveryAssetsBucket') && resource.Type === 'AWS::S3::Bucket',
+    )?.[1] as any;
+    assert.ok(bucket);
+    return bucket.Properties.LifecycleConfiguration.Rules[0];
+  };
+
+  assert.equal(lifecycleFor('prod').ExpirationInDays, undefined);
+  assert.equal(lifecycleFor('dev').ExpirationInDays, 90);
+});
+
+test('CloudFormation can manage the account-level API access-log policy', () => {
+  const app = new cdk.App({ context: { stage: 'prod' } });
+  const template = Template.fromStack(
+    new DespensaListaCognitoStack(app, 'Cognito-prod-log-policy'),
+  ).toJSON();
+  const statements = Object.values(template.Resources)
+    .filter((value: any) => value.Type === 'AWS::IAM::Policy')
+    .flatMap((value: any) => value.Properties.PolicyDocument.Statement)
+    .filter((statement: any) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return actions.includes('logs:PutResourcePolicy');
+    });
+
+  assert.equal(statements.length, 1);
+  assert.ok(statements[0].Action.includes('logs:DeleteResourcePolicy'));
+  assert.equal(statements[0].Resource, '*');
+});
+
+test('CloudFormation has only the unscopable CodeDeploy cutover actions globally', () => {
+  const app = new cdk.App({ context: { stage: 'prod' } });
+  const template = Template.fromStack(
+    new DespensaListaCognitoStack(app, 'Cognito-prod-codedeploy-control'),
+  ).toJSON();
+  const statements = Object.values(template.Resources)
+    .filter((value: any) => value.Type === 'AWS::IAM::Policy')
+    .flatMap((value: any) => value.Properties.PolicyDocument.Statement)
+    .filter((statement: any) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return actions.includes('codedeploy:CreateCloudFormationDeployment');
+    });
+
+  assert.equal(statements.length, 1);
+  assert.ok(statements[0].Action.includes('codedeploy:StopDeployment'));
+  assert.equal(statements[0].Resource, '*');
 });
 
 test('delivery IAM policy synthesis is stable across repeated runs', () => {

@@ -187,17 +187,24 @@ jobs:
         run: |
           set -euo pipefail
           FRONTEND_BASE_URL="https://$APP_DOMAIN_NAME"
+          RELEASE_ID="$(jq -r '.releaseId' ../../.release/release-manifest.json)"
+          test "$(printf '%s' "$RELEASE_ID" | grep -Ec '^[0-9a-f]{12}$')" -eq 1
           npx cdk deploy --all --require-approval never --change-set-name despensalista-dev-release \
             --context projectName=despensalista \
             --context stage=dev \
             --context awsRegion="$AWS_REGION" \
             --context includeServerlessBackend=true \
+            --context releaseId="$RELEASE_ID" \
             --context backendArtifactPath=../../backend/lambda.zip \
             --context removalPolicy=destroy \
             --context domainPrefix="$COGNITO_DOMAIN_PREFIX" \
             --context appDomainName="$APP_DOMAIN_NAME" \
             --context productionFrontendBaseUrl="$FRONTEND_BASE_URL" \
             --context serverlessFrontendBaseUrl="$FRONTEND_BASE_URL"
+
+      - name: Activate exact published release
+        id: activate
+        run: node .github/scripts/deployment-state.mjs activate dev .release
 
       - name: Reconcile exact published release
         id: reconcile
@@ -210,7 +217,7 @@ jobs:
         run: node .github/scripts/smoke.mjs --base-url "https://$APP_DOMAIN_NAME" --attempts 18 --delay-ms 10000
 
       - name: Restore previous frontend and backend after failed publish or smoke
-        if: failure() && (steps.reconcile.outcome == 'failure' || steps.smoke.outcome == 'failure')
+        if: failure() && (steps.deploy.outcome == 'failure' || steps.activate.outcome == 'failure' || steps.reconcile.outcome == 'failure' || steps.smoke.outcome == 'failure')
         run: node .github/scripts/deployment-state.mjs restore dev .rollback
 
       - name: Record exact published deployment

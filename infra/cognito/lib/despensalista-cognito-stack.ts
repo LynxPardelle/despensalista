@@ -1,11 +1,24 @@
 import * as cdk from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as ses from 'aws-cdk-lib/aws-ses';
 import { createStageDeliveryControls } from './stage-delivery';
 import { Construct } from 'constructs';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 type ContextValue = string | undefined;
+
+const EMAIL_QUOTAS = {
+  dev: { dailyLimit: 2, recoveryReserve: 1, recipientLimit: 1 },
+  tst: { dailyLimit: 3, recoveryReserve: 1, recipientLimit: 2 },
+  prod: { dailyLimit: 30, recoveryReserve: 10, recipientLimit: 5 },
+} as const;
 
 export class DespensaListaCognitoStack extends cdk.Stack {
   readonly allowedProviders: string[];
@@ -44,6 +57,10 @@ export class DespensaListaCognitoStack extends cdk.Stack {
 
     const userPool = new cognito.CfnUserPool(this, 'UserPool', {
       userPoolName: `${projectName}-${stage}-users`,
+      userPoolTags: {
+        Project: projectName,
+        Stage: stage,
+      },
       usernameAttributes: ['email'],
       autoVerifiedAttributes: ['email'],
       mfaConfiguration,
@@ -165,7 +182,19 @@ export class DespensaListaCognitoStack extends cdk.Stack {
     managedLoginBranding.addDependency(userPoolClient);
 
     const sesIdentity = this.createSesIdentity(stage);
-    createStageDeliveryControls(this, projectName, stage, userPool.attrArn);
+    createStageDeliveryControls(this, projectName, stage);
+    const emailQuotaGuard = this.createEmailQuotaGuard(
+      projectName,
+      stage,
+      this.node.findChild('RuntimePermissionsBoundary') as iam.ManagedPolicy,
+    );
+    userPool.lambdaConfig = { customMessage: emailQuotaGuard.functionArn };
+    emailQuotaGuard.addPermission('AllowCognitoCustomMessage', {
+      action: 'lambda:InvokeFunction',
+      principal: new iam.ServicePrincipal('cognito-idp.amazonaws.com'),
+      sourceAccount: this.account,
+      sourceArn: userPool.attrArn,
+    });
 
     const userPoolDomainUrl = `https://${domainPrefix}.auth.${cdk.Aws.REGION}.amazoncognito.com`;
     this.allowedProviders = supportedIdentityProviders;
@@ -372,6 +401,88 @@ export class DespensaListaCognitoStack extends cdk.Stack {
     });
 
     return identity;
+  }
+
+  private createEmailQuotaGuard(
+    projectName: string,
+    stage: string,
+    runtimeBoundary: iam.IManagedPolicy,
+  ): lambda.Function {
+    const normalizedStage = stage.trim().toLowerCase() as keyof typeof EMAIL_QUOTAS;
+    const quota = EMAIL_QUOTAS[normalizedStage];
+    if (!quota) throw new Error(`Unsupported email quota stage "${stage}".`);
+
+    const prefix = `${projectName}-${normalizedStage}`;
+    const table = new dynamodb.Table(this, 'CognitoEmailQuotaCounters', {
+      tableName: `${prefix}-cognito-email-quota`,
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      partitionKey: { name: 'key', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expiresAt',
+    });
+    table.applyRemovalPolicy(this.resolveRemovalPolicy());
+
+    const role = new iam.Role(this, 'CognitoEmailQuotaRole', {
+      roleName: `${prefix}-runtime-cognito-email-quota`,
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      permissionsBoundary: runtimeBoundary,
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName(
+          'service-role/AWSLambdaBasicExecutionRole',
+        ),
+      ],
+    });
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:TransactWriteItems'],
+      resources: [table.tableArn],
+    }));
+
+    const logGroup = new logs.LogGroup(this, 'CognitoEmailQuotaLogGroup', {
+      logGroupName: `/aws/lambda/${prefix}-cognito-email-quota`,
+      retention: normalizedStage === 'prod'
+        ? logs.RetentionDays.ONE_MONTH
+        : logs.RetentionDays.ONE_WEEK,
+      removalPolicy: this.resolveRemovalPolicy(),
+    });
+
+    const fn = new lambda.Function(this, 'CognitoEmailQuotaGuard', {
+      functionName: `${prefix}-cognito-email-quota`,
+      description: 'Fail-closed quota guard for Cognito managed email',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromInline(
+        fs.readFileSync(
+          path.join(__dirname, '..', 'lambda', 'cognito-email-quota', 'index.js'),
+          'utf8',
+        ),
+      ),
+      memorySize: 128,
+      role,
+      logGroup,
+      timeout: cdk.Duration.seconds(4),
+      environment: {
+        TABLE_NAME: table.tableName,
+        DAILY_LIMIT: quota.dailyLimit.toString(),
+        RECOVERY_RESERVE: quota.recoveryReserve.toString(),
+        RECIPIENT_LIMIT: quota.recipientLimit.toString(),
+      },
+    });
+
+    if (normalizedStage === 'prod') {
+      new cloudwatch.Alarm(this, 'CognitoEmailQuotaErrorsAlarm', {
+        alarmName: `${prefix}-cognito-email-quota-errors`,
+        alarmDescription: 'Cognito managed-email quota guard rejected or failed a request.',
+        metric: fn.metricErrors({
+          period: cdk.Duration.minutes(5),
+          statistic: 'sum',
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+    }
+
+    return fn;
   }
 
   private isProduction(stage: string): boolean {

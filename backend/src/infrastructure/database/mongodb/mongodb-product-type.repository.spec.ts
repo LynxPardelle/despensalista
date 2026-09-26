@@ -160,4 +160,32 @@ describe('MongoProductTypeRepository archive-aware queries', () => {
     expect(page.items).toHaveLength(1);
     expect(page.nextCursor).toBeDefined();
   });
+
+  it('rejects malformed or cross-user archive cursors before querying MongoDB', async () => {
+    const model = {
+      findOneAndUpdate: jest.fn(),
+      findOne: jest.fn(),
+      find: jest.fn(),
+      updateMany: jest.fn(),
+      deleteOne: jest.fn(),
+    };
+    const repository = new MongoProductTypeRepository(model as never);
+    const invalidCursors = [
+      Buffer.from('null').toString('base64url'),
+      Buffer.from(
+        JSON.stringify({
+          archivedAt: '2026-04-20T00:00:00.000Z',
+          id: 'type-1',
+          userId: 'another-user',
+        }),
+      ).toString('base64url'),
+    ];
+
+    for (const cursor of invalidCursors) {
+      await expect(
+        repository.findArchivedPageByUserId(userId, { limit: 1, cursor }),
+      ).rejects.toThrow('Invalid archived product type cursor');
+    }
+    expect(model.find).not.toHaveBeenCalled();
+  });
 });

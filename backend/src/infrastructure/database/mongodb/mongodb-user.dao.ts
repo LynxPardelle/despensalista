@@ -1,17 +1,23 @@
 import { InjectModel } from '@nestjs/mongoose';
 import {
+  ConflictException,
   Injectable,
   OnModuleInit,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ClientSession, Model } from 'mongoose';
-import { createHash } from 'node:crypto';
-import { UserDao } from '../../../application/ports/daos';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  AccountDeletionJob,
+  AccountDeletionStartContext,
+  UserDao,
+} from '../../../application/ports/daos';
+import { HouseholdRole } from '../../../domain/entities/household.entity';
 import { User, UserPrimitives } from '../../../domain/entities/user.entity';
 import { UserId } from '../../../domain/value-objects/user-id.vo';
 import { UserDocument } from './schemas/user.schema';
 
-type PersistedUser = UserPrimitives & {
+type PersistedUser = Omit<UserPrimitives, 'deletionFenceExpiresAt'> & {
   normalizedEmail: string;
   normalizedUsername: string;
   deletionFenceExpiresAt?: Date;
@@ -22,7 +28,24 @@ type AccountRevocationRecord = {
   expiresAt: Date;
 };
 
+type AccountDeletionJobRecord = {
+  _id: string;
+  userId: string;
+  email: string;
+  username: string;
+  authSubjectIds: string[];
+  pantryDeletionToken: string;
+  householdId?: string;
+  householdRole?: HouseholdRole;
+  startedAt: Date;
+  nextAttemptAt: Date;
+  attempts: number;
+  leaseToken?: string;
+  leaseExpiresAt?: Date;
+};
+
 const ACCOUNT_DELETION_FENCE_MS = 24 * 60 * 60 * 1000;
+const ACCOUNT_DELETION_INITIAL_RETRY_DELAY_MS = 2 * 60 * 1000;
 
 @Injectable()
 export class MongoUserDao implements UserDao, OnModuleInit {
@@ -35,6 +58,10 @@ export class MongoUserDao implements UserDao, OnModuleInit {
     await this.revocations.createIndex(
       { expiresAt: 1 },
       { expireAfterSeconds: 0, name: 'account_revocation_ttl' },
+    );
+    await this.deletionJobs.createIndex(
+      { nextAttemptAt: 1, startedAt: 1 },
+      { name: 'account_deletion_next_attempt' },
     );
   }
 
@@ -133,13 +160,22 @@ export class MongoUserDao implements UserDao, OnModuleInit {
   async beginAccountDeletion(
     id: UserId,
     expiresAt: Date,
-  ): Promise<User | null> {
+    context: AccountDeletionStartContext = {},
+  ): Promise<AccountDeletionJob | null> {
     const session = await this.userModel.db.startSession();
-    let user: PersistedUser | null = null;
+    let job: AccountDeletionJobRecord | null = null;
 
     try {
       await session.withTransaction(async () => {
-        user = await this.userModel
+        job = await this.deletionJobs.findOne(
+          { _id: id.toString() },
+          { session },
+        );
+        if (job) return;
+
+        await this.validateAccountDeletionContext(id, context, session);
+
+        const user = await this.userModel
           .findOneAndUpdate(
             { id: id.toString() },
             { $set: { deletionFenceExpiresAt: expiresAt } },
@@ -147,34 +183,133 @@ export class MongoUserDao implements UserDao, OnModuleInit {
           )
           .lean()
           .exec();
-        if (user) await this.writeRevocations(user, expiresAt, session);
+        if (!user) return;
+
+        await this.writeRevocations(user, expiresAt, session);
+        const startedAt = new Date();
+        job = {
+          _id: user.id,
+          userId: user.id,
+          email: user.email,
+          username: user.username,
+          authSubjectIds: normalizeAuthSubjectIds(user.authSubjectIds ?? []),
+          pantryDeletionToken: randomUUID(),
+          householdId: context.householdId,
+          householdRole: context.householdRole,
+          startedAt,
+          nextAttemptAt: new Date(
+            startedAt.getTime() + ACCOUNT_DELETION_INITIAL_RETRY_DELAY_MS,
+          ),
+          attempts: 0,
+        };
+        await this.deletionJobs.insertOne(job, { session });
       });
+    } catch (error) {
+      if ((error as { code?: number }).code === 11000) {
+        const winner = await this.deletionJobs.findOne({ _id: id.toString() });
+        return winner ? this.toAccountDeletionJob(winner) : null;
+      }
+      throw error;
     } finally {
       await session.endSession();
     }
 
-    return user ? this.toDomain(user) : null;
+    return job ? this.toAccountDeletionJob(job) : null;
+  }
+
+  async findPendingAccountDeletions(
+    limit: number,
+  ): Promise<AccountDeletionJob[]> {
+    const jobs = await this.deletionJobs
+      .find({})
+      .sort({ startedAt: 1 })
+      .limit(Math.min(Math.max(1, Math.trunc(limit)), 10))
+      .toArray();
+    return jobs.map((job) => this.toAccountDeletionJob(job));
+  }
+
+  async claimPendingAccountDeletion(
+    now: Date,
+    leaseExpiresAt: Date,
+  ): Promise<AccountDeletionJob | null> {
+    const job = await this.deletionJobs.findOneAndUpdate(
+      {
+        nextAttemptAt: { $lte: now },
+        $or: [
+          { leaseExpiresAt: { $exists: false } },
+          { leaseExpiresAt: { $lte: now } },
+        ],
+      },
+      {
+        $set: {
+          leaseToken: randomUUID(),
+          leaseExpiresAt,
+          nextAttemptAt: leaseExpiresAt,
+        },
+      },
+      { sort: { nextAttemptAt: 1, startedAt: 1 }, returnDocument: 'after' },
+    );
+    return job ? this.toAccountDeletionJob(job) : null;
+  }
+
+  async deferAccountDeletion(
+    job: AccountDeletionJob,
+    nextAttemptAt: Date,
+  ): Promise<void> {
+    if (!job.leaseToken) throw new Error('Account deletion lease is required');
+    const result = await this.deletionJobs.updateOne(
+      { _id: job.userId, leaseToken: job.leaseToken },
+      {
+        $set: { nextAttemptAt },
+        $inc: { attempts: 1 },
+        $unset: { leaseToken: '', leaseExpiresAt: '' },
+      },
+    );
+    if (result.matchedCount !== 1) {
+      throw new ConflictException('Account deletion lease was lost');
+    }
   }
 
   async delete(id: UserId): Promise<void> {
     const session = await this.userModel.db.startSession();
     try {
       await session.withTransaction(async () => {
+        const job = await this.deletionJobs.findOne(
+          { _id: id.toString() },
+          { session },
+        );
         const user = (await this.userModel
           .findOne({ id: id.toString() })
           .session(session)
           .lean()
           .exec()) as PersistedUser | null;
-        if (!user) return;
+        if (!job && !user) return;
 
         await this.writeRevocations(
-          user,
+          {
+            id: job?.userId ?? user!.id,
+            authSubjectIds: job?.authSubjectIds ?? user!.authSubjectIds,
+          },
           new Date(Date.now() + ACCOUNT_DELETION_FENCE_MS),
           session,
         );
+        if (job) {
+          const pantryDeletion = await this.pantryQuotas.deleteOne(
+            {
+              _id: id.toString(),
+              deleting: true,
+              deletionToken: job.pantryDeletionToken,
+            },
+            { session },
+          );
+          if (pantryDeletion.deletedCount !== 1) {
+            throw new ConflictException('Pantry deletion lock was lost');
+          }
+        }
         await this.userModel
           .deleteOne({ id: id.toString() }, { session })
           .exec();
+        await this.deletionJobs.deleteOne({ _id: id.toString() }, { session });
       });
     } finally {
       await session.endSession();
@@ -187,8 +322,26 @@ export class MongoUserDao implements UserDao, OnModuleInit {
     );
   }
 
+  private get deletionJobs() {
+    return this.userModel.db.collection<AccountDeletionJobRecord>(
+      'account_deletion_jobs',
+    );
+  }
+
+  private get households() {
+    return this.userModel.db.collection('households');
+  }
+
+  private get pantryQuotas() {
+    return this.userModel.db.collection<{
+      _id: string;
+      deleting: boolean;
+      deletionToken: string;
+    }>('pantry_quotas');
+  }
+
   private async writeRevocations(
-    user: PersistedUser,
+    user: Pick<UserPrimitives, 'id' | 'authSubjectIds'>,
     expiresAt: Date,
     session: ClientSession,
   ): Promise<void> {
@@ -202,6 +355,71 @@ export class MongoUserDao implements UserDao, OnModuleInit {
       })),
       { session },
     );
+  }
+
+  private toAccountDeletionJob(
+    job: AccountDeletionJobRecord,
+  ): AccountDeletionJob {
+    return {
+      userId: job.userId,
+      email: job.email,
+      username: job.username,
+      authSubjectIds: normalizeAuthSubjectIds(job.authSubjectIds ?? []),
+      pantryDeletionToken: job.pantryDeletionToken,
+      householdId: job.householdId,
+      householdRole: job.householdRole,
+      startedAt: new Date(job.startedAt),
+      attempts: job.attempts ?? 0,
+      leaseToken: job.leaseToken,
+    };
+  }
+
+  private async validateAccountDeletionContext(
+    id: UserId,
+    context: AccountDeletionStartContext,
+    session: ClientSession,
+  ): Promise<void> {
+    const userId = id.toString();
+    if (!context.householdId || !context.householdRole) {
+      const membership = await this.households.findOne(
+        { entityType: 'HOUSEHOLD_MEMBERSHIP', userId },
+        { projection: { _id: 1 }, session },
+      );
+      if (membership) {
+        throw new ConflictException('Household membership changed; retry');
+      }
+      return;
+    }
+
+    const membership = await this.households.updateOne(
+      {
+        entityType: 'HOUSEHOLD_MEMBERSHIP',
+        userId,
+        householdId: context.householdId,
+        role: context.householdRole,
+      },
+      { $inc: { accountDeletionVersion: 1 } },
+      { session },
+    );
+    if (membership.matchedCount !== 1) {
+      throw new ConflictException('Household membership changed; retry');
+    }
+    if (context.householdRole !== 'owner') return;
+    if (!context.householdDeletionToken) {
+      throw new ConflictException('Household deletion lock was lost; retry');
+    }
+    const parent = await this.households.updateOne(
+      {
+        pk: `HOUSEHOLD#${context.householdId}`,
+        ownerUserId: userId,
+        deleting: context.householdDeletionToken,
+      },
+      { $inc: { accountDeletionVersion: 1 } },
+      { session },
+    );
+    if (parent.matchedCount !== 1) {
+      throw new ConflictException('Household deletion lock was lost; retry');
+    }
   }
 
   private async hasActiveDeletionFence(
@@ -230,6 +448,9 @@ export class MongoUserDao implements UserDao, OnModuleInit {
       status: user.status,
       createdAt: new Date(user.createdAt),
       updatedAt: new Date(user.updatedAt),
+      ...(user.deletionFenceExpiresAt
+        ? { deletionFenceExpiresAt: new Date(user.deletionFenceExpiresAt) }
+        : {}),
     });
   }
 }
@@ -244,6 +465,12 @@ function normalizeUsername(username: string): string {
 
 function normalizeAuthSubjectId(authSubjectId: string): string {
   return authSubjectId.trim();
+}
+
+function normalizeAuthSubjectIds(authSubjectIds: string[]): string[] {
+  return [...new Set(authSubjectIds.map(normalizeAuthSubjectId))].filter(
+    Boolean,
+  );
 }
 
 function accountFenceIds(

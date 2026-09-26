@@ -18,6 +18,7 @@ const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/i;
 const DEPLOY_ALLOWLIST = [
   ['backend/lambda.zip', 'backend/lambda.zip'],
   ['infra/cognito/bin', 'infra/cognito/bin'],
+  ['infra/cognito/lambda', 'infra/cognito/lambda'],
   ['infra/cognito/lib', 'infra/cognito/lib'],
   ['infra/cognito/cdk.json', 'infra/cognito/cdk.json'],
   ['infra/cognito/delivery-resources.json', 'infra/cognito/delivery-resources.json'],

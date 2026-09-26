@@ -12,6 +12,9 @@ describe('CognitoProfileSyncService', () => {
     findByEmail: jest.fn(),
     findByUsername: jest.fn(),
     beginAccountDeletion: jest.fn(),
+    findPendingAccountDeletions: jest.fn(),
+    claimPendingAccountDeletion: jest.fn(),
+    deferAccountDeletion: jest.fn(),
     delete: jest.fn(),
   });
 

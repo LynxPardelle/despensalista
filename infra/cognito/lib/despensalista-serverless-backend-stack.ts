@@ -8,6 +8,8 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as codedeploy from 'aws-cdk-lib/aws-codedeploy';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventTargets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -49,6 +51,10 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
 
     const projectName = this.readContext('projectName', 'despensalista');
     const stage = this.readContext('stage', 'dev');
+    const releaseId = this.readContext('releaseId', 'local');
+    if (releaseId !== 'local' && !/^[0-9a-f]{12}$/.test(releaseId)) {
+      throw new Error('releaseId must be a 12-character hexadecimal release ID.');
+    }
     applyRuntimeBoundary(this, projectName, stage);
     const isProduction = stage.trim().toLowerCase() === 'prod';
     const frontendBaseUrl = this.readContext(
@@ -70,10 +76,8 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       : logs.RetentionDays.ONE_WEEK;
     const resourceRemovalPolicy = this.resolveRemovalPolicy();
     const originVerifyHeaderName = 'x-despensalista-origin-verify';
-    const originSecretName = `${projectName}/${isProduction ? 'prod' : 'nonprod'}/cloudfront-origin-verification`;
-    const originVerifySecret = stage === 'tst'
-      ? secretsmanager.Secret.fromSecretNameV2(this, 'OriginVerificationSecret', originSecretName)
-      : new secretsmanager.Secret(
+    const originSecretName = `${projectName}/${stage}/cloudfront-origin-verification`;
+    const originVerifySecret = new secretsmanager.Secret(
       this,
       'OriginVerificationSecret',
       {
@@ -86,9 +90,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         },
       },
     );
-    if (stage !== 'tst') {
-      originVerifySecret.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
-    }
+    originVerifySecret.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
     const backendFunctionName = `${projectName}-${stage}-backend-api`;
     // The production group was auto-created by Lambda before CDK managed logs.
     // LogRetention safely adopts retention without attempting to recreate it.
@@ -158,7 +160,6 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         actions: [
           'cognito-idp:AdminDeleteUser',
           'cognito-idp:AdminUserGlobalSignOut',
-          'cognito-idp:ListUsers',
         ],
         resources: [
           this.formatArn({
@@ -177,6 +178,22 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       description: 'Stable production traffic target and rollback pointer.',
       version: publishedVersion,
     });
+    if (isProduction) {
+      new events.Rule(this, 'AccountDeletionResumeRule', {
+        ruleName: `${projectName}-${stage}-account-deletion-resume`,
+        schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+        targets: [
+          new eventTargets.LambdaFunction(liveAlias, {
+            event: events.RuleTargetInput.fromObject({
+              source: 'despensalista.account-deletion-worker',
+              'detail-type': 'resume',
+            }),
+            maxEventAge: cdk.Duration.minutes(5),
+            retryAttempts: 0,
+          }),
+        ],
+      });
+    }
 
     const httpApi = new apigatewayv2.HttpApi(this, 'HttpApi', {
       apiName: `${projectName}-${stage}-backend-api`,
@@ -352,15 +369,15 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     if (isProduction) {
       new codedeploy.LambdaDeploymentGroup(this, 'BackendDeploymentGroup', {
         alias: liveAlias,
-        alarms: deploymentAlarms.slice(0, 2),
+        alarms: deploymentAlarms.slice(0, 1),
         autoRollback: {
           deploymentInAlarm: true,
           failedDeployment: true,
           stoppedDeployment: true,
         },
         deploymentConfig:
-          codedeploy.LambdaDeploymentConfig.CANARY_10PERCENT_5MINUTES,
-        deploymentGroupName: `${projectName}-${stage}-backend-canary`,
+          codedeploy.LambdaDeploymentConfig.ALL_AT_ONCE,
+        deploymentGroupName: `${projectName}-${stage}-backend-release`,
       });
     }
 
@@ -401,6 +418,8 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ServerlessBackendVersion', {
       value: publishedVersion.version,
     });
+    new cdk.CfnOutput(this, 'DeploymentReleaseId', { value: releaseId });
+    new cdk.CfnOutput(this, 'PantryQuotaSchemaVersion', { value: '2' });
     new cdk.CfnOutput(this, 'DynamoDbUsersTable', {
       value: tables.users.tableName,
     });
@@ -478,6 +497,11 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       partitionKey: { name: 'userId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'normalizedBaseName', type: dynamodb.AttributeType.STRING },
     });
+    productTypes.addGlobalSecondaryIndex({
+      indexName: 'UserArchivedAtIndex',
+      partitionKey: { name: 'userId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'archivedAt', type: dynamodb.AttributeType.STRING },
+    });
     inventoryLots.addGlobalSecondaryIndex({
       indexName: 'UserUpdatedAtIndex',
       partitionKey: { name: 'userId', type: dynamodb.AttributeType.STRING },
@@ -487,6 +511,11 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       indexName: 'ProductTypeUpdatedAtIndex',
       partitionKey: { name: 'productTypeId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'updatedAt', type: dynamodb.AttributeType.STRING },
+    });
+    inventoryLots.addGlobalSecondaryIndex({
+      indexName: 'UserArchivedAtIndex',
+      partitionKey: { name: 'userId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'archivedAt', type: dynamodb.AttributeType.STRING },
     });
 
     return { users, products, productTypes, inventoryLots };

@@ -12,7 +12,10 @@ import {
   HouseholdMembershipPrimitives,
   HouseholdPrimitives,
 } from '../../../domain/entities/household.entity';
-import { HouseholdRepository } from '../../../domain/repositories/household.repository';
+import {
+  HouseholdDeletionLock,
+  HouseholdRepository,
+} from '../../../domain/repositories/household.repository';
 import { HouseholdDocument } from './schemas/household.schema';
 
 const ANONYMIZED_USER_ID = 'deleted-user';
@@ -26,6 +29,7 @@ type ActiveUserRecord = {
   status: string;
   deletionFenceExpiresAt?: Date;
   householdMutationVersion?: number;
+  accountDeletionCancellationVersion?: number;
 };
 
 type HouseholdRecord = HouseholdPrimitives & {
@@ -438,15 +442,17 @@ export class MongoHouseholdRepository
   async beginHouseholdDeletion(
     householdId: string,
     ownerUserId: string,
-  ): Promise<boolean> {
+  ): Promise<HouseholdDeletionLock> {
     const session = await this.householdModel.db.startSession();
     let canDelete = false;
+    let parentLocked = true;
+    const token = randomUUID();
     try {
       await session.withTransaction(async () => {
         const closed = await this.householdModel
           .updateOne(
             { pk: householdKey(householdId), ownerUserId },
-            { $set: { deleting: randomUUID() } },
+            { $set: { deleting: token } },
             { session },
           )
           .exec();
@@ -458,6 +464,7 @@ export class MongoHouseholdRepository
             .exec();
           if (parent)
             throw new ConflictException('Household changed; refresh and retry');
+          parentLocked = false;
         }
         const otherMember = await this.householdModel
           .findOne({
@@ -472,14 +479,59 @@ export class MongoHouseholdRepository
         if (otherMember) {
           await this.householdModel
             .updateOne(
-              { pk: householdKey(householdId) },
+              { pk: householdKey(householdId), deleting: token },
               { $unset: { deleting: '' } },
               { session },
             )
             .exec();
         }
       });
-      return canDelete;
+      return {
+        canDelete,
+        ...(canDelete && parentLocked ? { token } : {}),
+      };
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  async cancelHouseholdDeletion(
+    householdId: string,
+    ownerUserId: string,
+    token: string,
+  ): Promise<void> {
+    const session = await this.householdModel.db.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const job = await this.deletionJobs.findOne(
+          { _id: ownerUserId },
+          { projection: { _id: 1 }, session },
+        );
+        if (job) return;
+        const user = await this.users.updateOne(
+          {
+            id: ownerUserId,
+            $or: [
+              { deletionFenceExpiresAt: { $exists: false } },
+              { deletionFenceExpiresAt: { $lte: new Date() } },
+            ],
+          },
+          { $inc: { accountDeletionCancellationVersion: 1 } },
+          { session },
+        );
+        if (user.matchedCount !== 1) return;
+        await this.householdModel
+          .updateOne(
+            {
+              pk: householdKey(householdId),
+              ownerUserId,
+              deleting: token,
+            },
+            { $unset: { deleting: '' } },
+            { session },
+          )
+          .exec();
+      });
     } finally {
       await session.endSession();
     }
@@ -555,6 +607,12 @@ export class MongoHouseholdRepository
 
   private get users() {
     return this.householdModel.db.collection<ActiveUserRecord>('users');
+  }
+
+  private get deletionJobs() {
+    return this.householdModel.db.collection<{ _id: string }>(
+      'account_deletion_jobs',
+    );
   }
 
   private accountDeletionChange(

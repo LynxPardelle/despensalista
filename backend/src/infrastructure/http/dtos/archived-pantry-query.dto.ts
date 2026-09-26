@@ -6,6 +6,7 @@ import {
   IsOptional,
   IsString,
   Max,
+  MaxLength,
   Min,
 } from 'class-validator';
 import { MAX_ARCHIVED_PANTRY_PAGE_SIZE } from '../../../application/constants/query-limits';
@@ -16,6 +17,7 @@ export class ArchivedPantryQueryDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(1024)
   productTypesCursor?: string;
 
   @ApiPropertyOptional({
@@ -23,6 +25,7 @@ export class ArchivedPantryQueryDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(1024)
   inventoryLotsCursor?: string;
 
   @ApiPropertyOptional({

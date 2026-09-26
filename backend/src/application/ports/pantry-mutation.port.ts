@@ -10,7 +10,16 @@ import { ShoppingShare } from '../../domain/entities/shopping-share.entity';
 
 export type PantryOperation =
   | 'consume_inventory_lot'
-  | 'close_shopping_purchase';
+  | 'close_shopping_purchase'
+  | 'delete_pantry_data';
+
+export interface PantryDeletionResult {
+  deletedInventoryLotCount: number;
+  deletedProductTypeCount: number;
+  deletedShoppingListCount: number;
+  deletedShoppingShareCount: number;
+  deletedWasteEventCount: number;
+}
 
 export interface PantryOperationContext {
   operationId: string;
@@ -24,7 +33,16 @@ export interface PantryOperationContext {
 export type PantryOperationLookup = PantryOperationContext;
 
 export interface PantryOperationReceipt extends PantryOperationContext {
-  response: InventoryLotPrimitives | InventoryLotPrimitives[] | null;
+  response:
+    | InventoryLotPrimitives
+    | InventoryLotPrimitives[]
+    | PantryDeletionResult
+    | null;
+}
+
+export interface PantryDeletionReceipt extends PantryOperationContext {
+  operation: 'delete_pantry_data';
+  response: PantryDeletionResult;
 }
 
 export interface IdempotentMutationResult<T> {
@@ -49,6 +67,11 @@ export interface CloseShoppingPurchaseMutation {
   receipt: PantryOperationContext;
   lots: InventoryLot[];
   productTypes: ProductTypeTransactionChange[];
+}
+
+export interface PantryDeletionRequest {
+  deletionToken?: string;
+  retainFence?: boolean;
 }
 
 export interface PantryMutationPort {
@@ -97,11 +120,17 @@ export interface PantryMutationPort {
   ): Promise<ProductType>;
   beginPantryDeletion(
     ownerUserId: string,
-    preserveDeletionLockUntil?: Date,
-  ): Promise<void>;
+    request?: PantryDeletionRequest,
+  ): Promise<string>;
   completePantryDeletion(
     ownerUserId: string,
-    preserveDeletionLockUntil?: Date,
+    deletionToken: string,
+    retainFence?: boolean,
+    receipt?: PantryDeletionReceipt,
+  ): Promise<void>;
+  abortPantryDeletion(
+    ownerUserId: string,
+    deletionToken: string,
   ): Promise<void>;
 }
 

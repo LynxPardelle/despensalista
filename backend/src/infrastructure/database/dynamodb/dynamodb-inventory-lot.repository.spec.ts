@@ -1,9 +1,5 @@
 import { ConfigService } from '@nestjs/config';
-import {
-  DeleteCommand,
-  QueryCommand,
-  ScanCommand,
-} from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { QuantityUnit } from '../../../domain/enums';
 import { ProductTypeId } from '../../../domain/value-objects/product-type-id.vo';
 import { UserId } from '../../../domain/value-objects/user-id.vo';
@@ -56,7 +52,7 @@ describe('DynamoDbInventoryLotRepository', () => {
     ]);
   });
 
-  it('pages archived inventory lots without dropping filtered DynamoDB results', async () => {
+  it('pages archived inventory lots from the archive-ordered sparse index', async () => {
     const firstItem = {
       ...buildInventoryLotItem('lot-1'),
       archivedAt: '2026-05-20T00:00:00.000Z',
@@ -66,25 +62,16 @@ describe('DynamoDbInventoryLotRepository', () => {
       archivedAt: '2026-05-19T00:00:00.000Z',
     };
     const dynamoDb = {
-      send: jest
-        .fn()
-        .mockImplementationOnce(async (command: QueryCommand) => {
-          expect(command.input.Limit).toBe(2);
+      send: jest.fn().mockImplementation(async (command: QueryCommand) => {
+        expect(command.input.IndexName).toBe('UserArchivedAtIndex');
+        expect(command.input.ScanIndexForward).toBe(false);
+        expect(command.input.Limit).toBe(2);
 
-          return {
-            Items: [firstItem],
-            LastEvaluatedKey: { id: firstItem.id },
-          };
-        })
-        .mockImplementationOnce(async (command: QueryCommand) => {
-          expect(command.input.Limit).toBe(1);
-          expect(command.input.ExclusiveStartKey).toEqual({ id: firstItem.id });
-
-          return {
-            Items: [secondItem],
-            LastEvaluatedKey: { id: secondItem.id },
-          };
-        }),
+        return {
+          Items: [firstItem, secondItem],
+          LastEvaluatedKey: { id: secondItem.id },
+        };
+      }),
     } as unknown as DynamoDbDocumentClientService;
     const repository = new DynamoDbInventoryLotRepository(
       dynamoDb,
@@ -101,6 +88,7 @@ describe('DynamoDbInventoryLotRepository', () => {
       'lot-2',
     ]);
     expect(page.nextCursor).toBeDefined();
+    expect(dynamoDb.send).toHaveBeenCalledTimes(1);
   });
 
   it('rejects invalid archived inventory lot cursors before querying DynamoDB', async () => {
@@ -112,54 +100,69 @@ describe('DynamoDbInventoryLotRepository', () => {
       makeConfigService('inventory-lots'),
     );
 
-    await expect(
-      repository.findArchivedPageByUserId(UserId.fromString('user-1'), {
-        limit: 2,
-        cursor: 'bad-cursor',
-      }),
-    ).rejects.toThrow('Invalid archived inventory lot cursor');
+    const invalidCursors = [
+      'bad-cursor',
+      Buffer.from('[]').toString('base64url'),
+      Buffer.from(
+        JSON.stringify({
+          id: 'lot-1',
+          userId: 'another-user',
+          archivedAt: '2026-05-20T00:00:00.000Z',
+        }),
+      ).toString('base64url'),
+      Buffer.from(
+        JSON.stringify({
+          id: 'lot-1',
+          userId: 'user-1',
+          archivedAt: 'not-a-date',
+        }),
+      ).toString('base64url'),
+    ];
+    for (const cursor of invalidCursors) {
+      await expect(
+        repository.findArchivedPageByUserId(UserId.fromString('user-1'), {
+          limit: 2,
+          cursor,
+        }),
+      ).rejects.toThrow('Invalid archived inventory lot cursor');
+    }
     expect(dynamoDb.send).not.toHaveBeenCalled();
   });
 
-  it('strongly scans every page before deleting all lots for a product type', async () => {
+  it('queries every lot, including archived lots, from the product-type owner index', async () => {
     const firstItem = buildInventoryLotItem('lot-1');
     const secondItem = buildInventoryLotItem('lot-2');
-    const unrelated = {
-      ...buildInventoryLotItem('keep'),
-      productTypeId: 'other-type',
-    };
     const dynamoDb = {
       send: jest
         .fn()
-        .mockImplementationOnce(async (command: ScanCommand) => {
-          expect(command).toBeInstanceOf(ScanCommand);
-          expect(command.input.ConsistentRead).toBe(true);
-          expect(command.input.IndexName).toBeUndefined();
+        .mockImplementationOnce(async (command: QueryCommand) => {
+          expect(command).toBeInstanceOf(QueryCommand);
+          expect(command.input.IndexName).toBe('ProductTypeUpdatedAtIndex');
+          expect(command.input.ExpressionAttributeValues).toMatchObject({
+            ':productTypeId': 'type-1',
+          });
           return {
-            Items: [firstItem, unrelated],
+            Items: [firstItem],
             LastEvaluatedKey: { id: firstItem.id },
           };
         })
-        .mockImplementationOnce(async (command: ScanCommand) => {
-          expect(command).toBeInstanceOf(ScanCommand);
-          expect(command.input.ConsistentRead).toBe(true);
+        .mockImplementationOnce(async (command: QueryCommand) => {
+          expect(command).toBeInstanceOf(QueryCommand);
           expect(command.input.ExclusiveStartKey).toEqual({ id: 'lot-1' });
           return { Items: [secondItem] };
-        })
-        .mockResolvedValue({}),
+        }),
     } as unknown as DynamoDbDocumentClientService;
     const repository = new DynamoDbInventoryLotRepository(
       dynamoDb,
       makeConfigService('inventory-lots'),
     );
 
-    await repository.deleteByProductTypeId(ProductTypeId.fromString('type-1'));
+    const lots = await repository.findAllByProductTypeId(
+      ProductTypeId.fromString('type-1'),
+    );
 
-    const deletes = (dynamoDb.send as jest.Mock).mock.calls
-      .map(([command]) => command)
-      .filter((command) => command instanceof DeleteCommand)
-      .map((command: DeleteCommand) => command.input.Key);
-    expect(deletes).toEqual([{ id: 'lot-1' }, { id: 'lot-2' }]);
+    expect(lots.map((lot) => lot.id.toString())).toEqual(['lot-1', 'lot-2']);
+    expect(dynamoDb.send).toHaveBeenCalledTimes(2);
   });
 });
 

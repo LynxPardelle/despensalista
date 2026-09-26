@@ -280,7 +280,7 @@ describe('DynamoDbHouseholdRepository', () => {
     );
     await expect(
       repository.beginHouseholdDeletion('household-1', 'owner'),
-    ).resolves.toBe(false);
+    ).resolves.toEqual({ canDelete: false });
     const close = send.mock.calls[0][0] as UpdateCommand;
     expect(close.input.ConditionExpression).toBe('ownerUserId = :owner');
     expect(close.input.UpdateExpression).toBe('SET deleting = :token');
@@ -309,10 +309,10 @@ describe('DynamoDbHouseholdRepository', () => {
     );
     await expect(
       repository.beginHouseholdDeletion('household-1', 'owner'),
-    ).resolves.toBe(true);
+    ).resolves.toEqual({ canDelete: true, token: expect.any(String) });
     await expect(
       repository.beginHouseholdDeletion('household-1', 'owner'),
-    ).resolves.toBe(true);
+    ).resolves.toEqual({ canDelete: true, token: expect.any(String) });
     expect(
       send.mock.calls.filter(([command]) => command instanceof UpdateCommand),
     ).toHaveLength(2);
@@ -341,7 +341,114 @@ describe('DynamoDbHouseholdRepository', () => {
 
     await expect(
       repository.beginHouseholdDeletion('household-1', 'owner'),
-    ).resolves.toBe(true);
+    ).resolves.toEqual({ canDelete: true });
+  });
+
+  it('releases only its own owner lock when no durable job exists', async () => {
+    const send = jest.fn().mockResolvedValue({});
+    const repository = new DynamoDbHouseholdRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      makeConfigService(),
+    );
+
+    await repository.cancelHouseholdDeletion('household-1', 'owner', 'lock-1');
+
+    const transaction = send.mock.calls[0][0] as TransactWriteCommand;
+    expect(transaction.input.TransactItems).toEqual([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          Key: { pk: 'ACCOUNT_DELETION_JOB#owner' },
+          ConditionExpression: 'attribute_not_exists(pk)',
+        }),
+      }),
+      expect.objectContaining({
+        Update: expect.objectContaining({
+          Key: { pk: 'HOUSEHOLD#household-1' },
+          ConditionExpression: 'ownerUserId = :owner AND deleting = :token',
+          UpdateExpression: 'REMOVE deleting',
+        }),
+      }),
+    ]);
+  });
+
+  it('retries a canceled owner-lock compensation while its lock still exists', async () => {
+    let transactionAttempts = 0;
+    const send = jest.fn(async (command) => {
+      if (command instanceof TransactWriteCommand) {
+        transactionAttempts += 1;
+        if (transactionAttempts === 1) {
+          const error = new Error('transient cancellation');
+          error.name = 'TransactionCanceledException';
+          throw error;
+        }
+        return {};
+      }
+      if (command instanceof GetCommand) {
+        return command.input.Key?.pk === 'ACCOUNT_DELETION_JOB#owner'
+          ? {}
+          : { Item: { ownerUserId: 'owner', deleting: 'lock-1' } };
+      }
+      return {};
+    });
+    const repository = new DynamoDbHouseholdRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      makeConfigService(),
+    );
+
+    await repository.cancelHouseholdDeletion('household-1', 'owner', 'lock-1');
+
+    expect(transactionAttempts).toBe(2);
+  });
+
+  it('treats canceled owner-lock compensation as complete only after observing a job', async () => {
+    const send = jest.fn(async (command) => {
+      if (command instanceof TransactWriteCommand) {
+        const error = new Error('condition canceled');
+        error.name = 'TransactionCanceledException';
+        throw error;
+      }
+      if (command instanceof GetCommand) {
+        return { Item: { entityType: 'ACCOUNT_DELETION_JOB' } };
+      }
+      return {};
+    });
+    const repository = new DynamoDbHouseholdRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      makeConfigService(),
+    );
+
+    await expect(
+      repository.cancelHouseholdDeletion('household-1', 'owner', 'lock-1'),
+    ).resolves.toBeUndefined();
+    expect(
+      send.mock.calls.filter(
+        ([command]) => command instanceof TransactWriteCommand,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('surfaces repeated operational cancellation instead of leaving an owner lock silently', async () => {
+    const send = jest.fn(async (command) => {
+      if (command instanceof TransactWriteCommand) {
+        const error = new Error('persistent cancellation');
+        error.name = 'TransactionCanceledException';
+        throw error;
+      }
+      if (command instanceof GetCommand) {
+        return command.input.Key?.pk === 'ACCOUNT_DELETION_JOB#owner'
+          ? {}
+          : { Item: { ownerUserId: 'owner', deleting: 'lock-1' } };
+      }
+      return {};
+    });
+    const repository = new DynamoDbHouseholdRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      makeConfigService(),
+    );
+
+    await expect(
+      repository.cancelHouseholdDeletion('household-1', 'owner', 'lock-1'),
+    ).rejects.toThrow('persistent cancellation');
   });
 
   it('anonymizes retained household history in paged transactional batches', async () => {

@@ -251,7 +251,7 @@ describe('Mongo household atomic membership', () => {
     const count = await model.countDocuments({});
     await expect(
       repository.beginHouseholdDeletion(household.id, 'owner'),
-    ).resolves.toBe(false);
+    ).resolves.toEqual({ canDelete: false });
     expect(await repository.findHouseholdById(household.id)).not.toBeNull();
     expect(await model.countDocuments({})).toBe(count);
   });
@@ -260,14 +260,28 @@ describe('Mongo household atomic membership', () => {
     const { household, invite } = await pendingInvite();
     await expect(
       repository.beginHouseholdDeletion(household.id, 'owner'),
-    ).resolves.toBe(true);
+    ).resolves.toEqual({ canDelete: true, token: expect.any(String) });
     await expect(
       repository.beginHouseholdDeletion(household.id, 'owner'),
-    ).resolves.toBe(true);
+    ).resolves.toEqual({ canDelete: true, token: expect.any(String) });
     await expect(repository.saveInvite(invite)).rejects.toBeInstanceOf(
       ConflictException,
     );
     expect(await repository.findHouseholdById(household.id)).toBeNull();
+  });
+
+  it('releases its owner lock when no durable deletion job exists', async () => {
+    const { household } = await pendingInvite();
+    const lock = await repository.beginHouseholdDeletion(household.id, 'owner');
+    expect(lock).toMatchObject({ canDelete: true, token: expect.any(String) });
+
+    await repository.cancelHouseholdDeletion(
+      household.id,
+      'owner',
+      lock.token!,
+    );
+
+    expect(await repository.findHouseholdById(household.id)).not.toBeNull();
   });
 
   it('resumes a cascade after an older attempt already removed the parent', async () => {
@@ -276,7 +290,7 @@ describe('Mongo household atomic membership', () => {
 
     await expect(
       repository.beginHouseholdDeletion(household.id, 'owner'),
-    ).resolves.toBe(true);
+    ).resolves.toEqual({ canDelete: true });
     await expect(
       repository.deleteHouseholdCascade(household.id),
     ).resolves.toBeUndefined();
@@ -386,7 +400,8 @@ describe('Mongo household atomic membership', () => {
         repository.acceptInvite(invite, membership),
       ]);
       expect(deletion.status).toBe('fulfilled');
-      const canDelete = deletion.status === 'fulfilled' && deletion.value;
+      const canDelete =
+        deletion.status === 'fulfilled' && deletion.value.canDelete;
       if (canDelete) {
         expect(acceptance.status).toBe('rejected');
         expect(await repository.findMembershipByUserId('invited')).toBeNull();

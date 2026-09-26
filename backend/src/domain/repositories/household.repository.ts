@@ -5,6 +5,11 @@ import {
   HouseholdMembership,
 } from '../entities/household.entity';
 
+export interface HouseholdDeletionLock {
+  canDelete: boolean;
+  token?: string;
+}
+
 export interface HouseholdRepository {
   createHouseholdWithOwner(
     household: Household,
@@ -46,6 +51,11 @@ export interface HouseholdRepository {
   beginHouseholdDeletion(
     householdId: string,
     ownerUserId: string,
-  ): Promise<boolean>;
+  ): Promise<HouseholdDeletionLock>;
+  cancelHouseholdDeletion(
+    householdId: string,
+    ownerUserId: string,
+    token: string,
+  ): Promise<void>;
   deleteHouseholdCascade(householdId: string): Promise<void>;
 }

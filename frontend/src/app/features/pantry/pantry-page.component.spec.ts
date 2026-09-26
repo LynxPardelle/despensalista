@@ -1746,6 +1746,21 @@ describe('PantryPageComponent', () => {
     );
   });
 
+  it('keeps an offline checkout pending when synchronization needs reauthentication', () => {
+    const item = makeShoppingPlanItem();
+    component.isOffline = true;
+    component.setShoppingTripItemsChecked([item], true);
+    component.closeShoppingTrip([item]);
+    pantryService.closeShoppingPurchase.and.returnValue(
+      throwError(() => new HttpErrorResponse({ status: 401 })),
+    );
+
+    component.isOffline = false;
+    (component as any).flushPendingShoppingCheckouts();
+
+    expect(component.pendingShoppingCheckoutCount).toBe(1);
+  });
+
   it('rejects a checkout larger than the atomic limit of 49 lines', () => {
     const items = Array.from({ length: 50 }, (_, index) =>
       makeShoppingPlanItem({ productTypeId: `type-${index}` }),
@@ -1767,6 +1782,32 @@ describe('PantryPageComponent', () => {
     component.closeShoppingTrip([item]);
     expect(pantryService.closeShoppingPurchase.calls.argsFor(1)[1]).toBe(firstKey);
     expect(component.pendingShoppingCheckoutCount).toBe(1);
+  });
+
+  it('drops a permanently rejected online checkout so corrected data can be retried', () => {
+    const item = makeShoppingPlanItem();
+    component.setShoppingTripItemsChecked([item], true);
+    pantryService.closeShoppingPurchase.and.returnValue(
+      throwError(
+        () =>
+          new HttpErrorResponse({
+            status: 400,
+            error: { message: 'Invalid purchase line' },
+          }),
+      ),
+    );
+
+    component.closeShoppingTrip([item]);
+
+    expect(component.pendingShoppingCheckoutCount).toBe(0);
+    expect(component.shoppingCheckoutStatus).toContain('Corrige los datos');
+
+    pantryService.closeShoppingPurchase.and.returnValue(of(makeCheckoutResult()));
+    component.updateShoppingTripQuantity(item, 2);
+    component.closeShoppingTrip([item]);
+
+    expect(pantryService.closeShoppingPurchase).toHaveBeenCalledTimes(2);
+    expect(component.pendingShoppingCheckoutCount).toBe(0);
   });
 
   it('does not automatically replay purchases after the seven-day receipt window', () => {

@@ -1,11 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import {
-  DeleteCommand,
-  PutCommand,
-  QueryCommand,
-  ScanCommand,
-} from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import {
   InventoryLot,
   InventoryLotPrimitives,
@@ -23,6 +18,7 @@ import { InventoryLotRepository } from '../../../domain/repositories/inventory-l
 import { InventoryLotId } from '../../../domain/value-objects/inventory-lot-id.vo';
 import { ProductTypeId } from '../../../domain/value-objects/product-type-id.vo';
 import { UserId } from '../../../domain/value-objects/user-id.vo';
+import { decodeArchiveCursor } from '../archive-cursor';
 import { DynamoDbDocumentClientService } from './dynamodb-document-client.service';
 
 type InventoryLotItem = Omit<
@@ -110,46 +106,33 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
     options: CursorPageOptions,
   ): Promise<CursorPage<InventoryLot>> {
     const limit = clampArchivedLimit(options.limit);
-    const items: InventoryLotItem[] = [];
-    let exclusiveStartKey = decodeDynamoCursor(options.cursor);
-
-    do {
-      const result = await this.dynamoDb.send(
-        new QueryCommand({
-          TableName: this.tableName,
-          IndexName: 'UserUpdatedAtIndex',
-          KeyConditionExpression: 'userId = :userId',
-          ExpressionAttributeValues: {
-            ':userId': userId.toString(),
-          },
-          ScanIndexForward: false,
-          Limit: limit - items.length,
-          ...(exclusiveStartKey
-            ? { ExclusiveStartKey: exclusiveStartKey }
-            : {}),
-        }),
-      );
-      items.push(
-        ...((result.Items ?? []) as InventoryLotItem[])
-          .filter((item) => item.entityType === 'INVENTORY_LOT')
-          .filter((item) => Boolean(item.archivedAt)),
-      );
-      exclusiveStartKey = result.LastEvaluatedKey as
-        | Record<string, unknown>
-        | undefined;
-    } while (exclusiveStartKey && items.length < limit);
-
-    const pageItems = items.slice(0, limit);
+    const result = await this.dynamoDb.send(
+      new QueryCommand({
+        TableName: this.tableName,
+        IndexName: 'UserArchivedAtIndex',
+        KeyConditionExpression: 'userId = :userId',
+        ExpressionAttributeValues: {
+          ':userId': userId.toString(),
+        },
+        ScanIndexForward: false,
+        Limit: limit,
+        ...(options.cursor
+          ? {
+              ExclusiveStartKey: decodeDynamoCursor(
+                options.cursor,
+                userId.toString(),
+              ),
+            }
+          : {}),
+      }),
+    );
 
     return {
-      items: pageItems
-        .map((item) => this.toDomain(item))
-        .sort(
-          (a, b) =>
-            (b.archivedAt?.getTime() ?? 0) - (a.archivedAt?.getTime() ?? 0),
-        ),
-      nextCursor: exclusiveStartKey
-        ? encodeDynamoCursor(exclusiveStartKey)
+      items: ((result.Items ?? []) as InventoryLotItem[]).map((item) =>
+        this.toDomain(item),
+      ),
+      nextCursor: result.LastEvaluatedKey
+        ? encodeDynamoCursor(result.LastEvaluatedKey)
         : undefined,
     };
   }
@@ -197,12 +180,6 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
     );
   }
 
-  async deleteByProductTypeId(productTypeId: ProductTypeId): Promise<void> {
-    const lots = await this.findAllByProductTypeId(productTypeId);
-
-    await Promise.all(lots.map((lot) => this.delete(lot.id)));
-  }
-
   async deleteByUserId(userId: UserId): Promise<number> {
     const lots = await this.findAllByUserId(userId);
 
@@ -211,7 +188,7 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
     return lots.length;
   }
 
-  private async findAllByProductTypeId(
+  async findAllByProductTypeId(
     productTypeId: ProductTypeId,
   ): Promise<InventoryLot[]> {
     const items: InventoryLotItem[] = [];
@@ -219,13 +196,11 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
 
     do {
       const result = await this.dynamoDb.send(
-        new ScanCommand({
+        new QueryCommand({
           TableName: this.tableName,
-          ConsistentRead: true,
-          FilterExpression:
-            'entityType = :entityType AND productTypeId = :productTypeId',
+          IndexName: 'ProductTypeUpdatedAtIndex',
+          KeyConditionExpression: 'productTypeId = :productTypeId',
           ExpressionAttributeValues: {
-            ':entityType': 'INVENTORY_LOT',
             ':productTypeId': productTypeId.toString(),
           },
           ...(exclusiveStartKey
@@ -345,16 +320,11 @@ function encodeDynamoCursor(
 
 function decodeDynamoCursor(
   cursor: string | undefined,
+  expectedUserId: string,
 ): Record<string, unknown> | undefined {
-  if (!cursor) {
-    return undefined;
-  }
-
-  try {
-    return JSON.parse(
-      Buffer.from(cursor, 'base64url').toString('utf8'),
-    ) as Record<string, unknown>;
-  } catch {
-    throw new Error('Invalid archived inventory lot cursor');
-  }
+  return decodeArchiveCursor(
+    cursor,
+    expectedUserId,
+    'Invalid archived inventory lot cursor',
+  );
 }

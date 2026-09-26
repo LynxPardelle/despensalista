@@ -19,12 +19,16 @@ import {
   HouseholdMembershipPrimitives,
   HouseholdPrimitives,
 } from '../../../domain/entities/household.entity';
-import { HouseholdRepository } from '../../../domain/repositories/household.repository';
+import {
+  HouseholdDeletionLock,
+  HouseholdRepository,
+} from '../../../domain/repositories/household.repository';
 import { DynamoDbDocumentClientService } from './dynamodb-document-client.service';
 
 const ANONYMIZED_USER_ID = 'deleted-user';
 const ANONYMIZED_EMAIL = 'deleted@example.invalid';
 const ANONYMIZED_LABEL = 'Usuario eliminado';
+const HOUSEHOLD_UNLOCK_MAX_ATTEMPTS = 3;
 
 type TransactItem = NonNullable<
   ConstructorParameters<typeof TransactWriteCommand>[0]['TransactItems']
@@ -553,6 +557,8 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
     let cursor: Record<string, unknown> | undefined;
 
     do {
+      // ponytail: O(shared users table) is the current privacy-safe ceiling;
+      // migrate household children to an owner base partition/strong manifest before table growth.
       const page = await this.dynamoDb.send(
         new ScanCommand({
           TableName: this.tableName,
@@ -589,8 +595,9 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
   async beginHouseholdDeletion(
     householdId: string,
     ownerUserId: string,
-  ): Promise<boolean> {
+  ): Promise<HouseholdDeletionLock> {
     const token = randomUUID();
+    let parentLocked = true;
     try {
       await this.dynamoDb.send(
         new UpdateCommand({
@@ -612,6 +619,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
         );
         if (parent.Item)
           throw new ConflictException('Household changed; refresh and retry');
+        parentLocked = false;
       } else {
         throw error;
       }
@@ -620,6 +628,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
     do {
       // Acceptance/migration now cannot add or move member records. A GSI is
       // unsuitable here because an omitted recent member would permit data loss.
+      // ponytail: O(shared users table); add a transactionally maintained member manifest before growth.
       const page = await this.dynamoDb.send(
         new ScanCommand({
           TableName: this.tableName,
@@ -650,11 +659,78 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
           if ((error as Error).name !== 'ConditionalCheckFailedException')
             throw error;
         }
-        return false;
+        return { canDelete: false };
       }
       cursor = page.LastEvaluatedKey;
     } while (cursor);
-    return true;
+    return {
+      canDelete: true,
+      ...(parentLocked ? { token } : {}),
+    };
+  }
+
+  async cancelHouseholdDeletion(
+    householdId: string,
+    ownerUserId: string,
+    token: string,
+  ): Promise<void> {
+    for (let attempt = 1; attempt <= HOUSEHOLD_UNLOCK_MAX_ATTEMPTS; attempt++) {
+      try {
+        await this.dynamoDb.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              {
+                ConditionCheck: {
+                  TableName: this.tableName,
+                  Key: { pk: accountDeletionJobKey(ownerUserId) },
+                  ConditionExpression: 'attribute_not_exists(pk)',
+                },
+              },
+              {
+                Update: {
+                  TableName: this.tableName,
+                  Key: { pk: householdKey(householdId) },
+                  UpdateExpression: 'REMOVE deleting',
+                  ConditionExpression:
+                    'ownerUserId = :owner AND deleting = :token',
+                  ExpressionAttributeValues: {
+                    ':owner': ownerUserId,
+                    ':token': token,
+                  },
+                },
+              },
+            ],
+          }),
+        );
+        return;
+      } catch (error) {
+        if ((error as Error).name !== 'TransactionCanceledException') {
+          throw error;
+        }
+        const job = await this.dynamoDb.send(
+          new GetCommand({
+            TableName: this.tableName,
+            Key: { pk: accountDeletionJobKey(ownerUserId) },
+            ConsistentRead: true,
+          }),
+        );
+        if (job.Item) return;
+        const household = await this.dynamoDb.send(
+          new GetCommand({
+            TableName: this.tableName,
+            Key: { pk: householdKey(householdId) },
+            ConsistentRead: true,
+          }),
+        );
+        if (
+          household.Item?.ownerUserId !== ownerUserId ||
+          household.Item?.deleting !== token
+        ) {
+          return;
+        }
+        if (attempt === HOUSEHOLD_UNLOCK_MAX_ATTEMPTS) throw error;
+      }
+    }
   }
 
   async deleteHouseholdCascade(householdId: string): Promise<void> {
@@ -676,6 +752,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
     let cursor: Record<string, unknown> | undefined;
     do {
       // Privacy cleanup needs a strong read; GSI propagation can miss recent writes.
+      // ponytail: O(shared users table); move children to an owner partition/strong manifest before growth.
       const page = await this.dynamoDb.send(
         new ScanCommand({
           TableName: this.tableName,
@@ -979,6 +1056,10 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
 
 function householdKey(id: string): string {
   return `HOUSEHOLD#${id}`;
+}
+
+function accountDeletionJobKey(userId: string): string {
+  return `ACCOUNT_DELETION_JOB#${userId}`;
 }
 
 function userKey(id: string): string {

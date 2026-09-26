@@ -25,14 +25,30 @@ The serverless stack defines the staged application resources:
 - Required local-user TOTP MFA. The production configuration uses the verified
   custom From address under `COGNITO_DEFAULT` and its 50-message daily quota.
 - Stage-specific GitHub OIDC deployment roles, immutable Lambda versions and `live` alias.
-- Four production alarms (about USD 0.40/month), bounded API/Lambda logs, and production canary rollback.
+- Five production alarms (about USD 0.50/month), bounded API/Lambda logs, and
+  production all-at-once deployment with alarm-backed rollback. When the
+  deployed `PantryQuotaSchemaVersion` is older than the release contract, the
+  production workflow briefly sets reserved concurrency to zero, waits the
+  Lambda timeout plus five seconds, conditionally removes only inactive
+  `PANTRY_QUOTA` rows, deploys, and restores the prior concurrency.
 
-The retired Dokploy/EC2 stack has been removed. Production and nonproduction
-have separate origin-verification secrets; dev and tst share the nonproduction
-secret, totaling USD 0.80/month. Deploy dev before tst. CloudWatch Synthetics is
-deliberately excluded. SES/DKIM is provisioned only in prod. The verified custom
+The retired Dokploy/EC2 stack has been removed. Dev, tst, and prod each have an
+isolated origin-verification secret, totaling about USD 1.20/month. The first
+deployment of this contract retains the former shared `nonprod` secret for safe
+migration; remove it manually only after both dev and tst pass their smoke tests.
+CloudWatch Synthetics is deliberately excluded. SES/DKIM is provisioned only in
+prod. The verified custom
 From works with Cognito-managed delivery while the account remains in the SES
 sandbox; direct `DEVELOPER` sending still requires SES production access.
+
+The CustomMessage guard atomically applies hashed-recipient and daily counters
+without reserving Lambda concurrency. Daily limits are dev 2, tst 3, and prod 30;
+prod caps non-recovery mail at 20 to retain 10 recovery sends, leaving 15 of the
+account's approximate 50-message managed quota for other pools. Anonymous direct
+`SignUp`, `ResendConfirmationCode`, and `ForgotPassword` calls can still consume
+those budgets. CustomMessage has no source IP, browser CAPTCHA is bypassable via
+the public Cognito API, and a user-pool WAF starts above the approved USD 1/month
+threshold. See the production runbook for the explicit residual risk and costs.
 
 Administrator bootstrap attempts the CloudFront `FREE` plan. If AWS rejects the
 account or distribution as ineligible, redeploy that bootstrap with

@@ -9,6 +9,7 @@ export interface UserPrimitives {
   status: UserAccountStatus;
   createdAt: Date;
   updatedAt: Date;
+  deletionFenceExpiresAt?: Date;
 }
 
 export class User {
@@ -20,6 +21,7 @@ export class User {
     private _status: UserAccountStatus,
     private readonly _createdAt: Date = new Date(),
     private _updatedAt: Date = new Date(),
+    private readonly _deletionFenceExpiresAt?: Date,
   ) {}
 
   static create(email: string, username: string): User {
@@ -42,6 +44,7 @@ export class User {
       primitives.status,
       primitives.createdAt,
       primitives.updatedAt,
+      primitives.deletionFenceExpiresAt,
     );
   }
 
@@ -71,6 +74,12 @@ export class User {
 
   get updatedAt(): Date {
     return this._updatedAt;
+  }
+
+  isAccountDeletionPending(now = new Date()): boolean {
+    return Boolean(
+      this._deletionFenceExpiresAt && this._deletionFenceExpiresAt > now,
+    );
   }
 
   updateUsername(newUsername: string): void {
@@ -117,6 +126,9 @@ export class User {
       status: this._status,
       createdAt: this._createdAt,
       updatedAt: this._updatedAt,
+      ...(this._deletionFenceExpiresAt
+        ? { deletionFenceExpiresAt: this._deletionFenceExpiresAt }
+        : {}),
     };
   }
 }

@@ -15,22 +15,25 @@ import {
   WASTE_EVENT_REPOSITORY,
   PANTRY_MUTATION_PORT,
 } from '../tokens';
-import { PantryMutationPort } from '../ports/pantry-mutation.port';
+import {
+  PantryDeletionResult,
+  PantryMutationConflictError,
+  PantryMutationPort,
+  PantryOperationContext,
+  PantryOperationReceipt,
+} from '../ports/pantry-mutation.port';
+import { buildPantryIdempotencyContext } from '../utils/pantry-idempotency';
 
 export interface DeletePantryDataCommand {
   userId: string;
   confirmationText: string;
   // Internal account-deletion mode, never copied from the pantry-reset DTO.
   accountDeletion?: boolean;
+  deletionToken?: string;
+  idempotencyKey?: string;
 }
 
-export interface DeletePantryDataResult {
-  deletedInventoryLotCount: number;
-  deletedProductTypeCount: number;
-  deletedShoppingListCount: number;
-  deletedShoppingShareCount: number;
-  deletedWasteEventCount: number;
-}
+export type DeletePantryDataResult = PantryDeletionResult;
 
 const DELETE_PANTRY_DATA_CONFIRMATION = 'ELIMINAR';
 
@@ -63,39 +66,103 @@ export class DeletePantryDataUseCase {
     }
 
     const userId = UserId.fromString(command.userId);
-    const preserveDeletionLockUntil = command.accountDeletion
-      ? new Date(Date.now() + 24 * 60 * 60 * 1000)
-      : undefined;
-    if (preserveDeletionLockUntil) {
-      await this.pantryMutationPort.beginPantryDeletion(
-        command.userId,
-        preserveDeletionLockUntil,
-      );
-    } else {
-      await this.pantryMutationPort.beginPantryDeletion(command.userId);
+    const retainFence = Boolean(command.accountDeletion);
+    let deletionContext: PantryOperationContext | undefined;
+    if (!retainFence) {
+      let context: ReturnType<typeof buildPantryIdempotencyContext>;
+      try {
+        context = buildPantryIdempotencyContext({
+          ownerUserId: command.userId,
+          operation: 'delete_pantry_data',
+          idempotencyKey: command.idempotencyKey,
+          request: { confirmationText: command.confirmationText.trim() },
+        });
+      } catch (error) {
+        throw new BadRequestException((error as Error).message);
+      }
+      const replay = await this.pantryMutationPort.findReceipt(context);
+      if (replay) {
+        if (!isPantryDeletionResult(replay.response)) {
+          throw new PantryMutationConflictError(
+            'Pantry deletion receipt is invalid',
+          );
+        }
+        return replay.response;
+      }
+      deletionContext = context;
     }
-    const deletedShoppingListCount =
-      await this.shoppingListRepository.deleteByOwnerUserId(userId);
-    const deletedShoppingShareCount =
-      await this.shoppingShareRepository.deleteByOwnerUserId(userId);
-    const deletedWasteEventCount =
-      await this.wasteEventRepository.deleteByUserId(userId);
-    const deletedInventoryLotCount =
-      await this.inventoryLotRepository.deleteByUserId(userId);
-    const deletedProductTypeCount =
-      await this.productTypeRepository.deleteByUserId(userId);
-    await this.productRepository.deleteByUserId(userId);
-    await this.pantryMutationPort.completePantryDeletion(
+    const deletionToken = await this.pantryMutationPort.beginPantryDeletion(
       command.userId,
-      preserveDeletionLockUntil,
+      retainFence
+        ? { deletionToken: command.deletionToken, retainFence: true }
+        : { deletionToken: deletionContext!.operationId },
     );
+    try {
+      const deletedShoppingListCount =
+        await this.shoppingListRepository.deleteByOwnerUserId(userId);
+      const deletedShoppingShareCount =
+        await this.shoppingShareRepository.deleteByOwnerUserId(userId);
+      const deletedWasteEventCount =
+        await this.wasteEventRepository.deleteByUserId(userId);
+      const deletedInventoryLotCount =
+        await this.inventoryLotRepository.deleteByUserId(userId);
+      const deletedProductTypeCount =
+        await this.productTypeRepository.deleteByUserId(userId);
+      await this.productRepository.deleteByUserId(userId);
+      const result = {
+        deletedInventoryLotCount,
+        deletedProductTypeCount,
+        deletedShoppingListCount,
+        deletedShoppingShareCount,
+        deletedWasteEventCount,
+      };
+      if (deletionContext) {
+        await this.pantryMutationPort.completePantryDeletion(
+          command.userId,
+          deletionToken,
+          false,
+          {
+            ...deletionContext,
+            operation: 'delete_pantry_data',
+            response: result,
+          },
+        );
+      } else {
+        await this.pantryMutationPort.completePantryDeletion(
+          command.userId,
+          deletionToken,
+          true,
+        );
+      }
 
-    return {
-      deletedInventoryLotCount,
-      deletedProductTypeCount,
-      deletedShoppingListCount,
-      deletedShoppingShareCount,
-      deletedWasteEventCount,
-    };
+      return result;
+    } catch (error) {
+      if (!retainFence) {
+        await this.pantryMutationPort.abortPantryDeletion(
+          command.userId,
+          deletionToken,
+        );
+      }
+      throw error;
+    }
   }
+}
+
+function isPantryDeletionResult(
+  value: PantryOperationReceipt['response'],
+): value is PantryDeletionResult {
+  return Boolean(
+    value &&
+    !Array.isArray(value) &&
+    typeof value === 'object' &&
+    typeof (value as PantryDeletionResult).deletedInventoryLotCount ===
+      'number' &&
+    typeof (value as PantryDeletionResult).deletedProductTypeCount ===
+      'number' &&
+    typeof (value as PantryDeletionResult).deletedShoppingListCount ===
+      'number' &&
+    typeof (value as PantryDeletionResult).deletedShoppingShareCount ===
+      'number' &&
+    typeof (value as PantryDeletionResult).deletedWasteEventCount === 'number',
+  );
 }

@@ -1,4 +1,5 @@
 type LambdaModule = typeof import('./lambda');
+import { ResumeAccountDeletionsUseCase } from './application/use-cases/resume-account-deletions.use-case';
 
 describe('lambda handler', () => {
   let lambda: LambdaModule;
@@ -37,5 +38,19 @@ describe('lambda handler', () => {
       status: 'ok',
       service: 'despensalista-backend',
     });
+  });
+
+  it('routes only the private scheduled event to the deletion worker', async () => {
+    const resume = jest
+      .spyOn(ResumeAccountDeletionsUseCase.prototype, 'execute')
+      .mockResolvedValue({ processed: 1 });
+
+    await expect(
+      lambda.handler({
+        source: 'despensalista.account-deletion-worker',
+        'detail-type': 'resume',
+      }),
+    ).resolves.toEqual({ processed: 1 });
+    expect(resume).toHaveBeenCalledTimes(1);
   });
 });

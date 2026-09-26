@@ -1,6 +1,7 @@
 import { InjectModel, InjectConnection } from '@nestjs/mongoose';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'node:crypto';
 import { getArchivedRecordRetentionExpiresAt } from '../../../application/policies/retention-policy';
 import { Connection, ClientSession, Model } from 'mongoose';
 import {
@@ -8,8 +9,11 @@ import {
   ConsumeInventoryLotMutation,
   IdempotencyPayloadConflictError,
   IdempotentMutationResult,
+  PantryDeletionReceipt,
+  PantryDeletionResult,
   PantryMutationConflictError,
   PantryMutationPort,
+  PantryDeletionRequest,
   PantryOperationLookup,
   PantryOperationReceipt,
   PantryQuotaExceededError,
@@ -17,6 +21,8 @@ import {
 import {
   MAX_ACTIVE_INVENTORY_LOTS_PER_USER,
   MAX_ACTIVE_PRODUCT_TYPES_PER_USER,
+  MAX_ARCHIVED_INVENTORY_LOTS_PER_USER,
+  MAX_ARCHIVED_PRODUCT_TYPES_PER_USER,
   MAX_INVENTORY_LOTS_PER_PRODUCT_TYPE,
   MAX_SAVED_SHOPPING_LISTS_PER_USER,
 } from '../../../application/constants/query-limits';
@@ -36,7 +42,11 @@ interface MongoPantryOperationDocument {
   ownerUserId: string;
   operation: PantryOperationReceipt['operation'];
   requestHash: string;
-  response: InventoryLotPrimitives | InventoryLotPrimitives[] | null;
+  response:
+    | InventoryLotPrimitives
+    | InventoryLotPrimitives[]
+    | PantryDeletionResult
+    | null;
   createdAt: Date;
   expiresAt: Date;
 }
@@ -44,15 +54,28 @@ interface MongoPantryOperationDocument {
 interface MongoPantryQuotaDocument {
   _id: string;
   ownerUserId: string;
+  quotaSchemaVersion: number;
+  mutationEpoch: number;
+  deleting: boolean;
   activeProductTypes: number;
+  archivedProductTypes: number;
   activeInventoryLots: number;
+  archivedInventoryLots: number;
   savedShoppingLists: number;
   lotsByProductType: Record<string, number>;
+  archivedLotsByProductType: Record<string, number>;
   updatedAt: Date;
-  deleting?: boolean;
+  migrationToken?: string;
   mutationVersion?: number;
   expiresAt?: Date;
+  deletionToken?: string;
+  deletionStartedAt?: Date;
+  retainFence?: boolean;
 }
+
+const MONGO_PANTRY_QUOTA_SCHEMA_VERSION = 2;
+// ponytail: 60s is safely above the production Lambda's 15s timeout; use a durable worker lease if that runtime ceiling changes.
+const PANTRY_DELETION_TAKEOVER_MS = 60_000;
 
 @Injectable()
 export class MongoPantryMutationAdapter
@@ -79,6 +102,8 @@ export class MongoPantryMutationAdapter
       [{ $set: { activeName: '$normalizedBaseName' } }],
     );
     await this.productTypeModel.createIndexes();
+    await this.inventoryLotModel.createIndexes();
+    await this.wasteEventModel.createIndexes();
     await this.operations.createIndex(
       { expiresAt: 1 },
       { expireAfterSeconds: 0, name: 'pantry_operation_ttl' },
@@ -102,98 +127,29 @@ export class MongoPantryMutationAdapter
   async consume(
     mutation: ConsumeInventoryLotMutation,
   ): Promise<IdempotentMutationResult<InventoryLotPrimitives | null>> {
-    await this.ensureQuota(mutation.receipt.ownerUserId);
+    const quotaEpoch = await this.ensureQuota(mutation.receipt.ownerUserId);
     const response = mutation.updatedLot?.toPrimitives() ?? null;
 
-    return this.runIdempotentTransaction(mutation.receipt, async (session) => {
-      const expected = mutation.expectedLot.toPrimitives();
-      const filter = {
-        id: expected.id,
-        userId: mutation.receipt.ownerUserId,
-        updatedAt: expected.updatedAt,
-        quantity: expected.quantity,
-        archivedAt: { $exists: false },
-      };
-
-      await this.assertPantryAvailable(mutation.receipt.ownerUserId, session);
-      await this.assertProductTypeNotDeleting(mutation.expectedLot, session);
-      if (mutation.updatedLot) {
-        const update = mutation.updatedLot.toPrimitives();
-        const result = await this.inventoryLotModel.updateOne(
-          filter,
-          {
-            $set: activeLotDocument(update),
-            $unset: { archivedAt: 1, archivedReason: 1, retentionExpiresAt: 1 },
-          },
-          { session },
-        );
-        if (result.matchedCount !== 1) {
-          throw new PantryMutationConflictError();
-        }
-      } else {
-        const result = await this.inventoryLotModel.deleteOne(filter, {
-          session,
-        });
-        if (result.deletedCount !== 1) {
-          throw new PantryMutationConflictError();
-        }
-        const quotaResult = await this.quotas.updateOne(
-          {
-            _id: mutation.receipt.ownerUserId,
-            activeInventoryLots: { $gte: 1 },
-            [`lotsByProductType.${expected.productTypeId}`]: { $gte: 1 },
-          },
-          {
-            $inc: {
-              activeInventoryLots: -1,
-              [`lotsByProductType.${expected.productTypeId}`]: -1,
-            },
-            $set: { updatedAt: mutation.receipt.createdAt },
-          },
-          { session },
-        );
-        if (quotaResult.modifiedCount !== 1) {
-          throw new PantryMutationConflictError('Pantry quota is inconsistent');
-        }
-      }
-
-      if (mutation.wasteEvent) {
-        await this.wasteEventModel.create(
-          [mutation.wasteEvent.toPrimitives()],
-          { session },
-        );
-      }
-      return response;
-    });
-  }
-
-  async checkout(
-    mutation: CloseShoppingPurchaseMutation,
-  ): Promise<IdempotentMutationResult<InventoryLotPrimitives[]>> {
-    await this.ensureQuota(mutation.receipt.ownerUserId);
-    const response = mutation.lots.map((lot) => lot.toPrimitives());
-
-    return this.runIdempotentTransaction(mutation.receipt, async (session) => {
-      for (const change of mutation.productTypes) {
-        const expected = change.expected.toPrimitives();
+    return this.runIdempotentTransaction(
+      mutation.receipt,
+      quotaEpoch,
+      async (session) => {
+        const expected = mutation.expectedLot.toPrimitives();
         const filter = {
           id: expected.id,
           userId: mutation.receipt.ownerUserId,
           updatedAt: expected.updatedAt,
+          quantity: expected.quantity,
           archivedAt: { $exists: false },
-          deleting: { $ne: true },
         };
-        if (change.changed) {
-          const updated = change.updated.toPrimitives();
-          const result = await this.productTypeModel.updateOne(
+
+        await this.assertProductTypeNotDeleting(mutation.expectedLot, session);
+        if (mutation.updatedLot) {
+          const update = mutation.updatedLot.toPrimitives();
+          const result = await this.inventoryLotModel.updateOne(
             filter,
             {
-              $set: {
-                ...updated,
-                normalizedBaseName: updated.baseName
-                  .trim()
-                  .toLocaleLowerCase('es'),
-              },
+              $set: activeLotDocument(update),
               $unset: {
                 archivedAt: 1,
                 archivedReason: 1,
@@ -205,39 +161,122 @@ export class MongoPantryMutationAdapter
           if (result.matchedCount !== 1) {
             throw new PantryMutationConflictError();
           }
-        } else if (
-          !(await this.productTypeModel.exists(filter).session(session))
-        ) {
-          throw new PantryMutationConflictError();
+        } else {
+          const result = await this.inventoryLotModel.deleteOne(filter, {
+            session,
+          });
+          if (result.deletedCount !== 1) {
+            throw new PantryMutationConflictError();
+          }
+          const quotaResult = await this.quotas.updateOne(
+            {
+              _id: mutation.receipt.ownerUserId,
+              activeInventoryLots: { $gte: 1 },
+              [`lotsByProductType.${expected.productTypeId}`]: { $gte: 1 },
+            },
+            {
+              $inc: {
+                activeInventoryLots: -1,
+                [`lotsByProductType.${expected.productTypeId}`]: -1,
+              },
+              $set: { updatedAt: mutation.receipt.createdAt },
+            },
+            { session },
+          );
+          if (quotaResult.modifiedCount !== 1) {
+            throw new PantryMutationConflictError(
+              'Pantry quota is inconsistent',
+            );
+          }
         }
-      }
 
-      await this.inventoryLotModel.insertMany(
-        mutation.lots.map((lot) => activeLotDocument(lot.toPrimitives())),
-        { session, ordered: true },
-      );
-      const quotaUpdate = checkoutQuotaUpdate(
-        mutation.receipt.ownerUserId,
-        mutation.lots.map((lot) => lot.productTypeId.toString()),
-        mutation.receipt.createdAt,
-      );
-      const quotaResult = await this.quotas.updateOne(
-        quotaUpdate.filter,
-        quotaUpdate.update,
-        { session },
-      );
-      if (quotaResult.modifiedCount !== 1) {
-        throw new PantryQuotaExceededError(
-          'Pantry inventory lot quota exceeded',
+        if (mutation.wasteEvent) {
+          await this.wasteEventModel.create(
+            [mutation.wasteEvent.toPrimitives()],
+            { session },
+          );
+        }
+        return response;
+      },
+    );
+  }
+
+  async checkout(
+    mutation: CloseShoppingPurchaseMutation,
+  ): Promise<IdempotentMutationResult<InventoryLotPrimitives[]>> {
+    const quotaEpoch = await this.ensureQuota(mutation.receipt.ownerUserId);
+    const response = mutation.lots.map((lot) => lot.toPrimitives());
+
+    return this.runIdempotentTransaction(
+      mutation.receipt,
+      quotaEpoch,
+      async (session) => {
+        for (const change of mutation.productTypes) {
+          const expected = change.expected.toPrimitives();
+          const filter = {
+            id: expected.id,
+            userId: mutation.receipt.ownerUserId,
+            updatedAt: expected.updatedAt,
+            archivedAt: { $exists: false },
+            deleting: { $ne: true },
+          };
+          if (change.changed) {
+            const updated = change.updated.toPrimitives();
+            const result = await this.productTypeModel.updateOne(
+              filter,
+              {
+                $set: {
+                  ...updated,
+                  normalizedBaseName: updated.baseName
+                    .trim()
+                    .toLocaleLowerCase('es'),
+                },
+                $unset: {
+                  archivedAt: 1,
+                  archivedReason: 1,
+                  retentionExpiresAt: 1,
+                },
+              },
+              { session },
+            );
+            if (result.matchedCount !== 1) {
+              throw new PantryMutationConflictError();
+            }
+          } else if (
+            !(await this.productTypeModel.exists(filter).session(session))
+          ) {
+            throw new PantryMutationConflictError();
+          }
+        }
+
+        await this.inventoryLotModel.insertMany(
+          mutation.lots.map((lot) => activeLotDocument(lot.toPrimitives())),
+          { session, ordered: true },
         );
-      }
-      return response;
-    });
+        const quotaUpdate = checkoutQuotaUpdate(
+          mutation.receipt.ownerUserId,
+          mutation.lots.map((lot) => lot.productTypeId.toString()),
+          mutation.receipt.createdAt,
+        );
+        const quotaResult = await this.quotas.updateOne(
+          quotaUpdate.filter,
+          quotaUpdate.update,
+          { session },
+        );
+        if (quotaResult.modifiedCount !== 1) {
+          throw new PantryQuotaExceededError(
+            'Pantry inventory lot quota exceeded',
+          );
+        }
+        return response;
+      },
+    );
   }
 
   async createInventoryLot(lot: InventoryLot): Promise<InventoryLot> {
-    await this.ensureQuota(lot.userId.toString());
-    return this.runAtomicMutation(async (session) => {
+    const ownerUserId = lot.userId.toString();
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
+    return this.runAtomicMutation(ownerUserId, quotaEpoch, async (session) => {
       await this.assertActiveProductType(lot, session);
       await this.inventoryLotModel.create(
         [activeLotDocument(lot.toPrimitives())],
@@ -264,9 +303,9 @@ export class MongoPantryMutationAdapter
     expected: InventoryLot,
     archived: InventoryLot,
   ): Promise<InventoryLot> {
-    await this.ensureQuota(expected.userId.toString());
-    return this.runAtomicMutation(async (session) => {
-      await this.assertPantryAvailable(expected.userId.toString(), session);
+    const ownerUserId = expected.userId.toString();
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
+    return this.runAtomicMutation(ownerUserId, quotaEpoch, async (session) => {
       await this.assertProductTypeNotDeleting(expected, session);
       const result = await this.inventoryLotModel.updateOne(
         {
@@ -289,11 +328,7 @@ export class MongoPantryMutationAdapter
         throw new PantryMutationConflictError();
       }
       if (!expected.archivedAt && archived.archivedAt) {
-        await this.decrementMongoLotQuota(
-          expected,
-          archived.updatedAt,
-          session,
-        );
+        await this.archiveMongoLotQuota(expected, archived.updatedAt, session);
       }
       return archived;
     });
@@ -303,9 +338,9 @@ export class MongoPantryMutationAdapter
     expected: InventoryLot,
     restored: InventoryLot,
   ): Promise<InventoryLot> {
-    await this.ensureQuota(expected.userId.toString());
-    return this.runAtomicMutation(async (session) => {
-      await this.assertPantryAvailable(expected.userId.toString(), session);
+    const ownerUserId = expected.userId.toString();
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
+    return this.runAtomicMutation(ownerUserId, quotaEpoch, async (session) => {
       await this.assertActiveProductType(restored, session);
       const result = await this.inventoryLotModel.updateOne(
         {
@@ -323,29 +358,16 @@ export class MongoPantryMutationAdapter
         throw new PantryMutationConflictError();
       }
       if (expected.archivedAt && !restored.archivedAt) {
-        const quota = checkoutQuotaUpdate(
-          expected.userId.toString(),
-          [expected.productTypeId.toString()],
-          restored.updatedAt,
-        );
-        const quotaResult = await this.quotas.updateOne(
-          quota.filter,
-          quota.update,
-          { session },
-        );
-        if (quotaResult.modifiedCount !== 1) {
-          throw new PantryQuotaExceededError(
-            'Pantry inventory lot quota exceeded',
-          );
-        }
+        await this.restoreMongoLotQuota(expected, restored.updatedAt, session);
       }
       return restored;
     });
   }
 
   async createProductType(productType: ProductType): Promise<ProductType> {
-    await this.ensureQuota(productType.userId.toString());
-    return this.runAtomicMutation(async (session) => {
+    const ownerUserId = productType.userId.toString();
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
+    return this.runAtomicMutation(ownerUserId, quotaEpoch, async (session) => {
       const primitives = productType.toPrimitives();
       await this.productTypeModel.create(
         [
@@ -374,14 +396,13 @@ export class MongoPantryMutationAdapter
     expected: ProductType,
     archived: ProductType,
   ): Promise<ProductType> {
-    await this.ensureQuota(expected.userId.toString());
-    return this.runAtomicMutation(async (session) => {
-      await this.assertPantryAvailable(expected.userId.toString(), session);
+    const ownerUserId = expected.userId.toString();
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
+    return this.runAtomicMutation(ownerUserId, quotaEpoch, async (session) => {
       await this.replaceMongoProductType(expected, archived, session);
       if (!expected.archivedAt && archived.archivedAt) {
-        await this.decrementMongoSimpleQuota(
-          expected.userId.toString(),
-          'activeProductTypes',
+        await this.archiveMongoProductTypeQuota(
+          expected,
           archived.updatedAt,
           session,
         );
@@ -394,15 +415,13 @@ export class MongoPantryMutationAdapter
     expected: ProductType,
     restored: ProductType,
   ): Promise<ProductType> {
-    await this.ensureQuota(expected.userId.toString());
-    return this.runAtomicMutation(async (session) => {
-      await this.assertPantryAvailable(expected.userId.toString(), session);
+    const ownerUserId = expected.userId.toString();
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
+    return this.runAtomicMutation(ownerUserId, quotaEpoch, async (session) => {
       await this.replaceMongoProductType(expected, restored, session);
       if (expected.archivedAt && !restored.archivedAt) {
-        await this.incrementMongoSimpleQuota(
-          expected.userId.toString(),
-          'activeProductTypes',
-          MAX_ACTIVE_PRODUCT_TYPES_PER_USER,
+        await this.restoreMongoProductTypeQuota(
+          expected,
           restored.updatedAt,
           session,
         );
@@ -412,27 +431,30 @@ export class MongoPantryMutationAdapter
   }
 
   async createShoppingList(list: ShoppingList): Promise<ShoppingList> {
-    await this.ensureQuota(list.ownerUserId);
-    return this.runAtomicMutation(async (session) => {
-      await this.connection
-        .collection('shoppingLists')
-        .insertOne(list.toPrimitives(), { session });
-      await this.incrementMongoSimpleQuota(
-        list.ownerUserId,
-        'savedShoppingLists',
-        MAX_SAVED_SHOPPING_LISTS_PER_USER,
-        list.toPrimitives().updatedAt,
-        session,
-      );
-      return list;
-    });
+    const quotaEpoch = await this.ensureQuota(list.ownerUserId);
+    return this.runAtomicMutation(
+      list.ownerUserId,
+      quotaEpoch,
+      async (session) => {
+        await this.connection
+          .collection('shoppingLists')
+          .insertOne(list.toPrimitives(), { session });
+        await this.incrementMongoSimpleQuota(
+          list.ownerUserId,
+          'savedShoppingLists',
+          MAX_SAVED_SHOPPING_LISTS_PER_USER,
+          list.toPrimitives().updatedAt,
+          session,
+        );
+        return list;
+      },
+    );
   }
 
   async createProduct(product: Product): Promise<Product> {
     const ownerUserId = product.userId.toString();
-    await this.ensureQuota(ownerUserId);
-    return this.runAtomicMutation(async (session) => {
-      await this.assertPantryAvailable(ownerUserId, session);
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
+    return this.runAtomicMutation(ownerUserId, quotaEpoch, async (session) => {
       await this.connection
         .collection('products')
         .insertOne(product.toPrimitives(), { session });
@@ -442,9 +464,8 @@ export class MongoPantryMutationAdapter
 
   async updateProduct(expected: Product, updated: Product): Promise<Product> {
     const ownerUserId = expected.userId.toString();
-    await this.ensureQuota(ownerUserId);
-    return this.runAtomicMutation(async (session) => {
-      await this.assertPantryAvailable(ownerUserId, session);
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
+    return this.runAtomicMutation(ownerUserId, quotaEpoch, async (session) => {
       const result = await this.connection.collection('products').updateOne(
         {
           id: expected.id.toString(),
@@ -461,9 +482,8 @@ export class MongoPantryMutationAdapter
 
   async createShoppingShare(share: ShoppingShare): Promise<ShoppingShare> {
     const ownerUserId = share.ownerUserId;
-    await this.ensureQuota(ownerUserId);
-    return this.runAtomicMutation(async (session) => {
-      await this.assertPantryAvailable(ownerUserId, session);
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
+    return this.runAtomicMutation(ownerUserId, quotaEpoch, async (session) => {
       await this.connection
         .collection('shoppingShares')
         .insertOne(share.toPrimitives(), { session });
@@ -476,47 +496,57 @@ export class MongoPantryMutationAdapter
     updated: ShoppingShare,
   ): Promise<ShoppingShare> {
     const expectedPrimitives = expected.toPrimitives();
-    await this.ensureQuota(expected.ownerUserId);
-    return this.runAtomicMutation(async (session) => {
-      await this.assertPantryAvailable(expected.ownerUserId, session);
-      const result = await this.connection
-        .collection('shoppingShares')
-        .updateOne(
-          {
-            id: expectedPrimitives.id,
-            ownerUserId: expected.ownerUserId,
-            updatedAt: expectedPrimitives.updatedAt,
-          },
-          { $set: updated.toPrimitives() },
-          { session },
-        );
-      if (result.matchedCount !== 1) throw new PantryMutationConflictError();
-      return updated;
-    });
+    const quotaEpoch = await this.ensureQuota(expected.ownerUserId);
+    return this.runAtomicMutation(
+      expected.ownerUserId,
+      quotaEpoch,
+      async (session) => {
+        const result = await this.connection
+          .collection('shoppingShares')
+          .updateOne(
+            {
+              id: expectedPrimitives.id,
+              ownerUserId: expected.ownerUserId,
+              updatedAt: expectedPrimitives.updatedAt,
+            },
+            { $set: updated.toPrimitives() },
+            { session },
+          );
+        if (result.matchedCount !== 1) throw new PantryMutationConflictError();
+        return updated;
+      },
+    );
   }
 
   async deleteShoppingList(list: ShoppingList): Promise<void> {
-    await this.ensureQuota(list.ownerUserId);
-    await this.runAtomicMutation(async (session) => {
-      const result = await this.connection
-        .collection('shoppingLists')
-        .deleteOne({ id: list.id, ownerUserId: list.ownerUserId }, { session });
-      if (result.deletedCount !== 1) {
-        throw new PantryMutationConflictError();
-      }
-      await this.decrementMongoSimpleQuota(
-        list.ownerUserId,
-        'savedShoppingLists',
-        list.toPrimitives().updatedAt,
-        session,
-      );
-    });
+    const quotaEpoch = await this.ensureQuota(list.ownerUserId);
+    await this.runAtomicMutation(
+      list.ownerUserId,
+      quotaEpoch,
+      async (session) => {
+        const result = await this.connection
+          .collection('shoppingLists')
+          .deleteOne(
+            { id: list.id, ownerUserId: list.ownerUserId },
+            { session },
+          );
+        if (result.deletedCount !== 1) {
+          throw new PantryMutationConflictError();
+        }
+        await this.decrementMongoSimpleQuota(
+          list.ownerUserId,
+          'savedShoppingLists',
+          list.toPrimitives().updatedAt,
+          session,
+        );
+      },
+    );
   }
 
   async deleteInventoryLot(lot: InventoryLot): Promise<void> {
-    await this.ensureQuota(lot.userId.toString());
-    await this.runAtomicMutation(async (session) => {
-      await this.assertPantryAvailable(lot.userId.toString(), session);
+    const ownerUserId = lot.userId.toString();
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
+    await this.runAtomicMutation(ownerUserId, quotaEpoch, async (session) => {
       const result = await this.inventoryLotModel.deleteOne(
         {
           id: lot.id.toString(),
@@ -527,25 +557,28 @@ export class MongoPantryMutationAdapter
         { session },
       );
       if (result.deletedCount !== 1) throw new PantryMutationConflictError();
-      if (!lot.archivedAt)
+      if (lot.archivedAt) {
+        await this.decrementMongoArchivedLotQuota(lot, new Date(), session);
+      } else {
         await this.decrementMongoLotQuota(lot, new Date(), session);
+      }
     });
   }
 
   async deleteProductType(productType: ProductType): Promise<void> {
-    await this.ensureQuota(productType.userId.toString());
-    await this.runAtomicMutation(async (session) => {
-      await this.assertPantryAvailable(productType.userId.toString(), session);
+    const ownerUserId = productType.userId.toString();
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
+    await this.runAtomicMutation(ownerUserId, quotaEpoch, async (session) => {
       if (
         await this.inventoryLotModel
           .exists({
             productTypeId: productType.id.toString(),
-            archivedAt: { $exists: false },
+            userId: productType.userId.toString(),
           })
           .session(session)
       ) {
         throw new PantryMutationConflictError(
-          'Product type still has active inventory',
+          'Product type still has inventory',
         );
       }
       const result = await this.productTypeModel.deleteOne(
@@ -559,14 +592,18 @@ export class MongoPantryMutationAdapter
         { session },
       );
       if (result.deletedCount !== 1) throw new PantryMutationConflictError();
+      await this.decrementMongoArchivedProductTypeQuota(
+        productType,
+        new Date(),
+        session,
+      );
     });
   }
 
   async beginProductTypeDeletion(productType: ProductType): Promise<void> {
     const ownerUserId = productType.userId.toString();
-    await this.ensureQuota(ownerUserId);
-    await this.runAtomicMutation(async (session) => {
-      await this.assertPantryAvailable(ownerUserId, session);
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
+    await this.runAtomicMutation(ownerUserId, quotaEpoch, async (session) => {
       const result = await this.productTypeModel.updateOne(
         {
           id: productType.id.toString(),
@@ -588,9 +625,9 @@ export class MongoPantryMutationAdapter
     expected: ProductType,
     updated: ProductType,
   ): Promise<ProductType> {
-    await this.ensureQuota(expected.userId.toString());
-    return this.runAtomicMutation(async (session) => {
-      await this.assertPantryAvailable(expected.userId.toString(), session);
+    const ownerUserId = expected.userId.toString();
+    const quotaEpoch = await this.ensureQuota(ownerUserId);
+    return this.runAtomicMutation(ownerUserId, quotaEpoch, async (session) => {
       await this.replaceMongoProductType(expected, updated, session);
       return updated;
     });
@@ -598,59 +635,276 @@ export class MongoPantryMutationAdapter
 
   async beginPantryDeletion(
     ownerUserId: string,
-    preserveDeletionLockUntil?: Date,
-  ): Promise<void> {
-    await this.ensureQuota(ownerUserId);
-    await this.quotas.updateOne(
-      { _id: ownerUserId },
+    request: PantryDeletionRequest = {},
+  ): Promise<string> {
+    const deletionToken = request.deletionToken ?? randomUUID();
+    const retainFence = request.retainFence === true;
+    const deletionStartedAt = new Date();
+    const existing = await this.quotas.findOne({ _id: ownerUserId });
+    if (existing?.deleting && !existing.migrationToken) {
+      if (
+        retainFence &&
+        existing.quotaSchemaVersion === MONGO_PANTRY_QUOTA_SCHEMA_VERSION &&
+        typeof existing.mutationEpoch === 'number' &&
+        existing.deletionToken === deletionToken &&
+        existing.retainFence === retainFence
+      ) {
+        return deletionToken;
+      }
+      if (
+        existing.retainFence === false &&
+        typeof existing.mutationEpoch === 'number' &&
+        existing.deletionStartedAt instanceof Date &&
+        existing.deletionStartedAt.getTime() <
+          Date.now() - PANTRY_DELETION_TAKEOVER_MS
+      ) {
+        const takeover = await this.quotas.updateOne(
+          {
+            _id: ownerUserId,
+            quotaSchemaVersion: MONGO_PANTRY_QUOTA_SCHEMA_VERSION,
+            mutationEpoch: existing.mutationEpoch,
+            deleting: true,
+            deletionToken: existing.deletionToken,
+            deletionStartedAt: existing.deletionStartedAt,
+            retainFence: false,
+          },
+          {
+            $set: {
+              mutationEpoch: existing.mutationEpoch + 1,
+              deletionToken,
+              deletionStartedAt,
+              retainFence,
+            },
+          },
+        );
+        if (takeover.matchedCount === 1) return deletionToken;
+      }
+      throw new PantryMutationConflictError('Pantry is already being deleted');
+    }
+    const mutationEpoch = await this.ensureQuota(ownerUserId);
+    const result = await this.quotas.updateOne(
+      {
+        _id: ownerUserId,
+        quotaSchemaVersion: MONGO_PANTRY_QUOTA_SCHEMA_VERSION,
+        mutationEpoch,
+        deleting: false,
+      },
       {
         $set: {
           deleting: true,
-          ...(preserveDeletionLockUntil
-            ? { expiresAt: preserveDeletionLockUntil }
-            : {}),
+          mutationEpoch: mutationEpoch + 1,
+          deletionToken,
+          deletionStartedAt,
+          retainFence,
         },
+        $unset: { expiresAt: 1 },
       },
     );
+    if (result.matchedCount === 1) return deletionToken;
+    const current = await this.quotas.findOne({ _id: ownerUserId });
+    if (
+      current?.deleting &&
+      !current.migrationToken &&
+      current.quotaSchemaVersion === MONGO_PANTRY_QUOTA_SCHEMA_VERSION &&
+      typeof current.mutationEpoch === 'number' &&
+      current.deletionToken === deletionToken &&
+      retainFence &&
+      current.retainFence === retainFence
+    ) {
+      return deletionToken;
+    }
+    throw new PantryMutationConflictError('Pantry is already being deleted');
   }
 
   async completePantryDeletion(
     ownerUserId: string,
-    preserveDeletionLockUntil?: Date,
+    deletionToken: string,
+    retainFence = false,
+    receipt?: PantryDeletionReceipt,
   ): Promise<void> {
-    await this.operations.deleteMany({ ownerUserId });
-    if (preserveDeletionLockUntil) {
-      await this.connection
+    const fence = await this.quotas.findOne({ _id: ownerUserId });
+    if (
+      fence?.quotaSchemaVersion !== MONGO_PANTRY_QUOTA_SCHEMA_VERSION ||
+      fence.deleting !== true ||
+      typeof fence.mutationEpoch !== 'number' ||
+      fence.deletionToken !== deletionToken ||
+      fence.retainFence !== retainFence ||
+      (receipt !== undefined &&
+        (retainFence ||
+          receipt.ownerUserId !== ownerUserId ||
+          receipt.operationId !== deletionToken))
+    ) {
+      throw new PantryMutationConflictError('Pantry deletion fence is missing');
+    }
+    const mutationEpoch = fence.mutationEpoch;
+    await this.operations.deleteMany(
+      retainFence
+        ? { ownerUserId }
+        : { ownerUserId, operation: { $ne: 'delete_pantry_data' } },
+    );
+    if (retainFence) {
+      const result = await this.connection
         .collection<{
           _id: string;
           ownerUserId: string;
+          quotaSchemaVersion: number;
+          mutationEpoch: number;
           deleting: boolean;
-          expiresAt: Date;
+          deletionToken: string;
+          deletionStartedAt: Date;
+          retainFence: boolean;
         }>('pantry_quotas')
         .replaceOne(
-          { _id: ownerUserId },
+          {
+            _id: ownerUserId,
+            quotaSchemaVersion: MONGO_PANTRY_QUOTA_SCHEMA_VERSION,
+            mutationEpoch,
+            deleting: true,
+            deletionToken,
+            deletionStartedAt: fence.deletionStartedAt,
+            retainFence: true,
+          },
           {
             ownerUserId,
+            quotaSchemaVersion: MONGO_PANTRY_QUOTA_SCHEMA_VERSION,
+            mutationEpoch,
             deleting: true,
-            expiresAt: preserveDeletionLockUntil,
+            deletionToken,
+            deletionStartedAt: fence.deletionStartedAt!,
+            retainFence: true,
           },
-          { upsert: true },
         );
+      if (result.matchedCount !== 1) {
+        throw new PantryMutationConflictError(
+          'Pantry deletion fence changed during cleanup',
+        );
+      }
       return;
     }
-    await this.quotas.deleteOne({
+    const filter = {
       _id: ownerUserId,
-      expiresAt: { $exists: false },
-    });
+      quotaSchemaVersion: MONGO_PANTRY_QUOTA_SCHEMA_VERSION,
+      mutationEpoch,
+      deleting: true,
+      deletionToken,
+      retainFence: false,
+    };
+    const replacement = {
+      ownerUserId,
+      quotaSchemaVersion: MONGO_PANTRY_QUOTA_SCHEMA_VERSION,
+      mutationEpoch,
+      deleting: false,
+      activeProductTypes: 0,
+      archivedProductTypes: 0,
+      activeInventoryLots: 0,
+      archivedInventoryLots: 0,
+      savedShoppingLists: 0,
+      lotsByProductType: {},
+      archivedLotsByProductType: {},
+      updatedAt: new Date(),
+    };
+    if (!receipt) {
+      const result = await this.quotas.replaceOne(filter, replacement);
+      if (result.matchedCount !== 1) {
+        throw new PantryMutationConflictError(
+          'Pantry deletion fence changed during cleanup',
+        );
+      }
+      return;
+    }
+
+    const session = await this.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const result = await this.quotas.replaceOne(filter, replacement, {
+          session,
+        });
+        if (result.matchedCount !== 1) {
+          throw new PantryMutationConflictError(
+            'Pantry deletion fence changed during cleanup',
+          );
+        }
+        await this.operations.insertOne(
+          {
+            _id: receipt.operationId,
+            operationId: receipt.operationId,
+            ownerUserId: receipt.ownerUserId,
+            operation: receipt.operation,
+            requestHash: receipt.requestHash,
+            response: receipt.response,
+            createdAt: receipt.createdAt,
+            expiresAt: receipt.expiresAt,
+          },
+          { session, ignoreUndefined: true },
+        );
+      });
+    } catch (error) {
+      if (isTransactionUnsupported(error)) {
+        throw new PantryMutationConflictError(
+          'MongoDB pantry mutations require a replica set',
+        );
+      }
+      if (isDuplicateKey(error)) {
+        throw new PantryMutationConflictError(
+          'Pantry deletion receipt already exists',
+        );
+      }
+      throw error;
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  async abortPantryDeletion(
+    ownerUserId: string,
+    deletionToken: string,
+  ): Promise<void> {
+    const fence = await this.quotas.findOne({ _id: ownerUserId });
+    if (
+      fence?.quotaSchemaVersion !== MONGO_PANTRY_QUOTA_SCHEMA_VERSION ||
+      fence.deleting !== true ||
+      fence.retainFence !== false ||
+      fence.deletionToken !== deletionToken ||
+      typeof fence.mutationEpoch !== 'number'
+    ) {
+      throw new PantryMutationConflictError('Pantry deletion fence is missing');
+    }
+
+    const quota = await this.buildQuota(ownerUserId);
+    const result = await this.quotas.replaceOne(
+      {
+        _id: ownerUserId,
+        quotaSchemaVersion: MONGO_PANTRY_QUOTA_SCHEMA_VERSION,
+        mutationEpoch: fence.mutationEpoch,
+        deleting: true,
+        deletionToken,
+        retainFence: false,
+      },
+      {
+        ...quota,
+        mutationEpoch: fence.mutationEpoch,
+      },
+    );
+    if (result.matchedCount !== 1) {
+      throw new PantryMutationConflictError(
+        'Pantry deletion fence changed during recovery',
+      );
+    }
   }
 
   private async assertPantryAvailable(
     ownerUserId: string,
+    mutationEpoch: number,
     session: ClientSession,
   ): Promise<void> {
     // Writing the owner row serializes deletion against otherwise counter-neutral mutations.
     const result = await this.quotas.updateOne(
-      { _id: ownerUserId, deleting: { $exists: false } },
+      {
+        _id: ownerUserId,
+        quotaSchemaVersion: MONGO_PANTRY_QUOTA_SCHEMA_VERSION,
+        mutationEpoch,
+        deleting: false,
+      },
       { $inc: { mutationVersion: 1 } },
       { session },
     );
@@ -695,6 +949,8 @@ export class MongoPantryMutationAdapter
   }
 
   private async runAtomicMutation<T>(
+    ownerUserId: string,
+    mutationEpoch: number,
     mutation: (session: ClientSession) => Promise<T>,
   ): Promise<T> {
     const session = await this.connection.startSession();
@@ -702,6 +958,7 @@ export class MongoPantryMutationAdapter
     let committed = false;
     try {
       await session.withTransaction(async () => {
+        await this.assertPantryAvailable(ownerUserId, mutationEpoch, session);
         value = await mutation(session);
         committed = true;
       });
@@ -734,7 +991,7 @@ export class MongoPantryMutationAdapter
     const result = await this.quotas.updateOne(
       {
         _id: lot.userId.toString(),
-        deleting: { $exists: false },
+        deleting: false,
         activeInventoryLots: { $gte: 1 },
         [`lotsByProductType.${lot.productTypeId.toString()}`]: { $gte: 1 },
       },
@@ -743,6 +1000,194 @@ export class MongoPantryMutationAdapter
           activeInventoryLots: -1,
           [`lotsByProductType.${lot.productTypeId.toString()}`]: -1,
         },
+        $set: { updatedAt: now },
+      },
+      { session },
+    );
+    if (result.modifiedCount !== 1) {
+      throw new PantryMutationConflictError('Pantry quota is inconsistent');
+    }
+  }
+
+  private async archiveMongoLotQuota(
+    lot: InventoryLot,
+    now: Date,
+    session: ClientSession,
+  ): Promise<void> {
+    const productTypePath = lot.productTypeId.toString();
+    const result = await this.quotas.updateOne(
+      {
+        _id: lot.userId.toString(),
+        deleting: false,
+        activeInventoryLots: { $gte: 1 },
+        archivedInventoryLots: {
+          $lt: MAX_ARCHIVED_INVENTORY_LOTS_PER_USER,
+        },
+        [`lotsByProductType.${productTypePath}`]: { $gte: 1 },
+      },
+      {
+        $inc: {
+          activeInventoryLots: -1,
+          archivedInventoryLots: 1,
+          [`lotsByProductType.${productTypePath}`]: -1,
+          [`archivedLotsByProductType.${productTypePath}`]: 1,
+        },
+        $set: { updatedAt: now },
+      },
+      { session },
+    );
+    if (result.modifiedCount !== 1) {
+      throw new PantryQuotaExceededError(
+        'Archived inventory lot quota exceeded',
+      );
+    }
+  }
+
+  private async restoreMongoLotQuota(
+    lot: InventoryLot,
+    now: Date,
+    session: ClientSession,
+  ): Promise<void> {
+    const productTypePath = lot.productTypeId.toString();
+    const result = await this.quotas.updateOne(
+      {
+        _id: lot.userId.toString(),
+        deleting: false,
+        archivedInventoryLots: { $gte: 1 },
+        activeInventoryLots: {
+          $lte: MAX_ACTIVE_INVENTORY_LOTS_PER_USER - 1,
+        },
+        [`archivedLotsByProductType.${productTypePath}`]: { $gte: 1 },
+        $or: [
+          { [`lotsByProductType.${productTypePath}`]: { $exists: false } },
+          {
+            [`lotsByProductType.${productTypePath}`]: {
+              $lte: MAX_INVENTORY_LOTS_PER_PRODUCT_TYPE - 1,
+            },
+          },
+        ],
+      },
+      {
+        $inc: {
+          activeInventoryLots: 1,
+          archivedInventoryLots: -1,
+          [`lotsByProductType.${productTypePath}`]: 1,
+          [`archivedLotsByProductType.${productTypePath}`]: -1,
+        },
+        $set: { updatedAt: now },
+      },
+      { session },
+    );
+    if (result.modifiedCount !== 1) {
+      throw new PantryQuotaExceededError('Pantry inventory lot quota exceeded');
+    }
+  }
+
+  private async decrementMongoArchivedLotQuota(
+    lot: InventoryLot,
+    now: Date,
+    session: ClientSession,
+  ): Promise<void> {
+    const productTypePath = lot.productTypeId.toString();
+    const result = await this.quotas.updateOne(
+      {
+        _id: lot.userId.toString(),
+        deleting: false,
+        archivedInventoryLots: { $gte: 1 },
+        [`archivedLotsByProductType.${productTypePath}`]: { $gte: 1 },
+      },
+      {
+        $inc: {
+          archivedInventoryLots: -1,
+          [`archivedLotsByProductType.${productTypePath}`]: -1,
+        },
+        $set: { updatedAt: now },
+      },
+      { session },
+    );
+    if (result.modifiedCount !== 1) {
+      throw new PantryMutationConflictError('Pantry quota is inconsistent');
+    }
+  }
+
+  private async archiveMongoProductTypeQuota(
+    productType: ProductType,
+    now: Date,
+    session: ClientSession,
+  ): Promise<void> {
+    const result = await this.quotas.updateOne(
+      {
+        _id: productType.userId.toString(),
+        deleting: false,
+        activeProductTypes: { $gte: 1 },
+        archivedProductTypes: { $lt: MAX_ARCHIVED_PRODUCT_TYPES_PER_USER },
+      },
+      {
+        $inc: { activeProductTypes: -1, archivedProductTypes: 1 },
+        $set: { updatedAt: now },
+      },
+      { session },
+    );
+    if (result.modifiedCount !== 1) {
+      throw new PantryQuotaExceededError(
+        'Archived product type quota exceeded',
+      );
+    }
+  }
+
+  private async restoreMongoProductTypeQuota(
+    productType: ProductType,
+    now: Date,
+    session: ClientSession,
+  ): Promise<void> {
+    const result = await this.quotas.updateOne(
+      {
+        _id: productType.userId.toString(),
+        deleting: false,
+        archivedProductTypes: { $gte: 1 },
+        activeProductTypes: { $lt: MAX_ACTIVE_PRODUCT_TYPES_PER_USER },
+      },
+      {
+        $inc: { activeProductTypes: 1, archivedProductTypes: -1 },
+        $set: { updatedAt: now },
+      },
+      { session },
+    );
+    if (result.modifiedCount !== 1) {
+      throw new PantryQuotaExceededError('activeProductTypes quota exceeded');
+    }
+  }
+
+  private async decrementMongoArchivedProductTypeQuota(
+    productType: ProductType,
+    now: Date,
+    session: ClientSession,
+  ): Promise<void> {
+    const typePath = productType.id.toString();
+    const result = await this.quotas.updateOne(
+      {
+        _id: productType.userId.toString(),
+        deleting: false,
+        archivedProductTypes: { $gte: 1 },
+        $and: [
+          {
+            $or: [
+              { [`lotsByProductType.${typePath}`]: { $exists: false } },
+              { [`lotsByProductType.${typePath}`]: 0 },
+            ],
+          },
+          {
+            $or: [
+              {
+                [`archivedLotsByProductType.${typePath}`]: { $exists: false },
+              },
+              { [`archivedLotsByProductType.${typePath}`]: 0 },
+            ],
+          },
+        ],
+      },
+      {
+        $inc: { archivedProductTypes: -1 },
         $set: { updatedAt: now },
       },
       { session },
@@ -762,7 +1207,7 @@ export class MongoPantryMutationAdapter
     const result = await this.quotas.updateOne(
       {
         _id: ownerUserId,
-        deleting: { $exists: false },
+        deleting: false,
         [counter]: { $lt: maximum },
       },
       { $inc: { [counter]: 1 }, $set: { updatedAt: now } },
@@ -782,7 +1227,7 @@ export class MongoPantryMutationAdapter
     const result = await this.quotas.updateOne(
       {
         _id: ownerUserId,
-        deleting: { $exists: false },
+        deleting: false,
         [counter]: { $gte: 1 },
       },
       { $inc: { [counter]: -1 }, $set: { updatedAt: now } },
@@ -843,6 +1288,7 @@ export class MongoPantryMutationAdapter
     T extends InventoryLotPrimitives | InventoryLotPrimitives[] | null,
   >(
     receipt: PantryOperationLookup,
+    mutationEpoch: number,
     mutation: (session: ClientSession) => Promise<T>,
   ): Promise<IdempotentMutationResult<T>> {
     const session = await this.connection.startSession();
@@ -861,7 +1307,11 @@ export class MongoPantryMutationAdapter
           return;
         }
 
-        await this.assertPantryAvailable(receipt.ownerUserId, session);
+        await this.assertPantryAvailable(
+          receipt.ownerUserId,
+          mutationEpoch,
+          session,
+        );
         value = await mutation(session);
         await this.operations.insertOne(
           {
@@ -883,6 +1333,9 @@ export class MongoPantryMutationAdapter
         if (existing) {
           return { value: existing.response as T, replayed: true };
         }
+        throw new PantryMutationConflictError(
+          'Idempotency-Key expired or is ambiguous; inspect inventory before starting a new operation',
+        );
       }
       if (isTransactionUnsupported(error)) {
         throw new PantryMutationConflictError(
@@ -929,45 +1382,122 @@ export class MongoPantryMutationAdapter
     };
   }
 
-  private async ensureQuota(ownerUserId: string): Promise<void> {
-    if (await this.quotas.findOne({ _id: ownerUserId })) {
-      return;
+  private async ensureQuota(ownerUserId: string): Promise<number> {
+    const existing = await this.quotas.findOne({ _id: ownerUserId });
+    if (isCurrentMongoQuota(existing)) return existing!.mutationEpoch;
+    if (existing?.deleting && !existing.migrationToken) {
+      throw new PantryMutationConflictError('Pantry is being deleted');
     }
-    const [lots, activeProductTypes, savedShoppingLists] = await Promise.all([
+    return this.migrateQuota(ownerUserId);
+  }
+
+  private async migrateQuota(ownerUserId: string): Promise<number> {
+    let migrationToken: string | undefined;
+    for (let attempt = 0; attempt < 3 && !migrationToken; attempt += 1) {
+      const current = await this.quotas.findOne({ _id: ownerUserId });
+      if (isCurrentMongoQuota(current)) return current!.mutationEpoch;
+      if (current?.deleting) {
+        if (current.migrationToken) {
+          migrationToken = current.migrationToken;
+          break;
+        }
+        throw new PantryMutationConflictError('Pantry is being deleted');
+      }
+
+      const candidate = randomUUID();
+      try {
+        if (current) {
+          const result = await this.quotas.updateOne(
+            {
+              _id: ownerUserId,
+              migrationToken: { $exists: false },
+              $or: [{ deleting: { $exists: false } }, { deleting: false }],
+            },
+            { $set: { deleting: true, migrationToken: candidate } },
+          );
+          if (result.matchedCount === 1) migrationToken = candidate;
+        } else {
+          await this.quotas.insertOne({
+            _id: ownerUserId,
+            ownerUserId,
+            deleting: true,
+            migrationToken: candidate,
+          } as MongoPantryQuotaDocument);
+          migrationToken = candidate;
+        }
+      } catch (error) {
+        if (!isDuplicateKey(error)) throw error;
+      }
+    }
+    if (!migrationToken) {
+      throw new PantryMutationConflictError(
+        'Pantry quota migration is already running; retry the mutation',
+      );
+    }
+
+    const quota = await this.buildQuota(ownerUserId);
+    const result = await this.quotas.replaceOne(
+      { _id: ownerUserId, deleting: true, migrationToken },
+      quota,
+    );
+    if (result.matchedCount === 1) return quota.mutationEpoch;
+
+    const current = await this.quotas.findOne({ _id: ownerUserId });
+    if (isCurrentMongoQuota(current)) return current!.mutationEpoch;
+    throw new PantryMutationConflictError(
+      'Pantry quota migration changed; retry the mutation',
+    );
+  }
+
+  private async buildQuota(
+    ownerUserId: string,
+  ): Promise<Omit<MongoPantryQuotaDocument, '_id'>> {
+    const [lots, productTypes, savedShoppingLists] = await Promise.all([
       this.inventoryLotModel
-        .find({ userId: ownerUserId, archivedAt: { $exists: false } })
-        .select({ productTypeId: 1, _id: 0 })
+        .find({ userId: ownerUserId })
+        .select({ productTypeId: 1, archivedAt: 1, _id: 0 })
         .lean(),
-      this.productTypeModel.countDocuments({
-        userId: ownerUserId,
-        archivedAt: { $exists: false },
-      }),
+      this.productTypeModel
+        .find({ userId: ownerUserId })
+        .select({ archivedAt: 1, _id: 0 })
+        .lean(),
       this.connection
         .collection('shoppingLists')
         .countDocuments({ ownerUserId }),
     ]);
-    const lotsByProductType = lots.reduce<Record<string, number>>(
+    const activeLots = lots.filter((lot) => !lot.archivedAt);
+    const archivedLots = lots.filter((lot) => Boolean(lot.archivedAt));
+    const lotsByProductType = activeLots.reduce<Record<string, number>>(
       (counts, lot) => {
         counts[lot.productTypeId] = (counts[lot.productTypeId] ?? 0) + 1;
         return counts;
       },
       {},
     );
-    try {
-      await this.quotas.insertOne({
-        _id: ownerUserId,
-        ownerUserId,
-        activeProductTypes,
-        activeInventoryLots: lots.length,
-        savedShoppingLists,
-        lotsByProductType,
-        updatedAt: new Date(),
-      });
-    } catch (error) {
-      if (!isDuplicateKey(error)) {
-        throw error;
-      }
-    }
+    const archivedLotsByProductType = archivedLots.reduce<
+      Record<string, number>
+    >((counts, lot) => {
+      counts[lot.productTypeId] = (counts[lot.productTypeId] ?? 0) + 1;
+      return counts;
+    }, {});
+    const activeProductTypes = productTypes.filter(
+      (productType) => !productType.archivedAt,
+    ).length;
+    const archivedProductTypes = productTypes.length - activeProductTypes;
+    return {
+      ownerUserId,
+      quotaSchemaVersion: MONGO_PANTRY_QUOTA_SCHEMA_VERSION,
+      mutationEpoch: 0,
+      deleting: false,
+      activeProductTypes,
+      archivedProductTypes,
+      activeInventoryLots: activeLots.length,
+      archivedInventoryLots: archivedLots.length,
+      savedShoppingLists,
+      lotsByProductType,
+      archivedLotsByProductType,
+      updatedAt: new Date(),
+    };
   }
 
   private get operations() {
@@ -981,6 +1511,27 @@ export class MongoPantryMutationAdapter
       'pantry_quotas',
     );
   }
+}
+
+function isCurrentMongoQuota(quota: MongoPantryQuotaDocument | null): boolean {
+  return Boolean(
+    quota &&
+    quota.quotaSchemaVersion === MONGO_PANTRY_QUOTA_SCHEMA_VERSION &&
+    quota.deleting === false &&
+    typeof quota.mutationEpoch === 'number' &&
+    typeof quota.activeProductTypes === 'number' &&
+    typeof quota.archivedProductTypes === 'number' &&
+    typeof quota.activeInventoryLots === 'number' &&
+    typeof quota.archivedInventoryLots === 'number' &&
+    typeof quota.savedShoppingLists === 'number' &&
+    isCounterMap(quota.lotsByProductType) &&
+    isCounterMap(quota.archivedLotsByProductType) &&
+    !quota.migrationToken,
+  );
+}
+
+function isCounterMap(value: unknown): value is Record<string, number> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function activeLotDocument(
@@ -1031,7 +1582,7 @@ function checkoutQuotaUpdate(
   return {
     filter: {
       _id: ownerUserId,
-      deleting: { $exists: false },
+      deleting: false,
       activeInventoryLots: {
         $lte: MAX_ACTIVE_INVENTORY_LOTS_PER_USER - productTypeIds.length,
       },

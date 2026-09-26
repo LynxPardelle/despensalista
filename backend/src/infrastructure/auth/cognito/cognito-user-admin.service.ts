@@ -4,7 +4,6 @@ import {
   AdminUserGlobalSignOutCommand,
   AdminDeleteUserCommand,
   CognitoIdentityProviderClient,
-  ListUsersCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { CognitoUserAdmin } from '../../../application/ports/cognito-auth.port';
 
@@ -26,26 +25,18 @@ export class CognitoUserAdminService implements CognitoUserAdmin {
     const userPoolId = this.getUserPoolId();
     let deletedCount = 0;
 
-    for (const subjectId of [...new Set(subjectIds.map((id) => id.trim()))]) {
-      if (!subjectId) {
-        continue;
+    for (const subjectId of this.normalizeSubjectIds(subjectIds)) {
+      try {
+        await this.client.send(
+          new AdminDeleteUserCommand({
+            UserPoolId: userPoolId,
+            Username: subjectId,
+          }),
+        );
+      } catch (error) {
+        if ((error as Error).name === 'UserNotFoundException') continue;
+        throw error;
       }
-
-      const username = await this.findUsernameBySubjectId(
-        userPoolId,
-        subjectId,
-      );
-
-      if (!username) {
-        continue;
-      }
-
-      await this.client.send(
-        new AdminDeleteUserCommand({
-          UserPoolId: userPoolId,
-          Username: username,
-        }),
-      );
       deletedCount += 1;
     }
 
@@ -61,40 +52,21 @@ export class CognitoUserAdminService implements CognitoUserAdmin {
     let signedOutCount = 0;
 
     for (const subjectId of this.normalizeSubjectIds(subjectIds)) {
-      const username = await this.findUsernameBySubjectId(
-        userPoolId,
-        subjectId,
-      );
-
-      if (!username) {
-        continue;
+      try {
+        await this.client.send(
+          new AdminUserGlobalSignOutCommand({
+            UserPoolId: userPoolId,
+            Username: subjectId,
+          }),
+        );
+      } catch (error) {
+        if ((error as Error).name === 'UserNotFoundException') continue;
+        throw error;
       }
-
-      await this.client.send(
-        new AdminUserGlobalSignOutCommand({
-          UserPoolId: userPoolId,
-          Username: username,
-        }),
-      );
       signedOutCount += 1;
     }
 
     return signedOutCount;
-  }
-
-  private async findUsernameBySubjectId(
-    userPoolId: string,
-    subjectId: string,
-  ): Promise<string | undefined> {
-    const result = await this.client.send(
-      new ListUsersCommand({
-        UserPoolId: userPoolId,
-        Filter: `sub = "${escapeCognitoFilterValue(subjectId)}"`,
-        Limit: 1,
-      }),
-    );
-
-    return result.Users?.[0]?.Username;
   }
 
   private getUserPoolId(): string {
@@ -137,8 +109,4 @@ export class CognitoUserAdminService implements CognitoUserAdmin {
   private normalizeSubjectIds(subjectIds: string[]): string[] {
     return [...new Set(subjectIds.map((id) => id.trim()))].filter(Boolean);
   }
-}
-
-function escapeCognitoFilterValue(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }

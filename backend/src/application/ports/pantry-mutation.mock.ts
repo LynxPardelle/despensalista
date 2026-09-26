@@ -54,5 +54,6 @@ export function makePantryMutationMock(
     }),
     beginPantryDeletion: jest.fn(),
     completePantryDeletion: jest.fn(),
+    abortPantryDeletion: jest.fn(),
   };
 }

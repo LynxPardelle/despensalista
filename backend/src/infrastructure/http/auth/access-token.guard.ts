@@ -42,7 +42,11 @@ export class AccessTokenGuard implements CanActivate {
       (await this.userDao.findByAuthSubject(claims.sub)) ??
       (await this.userDao.findById(UserId.fromString(claims.sub)));
 
-    if (!user || user.status !== UserAccountStatus.ACTIVE) {
+    if (
+      !user ||
+      user.status !== UserAccountStatus.ACTIVE ||
+      user.isAccountDeletionPending()
+    ) {
       throw new UnauthorizedException('Invalid authenticated user');
     }
 

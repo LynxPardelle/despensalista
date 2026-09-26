@@ -37,9 +37,9 @@ function makeInventoryLotRepository(): jest.Mocked<InventoryLotRepository> {
     findArchivedByUserId: jest.fn(),
     findArchivedPageByUserId: jest.fn(),
     findByProductTypeId: jest.fn(),
+    findAllByProductTypeId: jest.fn(),
     reassignUserOwnership: jest.fn(),
     delete: jest.fn(),
-    deleteByProductTypeId: jest.fn(),
     deleteByUserId: jest.fn(),
   };
 }

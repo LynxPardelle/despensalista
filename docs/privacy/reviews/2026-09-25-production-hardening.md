@@ -59,9 +59,12 @@ so they cannot race the scrub. MongoDB also has TTL indexes for expired shopping
 shares and household invitations.
 
 The database sweep and Cognito identity deletion are not one cross-service
-transaction. The use case is a retryable saga: fences remain in force if the
-Cognito administrator call or a later cleanup step fails, and the operator must
-retry/verify both stores rather than assume an all-or-nothing commit.
+transaction. The use case is a durable retryable saga: the database atomically
+stores a bounded deletion-job snapshot with the account fence, and the private
+scheduled worker claims and retries unfinished jobs with a lease and backoff.
+Fences remain in force if the Cognito administrator call or a later cleanup step
+fails; operators still monitor failures rather than assuming an all-or-nothing
+cross-service commit.
 
 ## Authentication and email
 

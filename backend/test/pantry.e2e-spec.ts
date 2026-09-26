@@ -151,15 +151,35 @@ describe('Pantry production contracts (HTTP + Mongo transactions)', () => {
     // Data deletion is tested through the actual use case to avoid unrelated step-up auth.
     const { DeletePantryDataUseCase } =
       await import('../src/application/use-cases/delete-pantry-data.use-case');
-    await app
-      .get(DeletePantryDataUseCase)
-      .execute({ userId: user.id.toString(), confirmationText: 'ELIMINAR' });
+    await app.get(DeletePantryDataUseCase).execute({
+      userId: user.id.toString(),
+      confirmationText: 'ELIMINAR',
+      idempotencyKey: '9b29fb9a-ce30-473f-abaf-f8d987634f55',
+    });
     expect(
       await connection.collection('pantry_operations').countDocuments(),
+    ).toBe(1);
+    expect(
+      await connection.collection('pantry_quotas').findOne({
+        ownerUserId: user.id.toString(),
+      }),
+    ).toMatchObject({
+      quotaSchemaVersion: 2,
+      mutationEpoch: 1,
+      deleting: false,
+      activeProductTypes: 0,
+      archivedProductTypes: 0,
+      activeInventoryLots: 0,
+      archivedInventoryLots: 0,
+      savedShoppingLists: 0,
+      lotsByProductType: {},
+      archivedLotsByProductType: {},
+    });
+    expect(
+      await connection.collection('pantry_quotas').countDocuments({
+        deleting: true,
+      }),
     ).toBe(0);
-    expect(await connection.collection('pantry_quotas').countDocuments()).toBe(
-      0,
-    );
     expect(await connection.collection('inventory_lots').countDocuments()).toBe(
       0,
     );

@@ -19,6 +19,9 @@ async function createFixture() {
   });
   await mkdir(path.join(root, 'infra', 'cognito', 'bin'), { recursive: true });
   await mkdir(path.join(root, 'infra', 'cognito', 'lib'), { recursive: true });
+  await mkdir(path.join(root, 'infra', 'cognito', 'lambda', 'cognito-email-quota'), {
+    recursive: true,
+  });
   await mkdir(path.join(root, 'frontend', 'dist', 'frontend', 'browser'), {
     recursive: true,
   });
@@ -36,6 +39,10 @@ async function createFixture() {
   );
   await writeFile(path.join(root, 'infra', 'cognito', 'bin', 'app.ts'), 'app');
   await writeFile(path.join(root, 'infra', 'cognito', 'lib', 'stack.ts'), 'stack');
+  await writeFile(
+    path.join(root, 'infra', 'cognito', 'lambda', 'cognito-email-quota', 'index.js'),
+    'exports.handler = async event => event;',
+  );
   await writeFile(path.join(root, 'infra', 'cognito', 'package.json'), '{}');
   await writeFile(path.join(root, 'infra', 'cognito', 'package-lock.json'), '{}');
   await writeFile(path.join(root, 'infra', 'cognito', 'cdk.json'), '{}');
@@ -76,6 +83,9 @@ test('creates a source-SHA manifest from a strict deploy allowlist', async () =>
   assert.ok(!manifest.files.some((file) => file.path.includes('node_modules')));
   assert.ok(!manifest.files.some((file) => file.path.startsWith('backend/src')));
   assert.ok(manifest.files.some((file) => file.path === 'infra/cognito/delivery-resources.json'));
+  assert.ok(manifest.files.some(
+    (file) => file.path === 'infra/cognito/lambda/cognito-email-quota/index.js',
+  ));
 });
 
 test('rejects a release whose payload changed after manifest creation', async () => {
@@ -114,4 +124,11 @@ test('applies the verified release and removes stale deploy files only', async (
   await assert.rejects(readFile(path.join(workspace, 'backend', 'stale.txt')));
   assert.equal(await readFile(path.join(workspace, 'keep.txt'), 'utf8'), 'keep');
   assert.equal(await readFile(path.join(workspace, 'infra/cognito/delivery-resources.json'), 'utf8'), '{"dev":{"bucket":"stage-assets"}}');
+  assert.equal(
+    await readFile(
+      path.join(workspace, 'infra/cognito/lambda/cognito-email-quota/index.js'),
+      'utf8',
+    ),
+    'exports.handler = async event => event;',
+  );
 });

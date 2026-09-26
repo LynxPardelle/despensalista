@@ -4,20 +4,21 @@ import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { DespensaListaServerlessBackendStack } from '../lib/despensalista-serverless-backend-stack';
 
-function synthesizeProductionTemplate(): Template {
+function synthesizeTemplate(stage: 'dev' | 'tst' | 'prod'): Template {
   const app = new cdk.App({
     context: {
-      stage: 'prod',
+      stage,
       serverlessFrontendBaseUrl: 'https://despensalista.example',
       appDomainName: 'despensalista.example',
       hostedZoneId: 'Z1234567890',
       hostedZoneName: 'example',
-      enableFlatRateWaf: 'true',
+      enableFlatRateWaf: stage === 'prod' ? 'true' : 'false',
       backendArtifactPath: __dirname,
       frontendArtifactPath: __dirname,
+      releaseId: 'a'.repeat(12),
     },
   });
-  const stack = new DespensaListaServerlessBackendStack(app, 'Backend-prod', {
+  const stack = new DespensaListaServerlessBackendStack(app, `Backend-${stage}`, {
     allowedProviders: ['COGNITO'],
     cognitoDomain: 'https://auth.example',
     cognitoUserPoolClientId: 'client-id',
@@ -27,7 +28,7 @@ function synthesizeProductionTemplate(): Template {
   return Template.fromStack(stack);
 }
 
-const productionTemplate = synthesizeProductionTemplate();
+const productionTemplate = synthesizeTemplate('prod');
 
 test('production Lambda does not trust X-Forwarded-For for rate-limit identity', () => {
   const functions = productionTemplate.findResources(
@@ -65,6 +66,8 @@ test('production infrastructure exposes idempotency headers and atomic DynamoDB 
     productionTemplate.findResources('AWS::IAM::Policy'),
   );
   assert.match(policies, /dynamodb:TransactWriteItems/);
+  assert.match(policies, /cognito-idp:AdminDeleteUser/);
+  assert.doesNotMatch(policies, /cognito-idp:ListUsers/);
   for (const tableName of [
     'despensalista-prod-users',
     'despensalista-prod-products',
@@ -105,7 +108,7 @@ test('production infrastructure has bounded logs and no more than four alarms', 
   );
 });
 
-test('production publishes an aliased Lambda with canary rollback controls', () => {
+test('production publishes an aliased Lambda with all-at-once rollback controls', () => {
   assert.equal(
     Object.keys(productionTemplate.findResources('AWS::Lambda::Alias')).length,
     1,
@@ -117,6 +120,48 @@ test('production publishes an aliased Lambda with canary rollback controls', () 
     AutoRollbackConfiguration: {
       Enabled: true,
     },
+    DeploymentConfigName: 'CodeDeployDefault.LambdaAllAtOnce',
+    DeploymentGroupName: 'despensalista-prod-backend-release',
+  });
+  const [deploymentGroup] = Object.values(
+    productionTemplate.findResources('AWS::CodeDeploy::DeploymentGroup'),
+  );
+  assert.equal(deploymentGroup.Properties.AlarmConfiguration.Alarms.length, 1);
+  productionTemplate.hasOutput('PantryQuotaSchemaVersion', { Value: '2' });
+  productionTemplate.hasOutput('DeploymentReleaseId', { Value: 'a'.repeat(12) });
+});
+
+test('production resumes account deletion through the live alias every fifteen minutes', () => {
+  synthesizeTemplate('dev').resourceCountIs('AWS::Events::Rule', 0);
+  synthesizeTemplate('tst').resourceCountIs('AWS::Events::Rule', 0);
+
+  const rules = productionTemplate.findResources('AWS::Events::Rule');
+  assert.equal(Object.keys(rules).length, 1);
+  const [ruleId, rule] = Object.entries(rules)[0];
+  assert.equal(rule.Properties.Name, 'despensalista-prod-account-deletion-resume');
+  assert.equal(rule.Properties.ScheduleExpression, 'rate(15 minutes)');
+  assert.equal(rule.Properties.Targets.length, 1);
+  const [target] = rule.Properties.Targets;
+  assert.equal(target.Input, JSON.stringify({
+    source: 'despensalista.account-deletion-worker',
+    'detail-type': 'resume',
+  }));
+  assert.deepEqual(target.RetryPolicy, {
+    MaximumEventAgeInSeconds: 300,
+    MaximumRetryAttempts: 0,
+  });
+  const aliases = productionTemplate.findResources('AWS::Lambda::Alias');
+  const [aliasId, alias] = Object.entries(aliases)[0];
+  assert.equal(alias.Properties.Name, 'live');
+  assert.deepEqual(target.Arn, { Ref: aliasId });
+
+  const permissions = Object.values(
+    productionTemplate.findResources('AWS::Lambda::Permission'),
+  ).filter((resource) => resource.Properties.Principal === 'events.amazonaws.com');
+  assert.equal(permissions.length, 1);
+  assert.deepEqual(permissions[0].Properties.FunctionName, target.Arn);
+  assert.deepEqual(permissions[0].Properties.SourceArn, {
+    'Fn::GetAtt': [ruleId, 'Arn'],
   });
 });
 
@@ -147,7 +192,7 @@ test('production protects the API origin and prepares a five-rule flat-rate WAF'
   }
 });
 
-test('test stage shares only the nonproduction origin secret and has no paid alarms', () => {
+test('test stage owns and retains an isolated origin secret with no paid alarms', () => {
   const app = new cdk.App({ context: {
     stage: 'tst', backendArtifactPath: __dirname, frontendArtifactPath: __dirname,
     serverlessFrontendBaseUrl: 'https://test.despensalista.example',
@@ -158,12 +203,45 @@ test('test stage shares only the nonproduction origin secret and has no paid ala
     cognitoUserPoolClientId: 'client', cognitoUserPoolId: 'pool',
   });
   const template = Template.fromStack(stack);
-  template.resourceCountIs('AWS::SecretsManager::Secret', 0);
+  template.resourceCountIs('AWS::SecretsManager::Secret', 1);
+  template.hasResourceProperties('AWS::SecretsManager::Secret', {
+    Name: 'despensalista/tst/cloudfront-origin-verification',
+  });
   template.resourceCountIs('AWS::CloudWatch::Alarm', 0);
   template.resourceCountIs('AWS::WAFv2::WebACL', 0);
   template.resourceCountIs('AWS::PricingPlanManager::Subscription', 0);
-  assert.match(JSON.stringify(template.toJSON()), /despensalista\/nonprod\/cloudfront-origin-verification/);
+  const serialized = JSON.stringify(template.toJSON());
+  assert.match(serialized, /despensalista\/tst\/cloudfront-origin-verification/);
+  assert.doesNotMatch(serialized, /despensalista\/nonprod\/cloudfront-origin-verification/);
+  assert.doesNotMatch(serialized, /despensalista\/dev\/cloudfront-origin-verification/);
   assert.doesNotMatch(JSON.stringify(template.toJSON()), /despensalista\/prod\/cloudfront-origin-verification/);
+  const [secret] = Object.values(template.findResources('AWS::SecretsManager::Secret'));
+  assert.equal(secret.DeletionPolicy, 'Retain');
+  assert.equal(secret.UpdateReplacePolicy, 'Retain');
+});
+
+test('development and production own only their stage origin secrets', () => {
+  for (const [stage, template] of [
+    ['dev', (() => {
+      const app = new cdk.App({ context: {
+        stage: 'dev', backendArtifactPath: __dirname, frontendArtifactPath: __dirname,
+        serverlessFrontendBaseUrl: 'https://dev.despensalista.example',
+        appDomainName: 'dev.despensalista.example',
+      } });
+      return Template.fromStack(new DespensaListaServerlessBackendStack(app, 'Backend-dev', {
+        allowedProviders: ['COGNITO'], cognitoDomain: 'https://auth.example',
+        cognitoUserPoolClientId: 'client', cognitoUserPoolId: 'pool',
+      }));
+    })()],
+    ['prod', productionTemplate],
+  ] as const) {
+    template.resourceCountIs('AWS::SecretsManager::Secret', 1);
+    template.hasResourceProperties('AWS::SecretsManager::Secret', {
+      Name: `despensalista/${stage}/cloudfront-origin-verification`,
+    });
+    const serialized = JSON.stringify(template.toJSON());
+    assert.doesNotMatch(serialized, /despensalista\/nonprod\/cloudfront-origin-verification/);
+  }
 });
 
 test('production retains versioned web assets and deletion-protected tables', () => {
@@ -176,6 +254,16 @@ test('production retains versioned web assets and deletion-protected tables', ()
   assert.equal(Object.keys(tables).length, 4);
   for (const table of Object.values(tables)) {
     assert.equal(table.Properties?.DeletionProtectionEnabled, true);
+  }
+  const archivedIndexes = Object.values(tables)
+    .flatMap((table) => table.Properties?.GlobalSecondaryIndexes ?? [])
+    .filter((index) => index.IndexName === 'UserArchivedAtIndex');
+  assert.equal(archivedIndexes.length, 2);
+  for (const index of archivedIndexes) {
+    assert.deepEqual(index.KeySchema, [
+      { AttributeName: 'userId', KeyType: 'HASH' },
+      { AttributeName: 'archivedAt', KeyType: 'RANGE' },
+    ]);
   }
 });
 

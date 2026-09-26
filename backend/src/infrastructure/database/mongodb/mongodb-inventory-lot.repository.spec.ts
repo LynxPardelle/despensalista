@@ -118,6 +118,27 @@ describe('MongoInventoryLotRepository archive-aware queries', () => {
     expect(query.limit).not.toHaveBeenCalled();
   });
 
+  it('lists active and archived lots for atomic product type cascade deletion', async () => {
+    const archivedLot = makeInventoryLot().toPrimitives();
+    const activeLot = { ...archivedLot, id: 'lot-2', archivedAt: undefined };
+    const query = makeQuery([activeLot, archivedLot]);
+    const model = {
+      findOneAndUpdate: jest.fn(),
+      findOne: jest.fn(),
+      find: jest.fn().mockReturnValue(query),
+      updateMany: jest.fn(),
+      deleteOne: jest.fn(),
+    };
+    const repository = new MongoInventoryLotRepository(model as never);
+
+    const lots = await repository.findAllByProductTypeId(productTypeId);
+
+    expect(model.find).toHaveBeenCalledWith({
+      productTypeId: productTypeId.toString(),
+    });
+    expect(lots.map((lot) => lot.id.toString())).toEqual(['lot-2', 'lot-1']);
+  });
+
   it('lists archived lots separately', async () => {
     const lot = makeInventoryLot().toPrimitives();
     const query = makeQuery([lot]);
@@ -173,5 +194,33 @@ describe('MongoInventoryLotRepository archive-aware queries', () => {
     expect(query.limit).toHaveBeenCalledWith(2);
     expect(page.items).toHaveLength(1);
     expect(page.nextCursor).toBeDefined();
+  });
+
+  it('rejects malformed archive cursors before querying MongoDB', async () => {
+    const model = {
+      findOneAndUpdate: jest.fn(),
+      findOne: jest.fn(),
+      find: jest.fn(),
+      updateMany: jest.fn(),
+      deleteOne: jest.fn(),
+    };
+    const repository = new MongoInventoryLotRepository(model as never);
+    const invalidCursors = [
+      Buffer.from('[]').toString('base64url'),
+      Buffer.from(
+        JSON.stringify({
+          archivedAt: 'not-a-date',
+          id: 'lot-1',
+          userId: userId.toString(),
+        }),
+      ).toString('base64url'),
+    ];
+
+    for (const cursor of invalidCursors) {
+      await expect(
+        repository.findArchivedPageByUserId(userId, { limit: 1, cursor }),
+      ).rejects.toThrow('Invalid archived inventory lot cursor');
+    }
+    expect(model.find).not.toHaveBeenCalled();
   });
 });

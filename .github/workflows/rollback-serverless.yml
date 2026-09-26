@@ -101,6 +101,10 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
+      - name: Recover interrupted production deployment
+        if: inputs.stage == 'prod'
+        run: node .github/scripts/deployment-state.mjs recover-drain prod
+
       - name: Restore selected published backend version and frontend releaseId
         env:
           AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
