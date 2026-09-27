@@ -38,9 +38,9 @@ isolated origin-verification secret, totaling about USD 1.20/month. The first
 deployment of this contract retains the former shared `nonprod` secret for safe
 migration; remove it manually only after both dev and tst pass their smoke tests.
 CloudWatch Synthetics is deliberately excluded. SES/DKIM is provisioned only in
-prod. The verified custom
-From works with Cognito-managed delivery while the account remains in the SES
-sandbox; direct `DEVELOPER` sending still requires SES production access.
+prod, but the verified custom From remains inactive while the account is in the
+SES sandbox. Cognito's managed sender stays active until direct `DEVELOPER`
+sending is approved for production access.
 
 The CustomMessage guard atomically applies hashed-recipient and daily counters
 without reserving Lambda concurrency. Daily limits are dev 2, tst 3, and prod 30;
