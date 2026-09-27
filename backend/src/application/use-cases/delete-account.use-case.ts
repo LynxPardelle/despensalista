@@ -107,10 +107,17 @@ export class DeleteAccountUseCase {
       deletionToken: job.pantryDeletionToken,
     });
     await this.deleteHouseholdOrMembership(job);
+    await this.householdRepository.deleteAccountHouseholdReferences(
+      job.userId,
+      job.email,
+    );
     const deletedKnownDeviceCount =
       await this.userDeviceRepository.deleteByUserId(userId);
     const deletedCognitoIdentityCount =
-      await this.cognitoUserAdmin.deleteUsersBySubjectIds(job.authSubjectIds);
+      await this.cognitoUserAdmin.deleteUsersBySubjectIds(
+        job.authSubjectIds,
+        job.authUsernamesBySubject,
+      );
     await this.userDao.delete(userId);
 
     return {
@@ -170,10 +177,9 @@ export class DeleteAccountUseCase {
       return;
     }
 
-    await this.householdRepository.deleteAccountHouseholdData(
+    await this.householdRepository.deleteMembership(
       job.householdId,
       job.userId,
-      job.email,
     );
   }
 }

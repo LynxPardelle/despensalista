@@ -57,6 +57,7 @@ type AccountDeletionJobItem = {
   email: string;
   username: string;
   authSubjectIds: string[];
+  authUsernamesBySubject?: Record<string, string>;
   pantryDeletionToken: string;
   householdId?: string;
   householdRole?: HouseholdRole;
@@ -365,6 +366,7 @@ export class DynamoDbUserDao implements UserDao {
       email: primitives!.email,
       username: primitives!.username,
       authSubjectIds: primitives!.authSubjectIds ?? [],
+      authUsernamesBySubject: primitives!.authUsernamesBySubject ?? {},
       startedAt: new Date(),
     };
     const lookupKeys = this.getLookupKeys(snapshot);
@@ -479,6 +481,9 @@ export class DynamoDbUserDao implements UserDao {
       email: primitives.email,
       username: primitives.username,
       authSubjectIds: normalizeAuthSubjectIds(primitives.authSubjectIds ?? []),
+      authUsernamesBySubject: normalizeAuthUsernamesBySubject(
+        primitives.authUsernamesBySubject ?? {},
+      ),
       status: primitives.status,
       normalizedEmail: normalizeEmail(primitives.email),
       normalizedUsername: normalizeUsername(primitives.username),
@@ -533,6 +538,9 @@ export class DynamoDbUserDao implements UserDao {
       email: user.email,
       username: user.username,
       authSubjectIds: normalizeAuthSubjectIds(user.authSubjectIds ?? []),
+      authUsernamesBySubject: normalizeAuthUsernamesBySubject(
+        user.authUsernamesBySubject ?? {},
+      ),
       pantryDeletionToken: randomUUID(),
       householdId: context.householdId,
       householdRole: context.householdRole,
@@ -550,6 +558,9 @@ export class DynamoDbUserDao implements UserDao {
       email: item.email,
       username: item.username,
       authSubjectIds: normalizeAuthSubjectIds(item.authSubjectIds ?? []),
+      authUsernamesBySubject: normalizeAuthUsernamesBySubject(
+        item.authUsernamesBySubject ?? {},
+      ),
       pantryDeletionToken: item.pantryDeletionToken,
       householdId: item.householdId,
       householdRole: item.householdRole,
@@ -616,6 +627,9 @@ export class DynamoDbUserDao implements UserDao {
       email: item.email,
       username: item.username,
       authSubjectIds: item.authSubjectIds ?? [],
+      authUsernamesBySubject: normalizeAuthUsernamesBySubject(
+        item.authUsernamesBySubject ?? {},
+      ),
       status: item.status,
       createdAt: new Date(item.createdAt),
       updatedAt: new Date(item.updatedAt),
@@ -702,6 +716,20 @@ function normalizeAuthSubjectId(authSubjectId: string): string {
 
 function normalizeAuthSubjectIds(authSubjectIds: string[]): string[] {
   return [...new Set(authSubjectIds.map(normalizeAuthSubjectId))];
+}
+
+function normalizeAuthUsernamesBySubject(
+  authUsernamesBySubject: Record<string, string>,
+): Record<string, string> {
+  const normalized: [string, string][] = [];
+  for (const [subjectId, username] of Object.entries(authUsernamesBySubject)) {
+    const normalizedSubjectId = subjectId.trim();
+    const normalizedUsername = username.trim();
+    if (normalizedSubjectId && normalizedUsername) {
+      normalized.push([normalizedSubjectId, normalizedUsername]);
+    }
+  }
+  return Object.fromEntries(normalized);
 }
 
 function accountDeletedError(): UnauthorizedException {

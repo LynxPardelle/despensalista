@@ -69,6 +69,7 @@ test('creates a source-SHA manifest from a strict deploy allowlist', async () =>
 
   assert.equal(manifest.sourceSha, sourceSha);
   assert.equal(manifest.releaseId, sourceSha.slice(0, 12));
+  assert.equal(manifest.backendDataContractVersion, 1);
   assert.equal(verified.releaseId, manifest.releaseId);
   assert.deepEqual(
     manifest.files.map((file) => file.path),

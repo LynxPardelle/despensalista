@@ -43,6 +43,10 @@ describe('Mongo user deletion and delayed Cognito callbacks', () => {
       email: 'owner@example.com',
       username: 'Owner',
       authSubjectIds: ['cognito-sub', 'linked-sub'],
+      authUsernamesBySubject: {
+        'cognito-sub': 'native-owner',
+        'linked-sub': 'Google_linked-owner',
+      },
       status: UserAccountStatus.ACTIVE,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -65,6 +69,7 @@ describe('Mongo user deletion and delayed Cognito callbacks', () => {
     });
     const callback = sync.syncFromClaims({
       sub: 'cognito-sub',
+      cognitoUsername: 'native-owner',
       email: 'owner@example.com',
       emailVerified: true,
     });
@@ -81,6 +86,7 @@ describe('Mongo user deletion and delayed Cognito callbacks', () => {
     await expect(
       sync.syncFromClaims({
         sub: 'linked-sub',
+        cognitoUsername: 'Google_linked-owner',
         email: 'owner@example.com',
         emailVerified: true,
       }),
@@ -94,6 +100,10 @@ describe('Mongo user deletion and delayed Cognito callbacks', () => {
       email: 'owner@example.com',
       username: 'Owner',
       authSubjectIds: ['cognito-sub', 'linked-sub'],
+      authUsernamesBySubject: {
+        'cognito-sub': 'native-owner',
+        'linked-sub': 'Google_linked-owner',
+      },
       status: UserAccountStatus.ACTIVE,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -111,7 +121,23 @@ describe('Mongo user deletion and delayed Cognito callbacks', () => {
       new Date('9999-12-31T23:59:59.999Z'),
       { householdId: 'household-1', householdRole: 'editor' },
     );
-    expect(first).toMatchObject({ pantryDeletionToken: expect.any(String) });
+    expect(first).toMatchObject({
+      pantryDeletionToken: expect.any(String),
+      authUsernamesBySubject: {
+        'cognito-sub': 'native-owner',
+        'linked-sub': 'Google_linked-owner',
+      },
+    });
+    await expect(
+      connection.collection('account_deletion_jobs').findOne({
+        _id: 'local-user' as never,
+      }),
+    ).resolves.toMatchObject({
+      authUsernamesBySubject: {
+        'cognito-sub': 'native-owner',
+        'linked-sub': 'Google_linked-owner',
+      },
+    });
     expect((await dao.findById(original.id))?.isAccountDeletionPending()).toBe(
       true,
     );
@@ -127,7 +153,12 @@ describe('Mongo user deletion and delayed Cognito callbacks', () => {
     });
     await model.updateOne(
       { id: original.id.toString() },
-      { $set: { authSubjectIds: ['later-value'] } },
+      {
+        $set: {
+          authSubjectIds: ['later-value'],
+          authUsernamesBySubject: { 'later-value': 'later-username' },
+        },
+      },
     );
 
     await expect(

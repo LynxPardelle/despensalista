@@ -34,6 +34,7 @@ type AccountDeletionJobRecord = {
   email: string;
   username: string;
   authSubjectIds: string[];
+  authUsernamesBySubject?: Record<string, string>;
   pantryDeletionToken: string;
   householdId?: string;
   householdRole?: HouseholdRole;
@@ -193,6 +194,9 @@ export class MongoUserDao implements UserDao, OnModuleInit {
           email: user.email,
           username: user.username,
           authSubjectIds: normalizeAuthSubjectIds(user.authSubjectIds ?? []),
+          authUsernamesBySubject: normalizeAuthUsernamesBySubject(
+            user.authUsernamesBySubject ?? {},
+          ),
           pantryDeletionToken: randomUUID(),
           householdId: context.householdId,
           householdRole: context.householdRole,
@@ -365,6 +369,9 @@ export class MongoUserDao implements UserDao, OnModuleInit {
       email: job.email,
       username: job.username,
       authSubjectIds: normalizeAuthSubjectIds(job.authSubjectIds ?? []),
+      authUsernamesBySubject: normalizeAuthUsernamesBySubject(
+        job.authUsernamesBySubject ?? {},
+      ),
       pantryDeletionToken: job.pantryDeletionToken,
       householdId: job.householdId,
       householdRole: job.householdRole,
@@ -445,6 +452,9 @@ export class MongoUserDao implements UserDao, OnModuleInit {
       email: user.email,
       username: user.username,
       authSubjectIds: user.authSubjectIds ?? [],
+      authUsernamesBySubject: normalizeAuthUsernamesBySubject(
+        user.authUsernamesBySubject ?? {},
+      ),
       status: user.status,
       createdAt: new Date(user.createdAt),
       updatedAt: new Date(user.updatedAt),
@@ -471,6 +481,20 @@ function normalizeAuthSubjectIds(authSubjectIds: string[]): string[] {
   return [...new Set(authSubjectIds.map(normalizeAuthSubjectId))].filter(
     Boolean,
   );
+}
+
+function normalizeAuthUsernamesBySubject(
+  authUsernamesBySubject: Record<string, string>,
+): Record<string, string> {
+  const normalized: [string, string][] = [];
+  for (const [subjectId, username] of Object.entries(authUsernamesBySubject)) {
+    const normalizedSubjectId = subjectId.trim();
+    const normalizedUsername = username.trim();
+    if (normalizedSubjectId && normalizedUsername) {
+      normalized.push([normalizedSubjectId, normalizedUsername]);
+    }
+  }
+  return Object.fromEntries(normalized);
 }
 
 function accountFenceIds(

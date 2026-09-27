@@ -31,6 +31,59 @@ test('captures and restores the published alias and frontend together', async ()
   assert.ok(calls.some(args => args.includes('create-invalidation')));
 });
 
+test('captures the data contract served by a rolled-back alias', async () => {
+  const { captureDeployment } = await load();
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-rollback-'));
+  const aws = args => {
+    if (args[0] === 'cloudformation') return { Stacks: [{ StackStatus: 'UPDATE_COMPLETE', Outputs: [
+      { OutputKey: 'ServerlessBackendFunctionName', OutputValue: 'despensalista-tst-backend' },
+      { OutputKey: 'ServerlessBackendLiveAliasArn', OutputValue: 'arn:aws:lambda:us-east-1:123:function:despensalista-tst-backend:live' },
+      { OutputKey: 'ServerlessBackendVersion', OutputValue: '13' },
+      { OutputKey: 'BackendDataContractVersion', OutputValue: '1' },
+      { OutputKey: 'WebBucketName', OutputValue: 'despensalista-tst-web' },
+      { OutputKey: 'CloudFrontDistributionId', OutputValue: 'E123' },
+    ] }] };
+    if (args.includes('get-alias')) return { FunctionVersion: '12' };
+    if (args.includes('get-function-configuration')) return { Environment: { Variables: {} } };
+    return {};
+  };
+
+  await captureDeployment({ stage: 'tst', directory, aws });
+
+  const state = JSON.parse(await readFile(path.join(directory, 'state.json'), 'utf8'));
+  assert.equal(state.version, '12');
+  assert.equal(state.deploymentVersion, '13');
+  assert.equal(state.backendDataContractVersion, 0);
+});
+
+test('refuses to snapshot an aligned alias whose data contract disagrees with the stack', async () => {
+  const { captureDeployment } = await load();
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-rollback-'));
+  const calls = [];
+  const aws = args => {
+    calls.push(args);
+    if (args[0] === 'cloudformation') return { Stacks: [{ StackStatus: 'UPDATE_COMPLETE', Outputs: [
+      { OutputKey: 'ServerlessBackendFunctionName', OutputValue: 'despensalista-tst-backend' },
+      { OutputKey: 'ServerlessBackendLiveAliasArn', OutputValue: 'arn:aws:lambda:us-east-1:123:function:despensalista-tst-backend:live' },
+      { OutputKey: 'ServerlessBackendVersion', OutputValue: '12' },
+      { OutputKey: 'BackendDataContractVersion', OutputValue: '1' },
+      { OutputKey: 'WebBucketName', OutputValue: 'despensalista-tst-web' },
+      { OutputKey: 'CloudFrontDistributionId', OutputValue: 'E123' },
+    ] }] };
+    if (args.includes('get-alias')) return { FunctionVersion: '12' };
+    if (args.includes('get-function-configuration')) return {
+      Environment: { Variables: { BACKEND_DATA_CONTRACT_VERSION: '0' } },
+    };
+    return {};
+  };
+
+  await assert.rejects(
+    captureDeployment({ stage: 'tst', directory, aws }),
+    /data contract/i,
+  );
+  assert.equal(calls.some(args => args[0] === 's3'), false);
+});
+
 test('restores the frontend when the first alias deployment failed before creating the alias', async () => {
   const { captureDeployment, restoreDeployment } = await load();
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-rollback-'));
@@ -377,9 +430,15 @@ test('releases a verified drain without rolling back its new alias', async () =>
   const smokePendingWrite = calls.findIndex(args =>
     args.includes('put-parameter') &&
     JSON.parse(args[args.indexOf('--value') + 1]).phase === 'smoke_pending');
+  const reopeningWrite = calls.findIndex(args =>
+    args.includes('put-parameter') &&
+    JSON.parse(args[args.indexOf('--value') + 1]).phase === 'reopening');
   const concurrencyRestore = calls.findIndex(args =>
     args.includes('put-function-concurrency') && args.includes('7'));
-  assert.ok(smokePendingWrite >= 0 && smokePendingWrite < concurrencyRestore);
+  assert.ok(
+    reopeningWrite >= 0 && reopeningWrite < concurrencyRestore &&
+      concurrencyRestore < smokePendingWrite,
+  );
 
   assert.equal(finalizeProductionDrain({ stage: 'prod', aws }), true);
   const tombstone = calls.findLastIndex(args => args.includes('put-parameter'));
@@ -390,6 +449,33 @@ test('releases a verified drain without rolling back its new alias', async () =>
     's3://despensalista-prod-assets/deployment-recovery/aaaaaaaaaaaa/test/frontend/',
     '--recursive',
   ]);
+  assert.equal(JSON.parse(marker).active, false);
+});
+
+test('fix-forward can abandon a reopening snapshot only after writers are open', async () => {
+  const { finalizeProductionDrain } = await load();
+  let reservedConcurrency = 0;
+  let marker = JSON.stringify(drainMarker({
+    phase: 'reopening', verifiedVersion: '13', reservedConcurrency: 7,
+  }));
+  const aws = args => {
+    if (args.includes('get-parameter')) return { Parameter: { Value: marker } };
+    if (args.includes('get-function-concurrency')) {
+      return { ReservedConcurrentExecutions: reservedConcurrency };
+    }
+    if (args.includes('put-parameter')) {
+      marker = args[args.indexOf('--value') + 1];
+      return {};
+    }
+    return {};
+  };
+
+  assert.throws(
+    () => finalizeProductionDrain({ stage: 'prod', aws }),
+    /remains drained/i,
+  );
+  reservedConcurrency = 7;
+  assert.equal(finalizeProductionDrain({ stage: 'prod', aws }), true);
   assert.equal(JSON.parse(marker).active, false);
 });
 
@@ -432,6 +518,75 @@ test('smoke-pending hard death rolls back instead of adopting the reconciled rel
   assert.equal(JSON.parse(marker).active, false);
 });
 
+test('smoke-pending recovery refuses a pre-contract rollback before mutating AWS', async () => {
+  const { recoverProductionDrain } = await load();
+  const calls = [];
+  const marker = JSON.stringify(drainMarker({
+    phase: 'smoke_pending', verifiedVersion: '13', reservedConcurrency: 7,
+    backendDataContractVersion: 0,
+  }));
+  const aws = args => {
+    calls.push(args);
+    if (args.includes('get-parameter')) return { Parameter: { Value: marker } };
+    if (args[0] === 'cloudformation') {
+      return backendStack('13', 'a'.repeat(12), 1);
+    }
+    if (args.includes('get-function-concurrency')) {
+      return { ReservedConcurrentExecutions: 7 };
+    }
+    assert.fail(`unexpected mutating recovery call: ${args.join(' ')}`);
+  };
+
+  await assert.rejects(
+    recoverProductionDrain({ stage: 'prod', aws, wait: async () => {} }),
+    /data contract/i,
+  );
+  assert.equal(calls.some(args =>
+    args.includes('update-alias') ||
+    args.includes('put-function-concurrency') ||
+    args.includes('put-parameter') ||
+    args[0] === 's3'
+  ), false);
+});
+
+test('reopening recovery permits a cross-contract rollback only while writers remain at zero', async () => {
+  const { recoverProductionDrain } = await load();
+  const calls = [];
+  let reservedConcurrency = 0;
+  let marker = JSON.stringify(drainMarker({
+    phase: 'reopening', verifiedVersion: '13', reservedConcurrency: 7,
+    backendDataContractVersion: 0,
+  }));
+  const aws = args => {
+    calls.push(args);
+    if (args.includes('get-parameter')) return { Parameter: { Value: marker } };
+    if (args.includes('put-parameter')) {
+      marker = args[args.indexOf('--value') + 1];
+      return {};
+    }
+    if (args[0] === 'cloudformation') {
+      return backendStack('13', 'a'.repeat(12), 1);
+    }
+    if (args.includes('get-function-concurrency')) {
+      return { ReservedConcurrentExecutions: reservedConcurrency };
+    }
+    if (args.includes('put-function-concurrency')) {
+      reservedConcurrency = Number(
+        args[args.indexOf('--reserved-concurrent-executions') + 1],
+      );
+      return {};
+    }
+    if (args.includes('get-function-configuration')) return { Timeout: 1 };
+    if (args.includes('create-invalidation')) return { Invalidation: { Id: 'I1' } };
+    return {};
+  };
+
+  await recoverProductionDrain({ stage: 'prod', aws, wait: async () => {} });
+
+  assert.ok(calls.some(args => args.includes('update-alias') && args.includes('12')));
+  assert.equal(reservedConcurrency, 7);
+});
+
 test('armed hard-death recovery conservatively restores the durable snapshot without an artifact', async () => {
   const { recoverProductionDrain } = await load();
   const calls = [];
@@ -444,7 +599,9 @@ test('armed hard-death recovery conservatively restores the durable snapshot wit
       marker = args[args.indexOf('--value') + 1];
       return { Version: 2 };
     }
-    if (args[0] === 'cloudformation') return backendStack('12');
+    if (args[0] === 'cloudformation') {
+      return backendStack('12', 'a'.repeat(12), 1);
+    }
     if (args.includes('get-alias')) return { FunctionVersion: '12' };
     if (args.includes('get-function')) {
       return { Configuration: { CodeSha256: RELEASE_CODE_SHA256 } };
@@ -766,6 +923,84 @@ test('refuses to restore another environment snapshot', async () => {
   await assert.rejects(restoreDeployment({ stage: 'prod', directory, aws: () => assert.fail('must not mutate AWS') }), /stage/i);
 });
 
+test('automatic non-production rollback refuses to cross a data contract', async () => {
+  const { restoreDeployment } = await load();
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-rollback-'));
+  await mkdir(path.join(directory, 'frontend'));
+  await writeFile(path.join(directory, 'state.json'), JSON.stringify({
+    stage: 'tst',
+    functionName: 'despensalista-tst-backend-api',
+    alias: 'live',
+    aliasExisted: true,
+    version: '12',
+    backendDataContractVersion: 0,
+    bucket: 'despensalista-tst-web',
+    distribution: 'E123',
+  }));
+  const calls = [];
+  const aws = args => {
+    calls.push(args);
+    if (args[0] === 'cloudformation') {
+      const stack = backendStack('13', 'a'.repeat(12), 1);
+      stack.Stacks[0].Outputs = stack.Stacks[0].Outputs.map(output => ({
+        ...output,
+        OutputValue: output.OutputValue
+          .replaceAll('prod', 'tst'),
+      }));
+      return stack;
+    }
+    if (args.includes('get-function-concurrency')) return {};
+    assert.fail(`unexpected rollback mutation: ${args.join(' ')}`);
+  };
+
+  await assert.rejects(
+    restoreDeployment({ stage: 'tst', directory, aws }),
+    /data contract/i,
+  );
+  assert.equal(calls.some(args => args.includes('update-alias') || args[0] === 's3'), false);
+});
+
+test('non-production cutover drains writers and restores their exact concurrency', async () => {
+  const { drainCapturedWriters, releaseCapturedWriters } = await load();
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-rollback-'));
+  await writeFile(path.join(directory, 'state.json'), JSON.stringify({
+    stage: 'tst',
+    functionName: 'despensalista-tst-backend-api',
+    reservedConcurrency: 7,
+    writersDrained: false,
+  }));
+  let reservedConcurrency = 7;
+  const calls = [];
+  const aws = args => {
+    calls.push(args);
+    if (args.includes('get-function-concurrency')) {
+      return { ReservedConcurrentExecutions: reservedConcurrency };
+    }
+    if (args.includes('put-function-concurrency')) {
+      reservedConcurrency = Number(
+        args[args.indexOf('--reserved-concurrent-executions') + 1],
+      );
+      return {};
+    }
+    if (args.includes('get-function-configuration')) return { Timeout: 1 };
+    return {};
+  };
+
+  await drainCapturedWriters({ stage: 'tst', directory, aws, wait: async () => {} });
+  assert.equal(reservedConcurrency, 0);
+  assert.equal(
+    JSON.parse(await readFile(path.join(directory, 'state.json'), 'utf8')).writersDrained,
+    true,
+  );
+
+  await releaseCapturedWriters({ stage: 'tst', directory, aws });
+  assert.equal(reservedConcurrency, 7);
+  assert.equal(
+    JSON.parse(await readFile(path.join(directory, 'state.json'), 'utf8')).writersDrained,
+    false,
+  );
+});
+
 test('manual rollback uses the recorded stage version when a newer version has the same code', async () => {
   const { recordPublishedRelease, restoreRelease } = await load();
   const artifact = await mkdtemp(path.join(os.tmpdir(), 'pantry-release-'));
@@ -845,6 +1080,84 @@ test('manual rollback uses the recorded stage version when a newer version has t
   });
   const aliasUpdate = calls.find(args => args.includes('update-alias'));
   assert.equal(aliasUpdate[aliasUpdate.indexOf('--function-version') + 1], '12');
+});
+
+test('manual rollback rejects a pre-contract release before mutating AWS', async () => {
+  const { recordPublishedRelease, restoreRelease } = await load();
+  const artifact = await releaseArtifact();
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-receipt-'));
+  const deploymentSha = 'b'.repeat(40);
+  const codeSha256 = createHash('sha256').update('zip-bytes').digest('base64');
+  const env = { AWS_REGION: 'us-east-1' };
+
+  await recordPublishedRelease({
+    stage: 'prod', artifact, directory, deploymentSha,
+    aws: deploymentAws({ aliasVersion: '12', stackVersion: '12', codeSha256 }),
+    env,
+  });
+
+  const calls = [];
+  await assert.rejects(
+    restoreRelease({
+      stage: 'prod', artifact,
+      receipt: path.join(directory, 'deployment-receipt.json'),
+      deploymentSha,
+      aws: deploymentAws({
+        aliasVersion: '12', stackVersion: '12', codeSha256, calls,
+        backendDataContractVersion: 1,
+      }),
+      env,
+    }),
+    /data contract/i,
+  );
+  assert.equal(calls.some(args =>
+    args.includes('update-alias') ||
+    args.includes('put-function-concurrency') ||
+    (args[0] === 's3' && ['cp', 'sync'].includes(args[1]))
+  ), false);
+});
+
+test('manual rollback accepts only a receipt and artifact on the current data contract', async () => {
+  const { recordPublishedRelease, restoreRelease } = await load();
+  const artifact = await releaseArtifact({ backendDataContractVersion: 1 });
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-receipt-'));
+  const deploymentSha = 'b'.repeat(40);
+  const codeSha256 = createHash('sha256').update('zip-bytes').digest('base64');
+  const calls = [];
+  const env = { AWS_REGION: 'us-east-1' };
+  const aws = deploymentAws({
+    aliasVersion: '12', stackVersion: '12', codeSha256, calls,
+    backendDataContractVersion: 1,
+  });
+
+  await recordPublishedRelease({
+    stage: 'prod', artifact, directory, deploymentSha, aws, env,
+  });
+  const receiptPath = path.join(directory, 'deployment-receipt.json');
+  const receipt = JSON.parse(await readFile(receiptPath, 'utf8'));
+  assert.equal(receipt.backendDataContractVersion, 1);
+
+  await restoreRelease({
+    stage: 'prod', artifact, receipt: receiptPath, deploymentSha, aws, env,
+    wait: async () => {},
+  });
+  assert.equal(calls.some(args => args.includes('update-alias')), true);
+
+  await writeFile(receiptPath, JSON.stringify({
+    ...receipt,
+    backendDataContractVersion: 0,
+  }));
+  const callsBeforeMismatch = calls.length;
+  await assert.rejects(
+    restoreRelease({
+      stage: 'prod', artifact, receipt: receiptPath, deploymentSha, aws, env,
+      wait: async () => {},
+    }),
+    /data contract/i,
+  );
+  assert.equal(calls.slice(callsBeforeMismatch).some(args =>
+    args.includes('update-alias') || args.includes('put-function-concurrency')
+  ), false);
 });
 
 test('production rollback releases an orphaned zero-concurrency drain before restoring', async () => {
@@ -1019,7 +1332,7 @@ test('reconcile validates the stack version hash before publishing the frontend'
   assert.equal(calls.some(args => args.includes('update-alias')), false);
 });
 
-async function releaseArtifact() {
+async function releaseArtifact({ backendDataContractVersion } = {}) {
   const artifact = await mkdtemp(path.join(os.tmpdir(), 'pantry-release-'));
   const files = [
     ['backend/lambda.zip', 'zip-bytes'],
@@ -1033,6 +1346,9 @@ async function releaseArtifact() {
     schemaVersion: 1,
     sourceSha: 'a'.repeat(40),
     releaseId: 'a'.repeat(12),
+    ...(backendDataContractVersion === undefined
+      ? {}
+      : { backendDataContractVersion }),
     files: files.map(([name, contents]) => ({
       path: name,
       size: Buffer.byteLength(contents),
@@ -1065,7 +1381,11 @@ function drainMarker(overrides = {}) {
   };
 }
 
-function backendStack(version, releaseId = 'a'.repeat(12)) {
+function backendStack(
+  version,
+  releaseId = 'a'.repeat(12),
+  backendDataContractVersion,
+) {
   return { Stacks: [{
     StackStatus: 'UPDATE_COMPLETE',
     Outputs: [
@@ -1073,6 +1393,10 @@ function backendStack(version, releaseId = 'a'.repeat(12)) {
       { OutputKey: 'ServerlessBackendLiveAliasArn', OutputValue: 'arn:aws:lambda:us-east-1:123:function:despensalista-prod-backend-api:live' },
       { OutputKey: 'ServerlessBackendVersion', OutputValue: version },
       { OutputKey: 'DeploymentReleaseId', OutputValue: releaseId },
+      ...(backendDataContractVersion === undefined ? [] : [{
+        OutputKey: 'BackendDataContractVersion',
+        OutputValue: String(backendDataContractVersion),
+      }]),
       { OutputKey: 'WebBucketName', OutputValue: 'despensalista-prod-web' },
       { OutputKey: 'CloudFrontDistributionId', OutputValue: 'E123' },
     ],
@@ -1086,6 +1410,7 @@ function deploymentAws({
   calls = [],
   reservedConcurrency,
   concurrencyWriteFailures = 0,
+  backendDataContractVersion,
 }) {
   let currentReservedConcurrency = reservedConcurrency;
   let remainingConcurrencyWriteFailures = concurrencyWriteFailures;
@@ -1103,6 +1428,10 @@ function deploymentAws({
       { OutputKey: 'ServerlessBackendLiveAliasArn', OutputValue: 'arn:aws:lambda:us-east-1:123:function:despensalista-prod-backend-api:live' },
       { OutputKey: 'ServerlessBackendVersion', OutputValue: stackVersion },
       { OutputKey: 'DeploymentReleaseId', OutputValue: 'a'.repeat(12) },
+      ...(backendDataContractVersion === undefined ? [] : [{
+        OutputKey: 'BackendDataContractVersion',
+        OutputValue: String(backendDataContractVersion),
+      }]),
       { OutputKey: 'WebBucketName', OutputValue: 'despensalista-prod-web' },
       { OutputKey: 'CloudFrontDistributionId', OutputValue: 'E123' },
     ] }] };

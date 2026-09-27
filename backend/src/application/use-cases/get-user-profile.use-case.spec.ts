@@ -77,21 +77,24 @@ describe('GetUserProfileUseCase', () => {
     expect(userDeviceRepository.findByUserId).toHaveBeenCalled();
   });
 
-  it('does not persist a new device when the user already has 25', async () => {
-    const devices = Array.from({ length: 25 }, (_, index) =>
-      makeDevice(`device-${index}`),
-    );
+  it('delegates new-device capacity reservation to the repository', async () => {
     const { useCase, userDeviceRepository } = makeProfileTestContext({
-      devices,
+      devices: [makeDevice('another-device')],
+    });
+    userDeviceRepository.save.mockResolvedValue(null);
+
+    const profile = await useCase.execute('user-1', {
+      clientDeviceId: 'new-device',
     });
 
-    await useCase.execute('user-1', { clientDeviceId: 'new-device' });
-
-    expect(userDeviceRepository.findByUserId).toHaveBeenCalledWith(
+    expect(userDeviceRepository.save).toHaveBeenCalledWith(expect.anything());
+    expect(profile.knownDevices).toEqual([
+      expect.objectContaining({ current: false }),
+    ]);
+    expect(userDeviceRepository.findByUserId).not.toHaveBeenCalledWith(
       expect.anything(),
       25,
     );
-    expect(userDeviceRepository.save).not.toHaveBeenCalled();
   });
 
   it('still updates an existing device when the user already has 25', async () => {

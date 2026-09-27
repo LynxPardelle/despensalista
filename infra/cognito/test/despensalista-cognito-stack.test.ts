@@ -148,7 +148,7 @@ test('deployment OIDC trust is exact repository and environment, with no bootstr
   template.hasResourceProperties('AWS::Cognito::UserPool', { MfaConfiguration: 'ON' });
 });
 
-test('only production GitHub delivery can drain the exact backend and delete quota keys', () => {
+test('GitHub delivery drains only its exact backend and only production deletes quota keys', () => {
   const statementsFor = (stage: 'dev' | 'tst' | 'prod') => {
     const app = new cdk.App({ context: { stage } });
     const template = Template.fromStack(
@@ -168,8 +168,17 @@ test('only production GitHub delivery can drain the exact backend and delete quo
   };
 
   for (const stage of ['dev', 'tst'] as const) {
-    const serialized = JSON.stringify(statementsFor(stage));
-    assert.doesNotMatch(serialized, /lambda:PutFunctionConcurrency/);
+    const statements = statementsFor(stage);
+    const concurrency = statements.find((statement: any) =>
+      Array.isArray(statement.Action) &&
+      statement.Action.includes('lambda:PutFunctionConcurrency'),
+    );
+    assert.match(
+      JSON.stringify(concurrency.Resource),
+      new RegExp(`function:despensalista-${stage}-backend-api`),
+    );
+    assert.doesNotMatch(JSON.stringify(concurrency.Resource), /backend-api\*/);
+    const serialized = JSON.stringify(statements);
     assert.doesNotMatch(serialized, /PANTRY_QUOTA#/);
     assert.doesNotMatch(serialized, /deployment-drain/);
   }
@@ -393,16 +402,39 @@ test('CloudFormation execution may access only its stage origin secret', () => {
   }
 });
 
-test('runtime identity cleanup cannot enumerate Cognito users', () => {
+test('runtime identity cleanup can only resolve and administer tagged user pools', () => {
   const app = new cdk.App({ context: { stage: 'prod' } });
   const template = Template.fromStack(
     new DespensaListaCognitoStack(app, 'Cognito-prod-no-user-enumeration'),
   ).toJSON();
-  const policies = JSON.stringify(template.Resources);
-
-  assert.match(policies, /cognito-idp:AdminDeleteUser/);
-  assert.match(policies, /cognito-idp:AdminUserGlobalSignOut/);
-  assert.doesNotMatch(policies, /cognito-idp:ListUsers/);
+  const boundary = Object.values(template.Resources).find(
+    (resource: any) =>
+      resource.Type === 'AWS::IAM::ManagedPolicy' &&
+      resource.Properties.ManagedPolicyName ===
+        'despensalista-prod-runtime-boundary',
+  ) as any;
+  assert.ok(boundary);
+  const cognitoStatement = boundary.Properties.PolicyDocument.Statement.find(
+    (statement: any) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return actions.includes('cognito-idp:ListUsers');
+    },
+  );
+  assert.ok(cognitoStatement);
+  assert.deepEqual([...cognitoStatement.Action].sort(), [
+    'cognito-idp:AdminDeleteUser',
+    'cognito-idp:AdminUserGlobalSignOut',
+    'cognito-idp:ListUsers',
+  ]);
+  assert.match(JSON.stringify(cognitoStatement.Resource), /:userpool\/\*/);
+  assert.deepEqual(cognitoStatement.Condition, {
+    StringEquals: {
+      'aws:ResourceTag/Project': 'despensalista',
+      'aws:ResourceTag/Stage': 'prod',
+    },
+  });
 });
 
 test('production retains deploy assets needed by CloudFormation rollback', () => {

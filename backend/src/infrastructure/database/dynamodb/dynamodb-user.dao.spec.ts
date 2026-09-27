@@ -123,6 +123,10 @@ describe('DynamoDbUserDao account revocation', () => {
       email: 'owner@example.com',
       username: 'Owner',
       authSubjectIds: ['cognito-sub', 'linked-sub'],
+      authUsernamesBySubject: {
+        'cognito-sub': 'native-owner',
+        'linked-sub': 'Google_linked-owner',
+      },
       householdId: 'household-1',
       householdRole: 'editor',
     });
@@ -140,6 +144,10 @@ describe('DynamoDbUserDao account revocation', () => {
       email: 'owner@example.com',
       username: 'Owner',
       authSubjectIds: ['cognito-sub', 'linked-sub'],
+      authUsernamesBySubject: {
+        'cognito-sub': 'native-owner',
+        'linked-sub': 'Google_linked-owner',
+      },
       householdId: 'household-1',
       householdRole: 'editor',
       pantryDeletionToken: expect.any(String),
@@ -243,6 +251,9 @@ describe('DynamoDbUserDao account revocation', () => {
     );
     expect(claimed).toMatchObject({
       userId: 'local-id',
+      authUsernamesBySubject: {
+        'cognito-sub': 'native-owner',
+      },
       attempts: 0,
       leaseToken: expect.any(String),
     });
@@ -267,6 +278,18 @@ describe('DynamoDbUserDao account revocation', () => {
     const defer = send.mock.calls.at(-1)?.[0] as UpdateCommand;
     expect(defer.input.ConditionExpression).toBe('leaseToken = :leaseToken');
     expect(defer.input.UpdateExpression).toContain('REMOVE leaseToken');
+  });
+
+  it('hydrates a legacy deletion job without username references', async () => {
+    const legacy = deletionJobItem();
+    Reflect.deleteProperty(legacy, 'authUsernamesBySubject');
+    const send = jest.fn().mockResolvedValue({ Items: [legacy] });
+
+    await expect(
+      createDao(send).findPendingAccountDeletions(1),
+    ).resolves.toEqual([
+      expect.objectContaining({ authUsernamesBySubject: {} }),
+    ]);
   });
 
   it('continues past a page of leased jobs to claim later eligible work', async () => {
@@ -335,6 +358,10 @@ function user() {
     email: 'owner@example.com',
     username: 'Owner',
     authSubjectIds: ['cognito-sub', 'linked-sub'],
+    authUsernamesBySubject: {
+      'cognito-sub': 'native-owner',
+      'linked-sub': 'Google_linked-owner',
+    },
     status: UserAccountStatus.ACTIVE,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -351,6 +378,7 @@ function deletionJobItem() {
     email: 'owner@example.com',
     username: 'Owner',
     authSubjectIds: ['cognito-sub'],
+    authUsernamesBySubject: { 'cognito-sub': 'native-owner' },
     startedAt: '2026-09-26T00:00:00.000Z',
     nextAttemptAt: '2026-09-26T00:00:00.000Z',
     attempts: 0,

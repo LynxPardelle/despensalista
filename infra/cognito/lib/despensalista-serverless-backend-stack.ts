@@ -41,6 +41,8 @@ interface DespensaListaTables {
   users: dynamodb.Table;
 }
 
+const BACKEND_DATA_CONTRACT_VERSION = '1';
+
 export class DespensaListaServerlessBackendStack extends cdk.Stack {
   constructor(
     scope: Construct,
@@ -121,6 +123,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       ),
       environment: {
         NODE_ENV: 'production',
+        BACKEND_DATA_CONTRACT_VERSION,
         API_PREFIX: 'api',
         PERSISTENCE_PROVIDER: 'dynamodb',
         DYNAMODB_REGION: cdk.Aws.REGION,
@@ -160,6 +163,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         actions: [
           'cognito-idp:AdminDeleteUser',
           'cognito-idp:AdminUserGlobalSignOut',
+          'cognito-idp:ListUsers',
         ],
         resources: [
           this.formatArn({
@@ -420,6 +424,9 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'DeploymentReleaseId', { value: releaseId });
     new cdk.CfnOutput(this, 'PantryQuotaSchemaVersion', { value: '2' });
+    new cdk.CfnOutput(this, 'BackendDataContractVersion', {
+      value: BACKEND_DATA_CONTRACT_VERSION,
+    });
     new cdk.CfnOutput(this, 'DynamoDbUsersTable', {
       value: tables.users.tableName,
     });

@@ -16,6 +16,7 @@ export interface AccountDeletionJob extends AccountDeletionContext {
   email: string;
   username: string;
   authSubjectIds: string[];
+  authUsernamesBySubject: Record<string, string>;
   pantryDeletionToken: string;
   startedAt: Date;
   attempts?: number;

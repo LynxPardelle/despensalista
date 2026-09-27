@@ -21,8 +21,6 @@ export interface UserProfileDeviceContext {
   userAgent?: string;
 }
 
-const MAX_USER_DEVICES_PER_USER = 25;
-
 @Injectable()
 export class GetUserProfileUseCase {
   constructor(
@@ -99,16 +97,7 @@ export class GetUserProfileUseCase {
       return id;
     }
 
-    const existingDevices = await this.userDeviceRepository.findByUserId(
-      userId,
-      MAX_USER_DEVICES_PER_USER,
-    );
-
-    if (existingDevices.length >= MAX_USER_DEVICES_PER_USER) {
-      return undefined;
-    }
-
-    await this.userDeviceRepository.save(
+    const savedDevice = await this.userDeviceRepository.save(
       UserDevice.create({
         id,
         userId,
@@ -117,7 +106,7 @@ export class GetUserProfileUseCase {
       }),
     );
 
-    return id;
+    return savedDevice ? id : undefined;
   }
 
   private toKnownDevice(

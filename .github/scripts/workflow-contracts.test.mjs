@@ -63,11 +63,21 @@ test('deploy workflows serialize by stage and verify after deployment', async ()
     assert.ok(workflow.indexOf('deployment-state.mjs reconcile') < workflow.indexOf('Post-deploy smoke'));
     if (stage !== 'prod') {
       assert.match(workflow, new RegExp(`deployment-state\\.mjs activate ${stage} \\.release`));
+      assert.match(workflow, new RegExp(`deployment-state\\.mjs drain-writers ${stage} \\.rollback`));
+      assert.match(workflow, new RegExp(`deployment-state\\.mjs release-writers ${stage} \\.rollback`));
       assert.ok(
+        workflow.indexOf(`deployment-state.mjs drain-writers ${stage} .rollback`) <
+          workflow.indexOf('npx cdk deploy') &&
         workflow.indexOf(`deployment-state.mjs activate ${stage} .release`) <
-          workflow.indexOf(`deployment-state.mjs reconcile ${stage} .release`),
+          workflow.indexOf(`deployment-state.mjs reconcile ${stage} .release`) &&
+          workflow.indexOf(`deployment-state.mjs reconcile ${stage} .release`) <
+          workflow.indexOf(`deployment-state.mjs release-writers ${stage} .rollback`) &&
+          workflow.indexOf(`deployment-state.mjs release-writers ${stage} .rollback`) <
+          workflow.indexOf('Post-deploy smoke'),
       );
       assert.match(workflow, /steps\.activate\.outcome == 'failure'/);
+      assert.match(workflow, /steps\.drain\.outcome == 'failure'/);
+      assert.match(workflow, /steps\.release_writers\.outcome == 'failure'/);
     }
     assert.ok(workflow.indexOf('Record exact published deployment') < workflow.indexOf('Upload exact rollback receipt'));
     assert.match(workflow, /--change-set-name despensalista-(dev|tst|prod)-release/);
@@ -122,7 +132,7 @@ test('durably drains the old production Lambda before an all-at-once schema cuto
   );
   assert.ok(
     armDrain.indexOf('transitionProductionDrainMarker') <
-      armDrain.indexOf('drainProductionWriters'),
+      armDrain.indexOf('drainWriters'),
   );
   assert.match(deploymentState, /\/despensalista\/prod\/deployment-drain/);
   assert.match(prod, /deployment-state\.mjs recover-drain prod(?:\r?\n|$)/);

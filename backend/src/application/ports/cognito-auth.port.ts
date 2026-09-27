@@ -36,6 +36,7 @@ export interface CognitoTokenSet {
 
 export interface CognitoVerifiedClaims {
   sub: string;
+  cognitoUsername?: string;
   email?: string;
   emailVerified?: boolean;
   preferredUsername?: string;
@@ -61,6 +62,12 @@ export interface CognitoTokenVerifier {
 }
 
 export interface CognitoUserAdmin {
-  deleteUsersBySubjectIds(subjectIds: string[]): Promise<number>;
-  signOutUsersBySubjectIds(subjectIds: string[]): Promise<number>;
+  deleteUsersBySubjectIds(
+    subjectIds: string[],
+    authUsernamesBySubject?: Readonly<Record<string, string>>,
+  ): Promise<number>;
+  signOutUsersBySubjectIds(
+    subjectIds: string[],
+    authUsernamesBySubject?: Readonly<Record<string, string>>,
+  ): Promise<number>;
 }

@@ -548,8 +548,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
     return items.map((item) => this.toActivity(item));
   }
 
-  async deleteAccountHouseholdData(
-    householdId: string,
+  async deleteAccountHouseholdReferences(
     userId: string,
     email: string,
   ): Promise<void> {
@@ -564,9 +563,8 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
           TableName: this.tableName,
           ConsistentRead: true,
           FilterExpression:
-            'householdId = :household AND ((entityType = :activity AND (actorUserId = :user OR targetUserId = :user)) OR (entityType = :invite AND (invitedByUserId = :user OR invitedEmail = :email)) OR (entityType = :membership AND userId = :user))',
+            '(entityType = :activity AND (actorUserId = :user OR targetUserId = :user)) OR (entityType = :invite AND (invitedByUserId = :user OR invitedEmail = :email)) OR (entityType = :membership AND userId = :user)',
           ExpressionAttributeValues: {
-            ':household': householdId,
             ':activity': 'HOUSEHOLD_ACTIVITY',
             ':invite': 'HOUSEHOLD_INVITE',
             ':membership': 'HOUSEHOLD_MEMBERSHIP',
@@ -577,7 +575,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
         }),
       );
       const changes = (page.Items ?? []).map((item) =>
-        this.accountDeletionChange(item, householdId, userId, normalizedEmail),
+        this.accountDeletionChange(item, userId, normalizedEmail),
       );
       for (let offset = 0; offset < changes.length; offset += 100) {
         await this.dynamoDb.send(
@@ -588,8 +586,6 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       }
       cursor = page.LastEvaluatedKey;
     } while (cursor);
-
-    await this.deleteMembership(householdId, userId);
   }
 
   async beginHouseholdDeletion(
@@ -757,8 +753,15 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
         new ScanCommand({
           TableName: this.tableName,
           ConsistentRead: true,
-          FilterExpression: 'householdId = :household',
-          ExpressionAttributeValues: { ':household': householdId },
+          FilterExpression:
+            'householdId = :household AND entityType IN (:householdEntity, :membership, :invite, :activity)',
+          ExpressionAttributeValues: {
+            ':household': householdId,
+            ':householdEntity': 'HOUSEHOLD',
+            ':membership': 'HOUSEHOLD_MEMBERSHIP',
+            ':invite': 'HOUSEHOLD_INVITE',
+            ':activity': 'HOUSEHOLD_ACTIVITY',
+          },
           ...(cursor ? { ExclusiveStartKey: cursor } : {}),
         }),
       );
@@ -770,8 +773,15 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
             new DeleteCommand({
               TableName: this.tableName,
               Key: { pk: item.pk },
-              ConditionExpression: 'householdId = :household',
-              ExpressionAttributeValues: { ':household': householdId },
+              ConditionExpression:
+                'householdId = :household AND entityType IN (:householdEntity, :membership, :invite, :activity)',
+              ExpressionAttributeValues: {
+                ':household': householdId,
+                ':householdEntity': 'HOUSEHOLD',
+                ':membership': 'HOUSEHOLD_MEMBERSHIP',
+                ':invite': 'HOUSEHOLD_INVITE',
+                ':activity': 'HOUSEHOLD_ACTIVITY',
+              },
             }),
           );
         } catch (error) {
@@ -826,7 +836,6 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
 
   private accountDeletionChange(
     item: Record<string, unknown>,
-    householdId: string,
     userId: string,
     email: string,
   ): TransactItem {
@@ -837,11 +846,8 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
         Delete: {
           TableName: this.tableName,
           Key: { pk: item.pk },
-          ConditionExpression: 'householdId = :household AND userId = :user',
-          ExpressionAttributeValues: {
-            ':household': householdId,
-            ':user': userId,
-          },
+          ConditionExpression: 'userId = :user',
+          ExpressionAttributeValues: { ':user': userId },
         },
       };
     }
@@ -859,10 +865,8 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
           TableName: this.tableName,
           Key: { pk: item.pk },
           UpdateExpression: `SET ${updates.join(', ')}`,
-          ConditionExpression:
-            'householdId = :household AND (actorUserId = :user OR targetUserId = :user)',
+          ConditionExpression: 'actorUserId = :user OR targetUserId = :user',
           ExpressionAttributeValues: {
-            ':household': householdId,
             ':user': userId,
             ':anonymousUser': ANONYMIZED_USER_ID,
             ...(targetMatches ? { ':anonymousLabel': ANONYMIZED_LABEL } : {}),
@@ -879,9 +883,8 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
           Key: { pk: item.pk },
           UpdateExpression: `SET invitedEmail = :anonymousEmail, revokedAt = :now, updatedAt = :now, privacyRedacted = :redacted${inviterMatches ? ', invitedByUserId = :anonymousUser' : ''}`,
           ConditionExpression:
-            'householdId = :household AND (invitedByUserId = :user OR invitedEmail = :email)',
+            'invitedByUserId = :user OR invitedEmail = :email',
           ExpressionAttributeValues: {
-            ':household': householdId,
             ':user': userId,
             ':email': email,
             ':anonymousEmail': ANONYMIZED_EMAIL,

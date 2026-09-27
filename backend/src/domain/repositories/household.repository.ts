@@ -41,8 +41,7 @@ export interface HouseholdRepository {
     householdId: string,
     limit: number,
   ): Promise<HouseholdActivity[]>;
-  deleteAccountHouseholdData(
-    householdId: string,
+  deleteAccountHouseholdReferences(
     userId: string,
     email: string,
   ): Promise<void>;

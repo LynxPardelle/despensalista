@@ -92,9 +92,10 @@ describe('DeleteAccountUseCase', () => {
       deletedKnownDeviceCount: 2,
       deletedCognitoIdentityCount: 1,
     });
-    expect(cognitoUserAdmin.deleteUsersBySubjectIds).toHaveBeenCalledWith([
-      'auth-subject-1',
-    ]);
+    expect(cognitoUserAdmin.deleteUsersBySubjectIds).toHaveBeenCalledWith(
+      ['auth-subject-1'],
+      { 'auth-subject-1': 'native-user' },
+    );
     expect(deletePantryDataUseCase.execute).toHaveBeenCalledWith({
       userId: 'user-1',
       confirmationText: 'ELIMINAR',
@@ -121,6 +122,15 @@ describe('DeleteAccountUseCase', () => {
     );
     expect(householdRepository.deleteHouseholdCascade).toHaveBeenCalledWith(
       'household-1',
+    );
+    expect(
+      householdRepository.deleteAccountHouseholdReferences,
+    ).toHaveBeenCalledWith('user-1', 'chef@example.com');
+    expect(
+      householdRepository.deleteHouseholdCascade.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      householdRepository.deleteAccountHouseholdReferences.mock
+        .invocationCallOrder[0],
     );
     expect(userDeviceRepository.deleteByUserId).toHaveBeenCalledWith(
       UserId.fromString('user-1'),
@@ -161,8 +171,13 @@ describe('DeleteAccountUseCase', () => {
     );
   });
 
-  it('removes and anonymizes a non-owner membership before deleting the user', async () => {
-    const { useCase, householdRepository, userDao } = makeUseCase({
+  it('removes a non-owner membership before deleting the user', async () => {
+    const {
+      useCase,
+      householdRepository,
+      deleteAccountHouseholdReferences,
+      userDao,
+    } = makeUseCase({
       membership: makeMembership('user-1', 'editor'),
     });
 
@@ -171,25 +186,54 @@ describe('DeleteAccountUseCase', () => {
       confirmationText: 'ELIMINAR CUENTA',
     });
 
-    expect(householdRepository.deleteAccountHouseholdData).toHaveBeenCalledWith(
+    expect(householdRepository.deleteMembership).toHaveBeenCalledWith(
       'household-1',
+      'user-1',
+    );
+    expect(
+      householdRepository.deleteMembership.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      deleteAccountHouseholdReferences.mock.invocationCallOrder[0],
+    );
+    expect(
+      deleteAccountHouseholdReferences.mock.invocationCallOrder[0],
+    ).toBeLessThan(userDao.delete.mock.invocationCallOrder[0]);
+  });
+
+  it('scrubs former household references without a current membership', async () => {
+    const { useCase, deleteAccountHouseholdReferences, userDao } =
+      makeUseCase();
+
+    await useCase.execute({
+      userId: 'user-1',
+      confirmationText: 'ELIMINAR CUENTA',
+    });
+
+    expect(deleteAccountHouseholdReferences).toHaveBeenCalledWith(
       'user-1',
       'chef@example.com',
     );
     expect(
-      householdRepository.deleteAccountHouseholdData.mock
-        .invocationCallOrder[0],
+      deleteAccountHouseholdReferences.mock.invocationCallOrder[0],
     ).toBeLessThan(userDao.delete.mock.invocationCallOrder[0]);
-    expect(householdRepository.deleteMembership).not.toHaveBeenCalled();
   });
 
   it('resumes from the persisted snapshot after a partial Cognito failure', async () => {
-    const { useCase, userDao, cognitoUserAdmin } = makeUseCase();
+    const {
+      useCase,
+      userDao,
+      cognitoUserAdmin,
+      deleteAccountHouseholdReferences,
+    } = makeUseCase();
     const job = {
       userId: 'user-1',
       email: 'chef@example.com',
       username: 'chef',
       authSubjectIds: ['persisted-subject-1', 'persisted-subject-2'],
+      authUsernamesBySubject: {
+        'persisted-subject-1': 'native-persisted-user',
+        'persisted-subject-2': 'Google_persisted-user',
+      },
       startedAt: new Date('2026-09-26T00:00:00.000Z'),
       pantryDeletionToken: 'persisted-pantry-token',
     };
@@ -206,11 +250,14 @@ describe('DeleteAccountUseCase', () => {
     expect(cognitoUserAdmin.deleteUsersBySubjectIds).toHaveBeenNthCalledWith(
       1,
       job.authSubjectIds,
+      job.authUsernamesBySubject,
     );
     expect(cognitoUserAdmin.deleteUsersBySubjectIds).toHaveBeenNthCalledWith(
       2,
       job.authSubjectIds,
+      job.authUsernamesBySubject,
     );
+    expect(deleteAccountHouseholdReferences).toHaveBeenCalledTimes(2);
     expect(userDao.delete).toHaveBeenCalledWith(UserId.fromString('user-1'));
   });
 
@@ -257,6 +304,7 @@ function makeUseCase(
         email: 'chef@example.com',
         username: 'chef',
         authSubjectIds: ['auth-subject-1'],
+        authUsernamesBySubject: { 'auth-subject-1': 'native-user' },
         status: UserAccountStatus.ACTIVE,
         createdAt: new Date('2026-06-01T00:00:00.000Z'),
         updatedAt: new Date('2026-06-01T00:00:00.000Z'),
@@ -273,6 +321,7 @@ function makeUseCase(
           email: primitives.email,
           username: primitives.username,
           authSubjectIds: primitives.authSubjectIds ?? [],
+          authUsernamesBySubject: primitives.authUsernamesBySubject ?? {},
           householdId: context?.householdId,
           householdRole: context?.householdRole,
           startedAt: new Date('2026-09-26T00:00:00.000Z'),
@@ -286,6 +335,7 @@ function makeUseCase(
     ),
     token: 'lock-1',
   });
+  const deleteAccountHouseholdReferences = jest.fn();
   const householdRepository = {
     beginHouseholdDeletion,
     cancelHouseholdDeletion: jest.fn(),
@@ -297,7 +347,7 @@ function makeUseCase(
       .mockResolvedValue(options.members ?? []),
     deleteHouseholdCascade: jest.fn(),
     deleteMembership: jest.fn(),
-    deleteAccountHouseholdData: jest.fn(),
+    deleteAccountHouseholdReferences,
   } as unknown as jest.Mocked<HouseholdRepository>;
   const cognitoUserAdmin = {
     deleteUsersBySubjectIds: jest.fn().mockResolvedValue(1),
@@ -332,6 +382,7 @@ function makeUseCase(
     deletePantryDataUseCase,
     beginHouseholdDeletion,
     beginAccountDeletion,
+    deleteAccountHouseholdReferences,
   };
 }
 

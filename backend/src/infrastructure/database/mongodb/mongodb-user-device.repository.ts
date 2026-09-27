@@ -9,6 +9,13 @@ import { UserDeviceRepository } from '../../../domain/repositories/user-device.r
 import { UserId } from '../../../domain/value-objects/user-id.vo';
 import { UserDeviceDocument } from './schemas/user-device.schema';
 
+type UserDeviceReservation = {
+  _id: string;
+  count: number;
+};
+
+const MAX_USER_DEVICES_PER_USER = 25;
+
 @Injectable()
 export class MongoUserDeviceRepository implements UserDeviceRepository {
   constructor(
@@ -16,12 +23,15 @@ export class MongoUserDeviceRepository implements UserDeviceRepository {
     private readonly userDeviceModel: Model<UserDeviceDocument>,
   ) {}
 
-  async save(device: UserDevice): Promise<UserDevice> {
+  async save(device: UserDevice): Promise<UserDevice | null> {
     const primitives = device.toPrimitives();
     const session = await this.userDeviceModel.db.startSession();
     let savedDevice: UserDevicePrimitives | null = null;
+    let capacityReached = false;
     try {
       await session.withTransaction(async () => {
+        savedDevice = null;
+        capacityReached = false;
         const now = new Date();
         const account = await this.userDeviceModel.db
           .collection('users')
@@ -40,9 +50,50 @@ export class MongoUserDeviceRepository implements UserDeviceRepository {
         if (account.matchedCount !== 1) {
           throw new UnauthorizedException('Account deletion is in progress');
         }
+
+        const existing = await this.userDeviceModel
+          .findOne({ id: primitives.id, userId: primitives.userId })
+          .session(session)
+          .lean()
+          .exec();
+
+        if (!existing) {
+          let reservation = await this.reservations.findOne(
+            { _id: primitives.userId },
+            { session },
+          );
+
+          if (!reservation) {
+            const count = await this.userDeviceModel
+              .countDocuments({ userId: primitives.userId })
+              .session(session)
+              .exec();
+            reservation = { _id: primitives.userId, count };
+            await this.reservations.insertOne(reservation, { session });
+          }
+
+          if (reservation.count >= MAX_USER_DEVICES_PER_USER) {
+            capacityReached = true;
+            return;
+          }
+
+          const claimed = await this.reservations.updateOne(
+            {
+              _id: primitives.userId,
+              count: { $lt: MAX_USER_DEVICES_PER_USER },
+            },
+            { $inc: { count: 1 } },
+            { session },
+          );
+          if (claimed.matchedCount !== 1) {
+            capacityReached = true;
+            return;
+          }
+        }
+
         savedDevice = await this.userDeviceModel
           .findOneAndUpdate(
-            { id: primitives.id },
+            { id: primitives.id, userId: primitives.userId },
             { $set: primitives },
             { new: true, upsert: true, session },
           )
@@ -51,6 +102,10 @@ export class MongoUserDeviceRepository implements UserDeviceRepository {
       });
     } finally {
       await session.endSession();
+    }
+
+    if (capacityReached) {
+      return null;
     }
 
     if (!savedDevice) {
@@ -78,11 +133,32 @@ export class MongoUserDeviceRepository implements UserDeviceRepository {
   }
 
   async deleteByUserId(userId: UserId): Promise<number> {
-    const result = await this.userDeviceModel
-      .deleteMany({ userId: userId.toString() })
-      .exec();
+    const normalizedUserId = userId.toString();
+    const session = await this.userDeviceModel.db.startSession();
+    let deletedCount = 0;
+    try {
+      await session.withTransaction(async () => {
+        const result = await this.userDeviceModel
+          .deleteMany({ userId: normalizedUserId })
+          .session(session)
+          .exec();
+        deletedCount = result.deletedCount;
+        await this.reservations.deleteOne(
+          { _id: normalizedUserId },
+          { session },
+        );
+      });
+    } finally {
+      await session.endSession();
+    }
 
-    return result.deletedCount;
+    return deletedCount;
+  }
+
+  private get reservations() {
+    return this.userDeviceModel.db.collection<UserDeviceReservation>(
+      'user_device_reservations',
+    );
   }
 
   private toDomain(device: UserDevicePrimitives): UserDevice {

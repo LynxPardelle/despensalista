@@ -46,9 +46,13 @@ test('production Lambda does not trust X-Forwarded-For for rate-limit identity',
     backend.Properties.Environment.Variables.RATE_LIMIT_TRUST_PROXY,
     'false',
   );
+  assert.equal(
+    backend.Properties.Environment.Variables.BACKEND_DATA_CONTRACT_VERSION,
+    '1',
+  );
 });
 
-test('production infrastructure exposes idempotency headers and atomic DynamoDB IAM', () => {
+test('production infrastructure exposes idempotency headers and scoped data IAM', () => {
   productionTemplate.hasResourceProperties('AWS::ApiGatewayV2::Api', {
     CorsConfiguration: {
       AllowHeaders: [
@@ -62,12 +66,29 @@ test('production infrastructure exposes idempotency headers and atomic DynamoDB 
     },
   });
 
-  const policies = JSON.stringify(
-    productionTemplate.findResources('AWS::IAM::Policy'),
-  );
+  const policyResources = productionTemplate.findResources('AWS::IAM::Policy');
+  const policies = JSON.stringify(policyResources);
   assert.match(policies, /dynamodb:TransactWriteItems/);
   assert.match(policies, /cognito-idp:AdminDeleteUser/);
-  assert.doesNotMatch(policies, /cognito-idp:ListUsers/);
+  assert.match(policies, /cognito-idp:ListUsers/);
+  const cognitoStatement = Object.values(policyResources)
+    .flatMap((resource) => resource.Properties.PolicyDocument.Statement)
+    .find((statement) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return actions.includes('cognito-idp:ListUsers');
+    });
+  assert.ok(cognitoStatement);
+  assert.deepEqual([...cognitoStatement.Action].sort(), [
+    'cognito-idp:AdminDeleteUser',
+    'cognito-idp:AdminUserGlobalSignOut',
+    'cognito-idp:ListUsers',
+  ]);
+  assert.match(
+    JSON.stringify(cognitoStatement.Resource),
+    /userpool\/us-east-1_example/,
+  );
   for (const tableName of [
     'despensalista-prod-users',
     'despensalista-prod-products',
@@ -128,6 +149,7 @@ test('production publishes an aliased Lambda with all-at-once rollback controls'
   );
   assert.equal(deploymentGroup.Properties.AlarmConfiguration.Alarms.length, 1);
   productionTemplate.hasOutput('PantryQuotaSchemaVersion', { Value: '2' });
+  productionTemplate.hasOutput('BackendDataContractVersion', { Value: '1' });
   productionTemplate.hasOutput('DeploymentReleaseId', { Value: 'a'.repeat(12) });
 });
 

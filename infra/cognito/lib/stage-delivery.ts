@@ -84,7 +84,7 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
   // Neither application roles nor the deployment executor can alter this policy.
   const runtimeStatements = [
     scoped(['dynamodb:BatchGetItem', 'dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:BatchWriteItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:DescribeTable', 'dynamodb:ConditionCheckItem', 'dynamodb:TransactWriteItems'], [tableArn, `${tableArn}/index/*`]),
-    scoped(['cognito-idp:AdminDeleteUser', 'cognito-idp:AdminUserGlobalSignOut'], [userPoolArn], userPoolConditions),
+    scoped(['cognito-idp:AdminDeleteUser', 'cognito-idp:AdminUserGlobalSignOut', 'cognito-idp:ListUsers'], [userPoolArn], userPoolConditions),
     scoped(['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents', 'logs:PutRetentionPolicy', 'logs:DeleteRetentionPolicy', 'logs:DescribeLogStreams'], logResources),
     scoped(['logs:DescribeLogGroups', 'cloudwatch:DescribeAlarms'], ['*']),
     scoped(['s3:GetObject*', 's3:PutObject*', 's3:DeleteObject*', 's3:ListBucket*', 's3:GetBucketLocation'], [assetsArn, `${assetsArn}/*`, webArn, `${webArn}/*`]),
@@ -206,19 +206,19 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
   github.addToPolicy(scoped(['ssm:GetParameter'], [arn('ssm', 'parameter', `${project}/${stage}/cdk-bootstrap-version`)]));
   github.addToPolicy(scoped(['s3:GetObject*', 's3:PutObject', 's3:DeleteObject', 's3:ListBucket', 's3:GetBucketLocation'], [assetsArn, `${assetsArn}/*`, webArn, `${webArn}/*`]));
   github.addToPolicy(scoped(['lambda:GetAlias', 'lambda:UpdateAlias', 'lambda:ListVersionsByFunction', 'lambda:GetFunction', 'lambda:PublishVersion'], [functionArn]));
+  const backendFunctionArn = `arn:${stack.partition}:lambda:${stack.region}:${stack.account}:function:${prefix}-backend-api`;
+  github.addToPolicy(scoped([
+    'lambda:GetFunctionConcurrency',
+    'lambda:GetFunctionConfiguration',
+    'lambda:PutFunctionConcurrency',
+    'lambda:DeleteFunctionConcurrency',
+  ], [backendFunctionArn]));
   if (stage === 'prod') {
-    const backendFunctionArn = `arn:${stack.partition}:lambda:${stack.region}:${stack.account}:function:${prefix}-backend-api`;
     const usersTableArn = arn('dynamodb', 'table', `${prefix}-users`);
     github.addToPolicy(scoped([
       'ssm:GetParameter',
       'ssm:PutParameter',
     ], [arn('ssm', 'parameter', `${project}/prod/deployment-drain`)]));
-    github.addToPolicy(scoped([
-      'lambda:GetFunctionConcurrency',
-      'lambda:GetFunctionConfiguration',
-      'lambda:PutFunctionConcurrency',
-      'lambda:DeleteFunctionConcurrency',
-    ], [backendFunctionArn]));
     github.addToPolicy(scoped(['dynamodb:Scan'], [usersTableArn], {
       'ForAllValues:StringEquals': {
         'dynamodb:Attributes': ['pk', 'entityType', 'deleting'],

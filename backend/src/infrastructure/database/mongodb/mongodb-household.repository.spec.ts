@@ -229,6 +229,28 @@ describe('Mongo household atomic membership', () => {
     expect(await model.countDocuments({ householdId: household.id })).toBe(0);
   });
 
+  it('preserves the durable deletion job while cascading an owner household', async () => {
+    const { household } = await pendingInvite();
+    const deletionJobs = connection.collection<{
+      _id: string;
+      householdId: string;
+    }>('account_deletion_jobs');
+    await deletionJobs.insertOne({
+      _id: 'owner',
+      householdId: household.id,
+    });
+
+    try {
+      await repository.deleteHouseholdCascade(household.id);
+
+      await expect(deletionJobs.findOne({ _id: 'owner' })).resolves.toEqual(
+        expect.objectContaining({ householdId: household.id }),
+      );
+    } finally {
+      await deletionJobs.deleteOne({ _id: 'owner' });
+    }
+  });
+
   it('rejects a stale acceptance as soon as owner deletion closes the household', async () => {
     const { household, invite, membership } = await pendingInvite();
     await repository.saveInvite(invite);
@@ -330,13 +352,11 @@ describe('Mongo household atomic membership', () => {
       }),
     );
 
-    await repository.deleteAccountHouseholdData(
-      household.id,
+    await repository.deleteAccountHouseholdReferences(
       'invited',
       'invited@example.com',
     );
-    await repository.deleteAccountHouseholdData(
-      household.id,
+    await repository.deleteAccountHouseholdReferences(
       'invited',
       'invited@example.com',
     );
@@ -373,6 +393,83 @@ describe('Mongo household atomic membership', () => {
           targetLabel: 'Preserved label',
         }),
       ]),
+    );
+  });
+
+  it('scrubs former household references without a current membership', async () => {
+    const formerOwner = user('owner-a');
+    const formerHousehold = Household.create(formerOwner);
+    await repository.createHouseholdWithOwner(
+      formerHousehold,
+      formerHousehold.createOwnerMembership(formerOwner),
+    );
+    await repository.saveActivity(
+      HouseholdActivity.create({
+        householdId: formerHousehold.id,
+        actorUserId: 'owner-a',
+        targetUserId: 'invited',
+        targetLabel: 'Private label',
+        type: 'member_removed',
+      }),
+    );
+
+    const otherOwner = user('owner-b');
+    const otherHousehold = Household.create(otherOwner);
+    await repository.createHouseholdWithOwner(
+      otherHousehold,
+      otherHousehold.createOwnerMembership(otherOwner),
+    );
+    const now = new Date();
+    await repository.saveInvite(
+      HouseholdInvite.create({
+        householdId: otherHousehold.id,
+        invitedEmail: 'invited@example.com',
+        invitedByUserId: 'owner-b',
+        role: 'viewer',
+        tokenHash: 'd'.repeat(64),
+        createdAt: now,
+        expiresAt: new Date(now.getTime() + 60_000),
+      }),
+    );
+    expect(await repository.findMembershipByUserId('invited')).toBeNull();
+    await repository.deleteAccountHouseholdReferences(
+      'invited',
+      ' INVITED@example.com ',
+    );
+    await repository.deleteAccountHouseholdReferences(
+      'invited',
+      'invited@example.com',
+    );
+
+    expect(
+      await model
+        .findOne({
+          entityType: 'HOUSEHOLD_ACTIVITY',
+          householdId: formerHousehold.id,
+          type: 'member_removed',
+        })
+        .lean()
+        .exec(),
+    ).toEqual(
+      expect.objectContaining({
+        targetUserId: 'deleted-user',
+        targetLabel: 'Usuario eliminado',
+      }),
+    );
+    expect(
+      await model
+        .findOne({
+          entityType: 'HOUSEHOLD_INVITE',
+          householdId: otherHousehold.id,
+        })
+        .lean()
+        .exec(),
+    ).toEqual(
+      expect.objectContaining({
+        invitedEmail: 'deleted@example.invalid',
+        revokedAt: expect.any(Date),
+        privacyRedacted: true,
+      }),
     );
   });
 

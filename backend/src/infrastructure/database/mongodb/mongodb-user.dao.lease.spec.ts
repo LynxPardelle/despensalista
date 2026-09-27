@@ -25,10 +25,12 @@ describe('MongoUserDao account deletion leases', () => {
     } as unknown as Model<UserDocument>;
     const dao = new MongoUserDao(model);
 
-    await dao.claimPendingAccountDeletion(
-      new Date('2026-09-26T12:00:00.000Z'),
-      leaseExpiresAt,
-    );
+    await expect(
+      dao.claimPendingAccountDeletion(
+        new Date('2026-09-26T12:00:00.000Z'),
+        leaseExpiresAt,
+      ),
+    ).resolves.toMatchObject({ authUsernamesBySubject: {} });
 
     expect(findOneAndUpdate).toHaveBeenCalledWith(
       expect.any(Object),

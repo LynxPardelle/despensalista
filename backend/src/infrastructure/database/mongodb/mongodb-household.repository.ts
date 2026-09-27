@@ -381,8 +381,7 @@ export class MongoHouseholdRepository
     return records.map((record) => this.toActivity(record as ActivityRecord));
   }
 
-  async deleteAccountHouseholdData(
-    householdId: string,
+  async deleteAccountHouseholdReferences(
     userId: string,
     email: string,
   ): Promise<void> {
@@ -392,7 +391,6 @@ export class MongoHouseholdRepository
     while (true) {
       const records = await this.householdModel
         .find({
-          householdId,
           ...(lastPk ? { pk: { $gt: lastPk } } : {}),
           $or: [
             {
@@ -422,7 +420,6 @@ export class MongoHouseholdRepository
             records.map((record) =>
               this.accountDeletionChange(
                 record as unknown as Record<string, unknown>,
-                householdId,
                 userId,
                 normalizedEmail,
               ),
@@ -435,8 +432,6 @@ export class MongoHouseholdRepository
       }
       lastPk = records.at(-1)?.pk;
     }
-
-    await this.deleteMembership(householdId, userId);
   }
 
   async beginHouseholdDeletion(
@@ -617,7 +612,6 @@ export class MongoHouseholdRepository
 
   private accountDeletionChange(
     record: Record<string, unknown>,
-    householdId: string,
     userId: string,
     email: string,
   ) {
@@ -626,7 +620,7 @@ export class MongoHouseholdRepository
     if (record.entityType === 'HOUSEHOLD_MEMBERSHIP') {
       return {
         deleteOne: {
-          filter: { pk: record.pk, householdId, userId },
+          filter: { pk: record.pk, userId },
         },
       };
     }
@@ -636,7 +630,6 @@ export class MongoHouseholdRepository
         updateOne: {
           filter: {
             pk: record.pk,
-            householdId,
             $or: [{ actorUserId: userId }, { targetUserId: userId }],
           },
           update: {
@@ -660,7 +653,6 @@ export class MongoHouseholdRepository
         updateOne: {
           filter: {
             pk: record.pk,
-            householdId,
             $or: [{ invitedByUserId: userId }, { invitedEmail: email }],
           },
           update: {

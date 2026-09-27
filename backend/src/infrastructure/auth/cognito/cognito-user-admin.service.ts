@@ -4,6 +4,7 @@ import {
   AdminUserGlobalSignOutCommand,
   AdminDeleteUserCommand,
   CognitoIdentityProviderClient,
+  ListUsersCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { CognitoUserAdmin } from '../../../application/ports/cognito-auth.port';
 
@@ -17,20 +18,32 @@ export class CognitoUserAdminService implements CognitoUserAdmin {
     });
   }
 
-  async deleteUsersBySubjectIds(subjectIds: string[]): Promise<number> {
+  async deleteUsersBySubjectIds(
+    subjectIds: string[],
+    authUsernamesBySubject: Readonly<Record<string, string>> = {},
+  ): Promise<number> {
     if (this.configService.get<string>('COGNITO_ENABLED') !== 'true') {
       return 0;
     }
 
     const userPoolId = this.getUserPoolId();
+    const knownUsernames = this.normalizeUsernames(authUsernamesBySubject);
     let deletedCount = 0;
 
     for (const subjectId of this.normalizeSubjectIds(subjectIds)) {
+      const username =
+        knownUsernames[subjectId] ??
+        (await this.findUsernameBySubjectId(userPoolId, subjectId));
+
+      if (!username) {
+        continue;
+      }
+
       try {
         await this.client.send(
           new AdminDeleteUserCommand({
             UserPoolId: userPoolId,
-            Username: subjectId,
+            Username: username,
           }),
         );
       } catch (error) {
@@ -43,20 +56,32 @@ export class CognitoUserAdminService implements CognitoUserAdmin {
     return deletedCount;
   }
 
-  async signOutUsersBySubjectIds(subjectIds: string[]): Promise<number> {
+  async signOutUsersBySubjectIds(
+    subjectIds: string[],
+    authUsernamesBySubject: Readonly<Record<string, string>> = {},
+  ): Promise<number> {
     if (this.configService.get<string>('COGNITO_ENABLED') !== 'true') {
       return 0;
     }
 
     const userPoolId = this.getUserPoolId();
+    const knownUsernames = this.normalizeUsernames(authUsernamesBySubject);
     let signedOutCount = 0;
 
     for (const subjectId of this.normalizeSubjectIds(subjectIds)) {
+      const username =
+        knownUsernames[subjectId] ??
+        (await this.findUsernameBySubjectId(userPoolId, subjectId));
+
+      if (!username) {
+        continue;
+      }
+
       try {
         await this.client.send(
           new AdminUserGlobalSignOutCommand({
             UserPoolId: userPoolId,
-            Username: subjectId,
+            Username: username,
           }),
         );
       } catch (error) {
@@ -67,6 +92,21 @@ export class CognitoUserAdminService implements CognitoUserAdmin {
     }
 
     return signedOutCount;
+  }
+
+  private async findUsernameBySubjectId(
+    userPoolId: string,
+    subjectId: string,
+  ): Promise<string | undefined> {
+    const result = await this.client.send(
+      new ListUsersCommand({
+        UserPoolId: userPoolId,
+        Filter: `sub = "${escapeCognitoFilterValue(subjectId)}"`,
+        Limit: 1,
+      }),
+    );
+
+    return result.Users?.[0]?.Username;
   }
 
   private getUserPoolId(): string {
@@ -109,4 +149,24 @@ export class CognitoUserAdminService implements CognitoUserAdmin {
   private normalizeSubjectIds(subjectIds: string[]): string[] {
     return [...new Set(subjectIds.map((id) => id.trim()))].filter(Boolean);
   }
+
+  private normalizeUsernames(
+    authUsernamesBySubject: Readonly<Record<string, string>>,
+  ): Record<string, string> {
+    const normalized: [string, string][] = [];
+    for (const [subjectId, username] of Object.entries(
+      authUsernamesBySubject,
+    )) {
+      const normalizedSubjectId = subjectId.trim();
+      const normalizedUsername = username.trim();
+      if (normalizedSubjectId && normalizedUsername) {
+        normalized.push([normalizedSubjectId, normalizedUsername]);
+      }
+    }
+    return Object.fromEntries(normalized);
+  }
+}
+
+function escapeCognitoFilterValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }

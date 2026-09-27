@@ -220,7 +220,7 @@ describe('DynamoDbHouseholdRepository', () => {
     expect(dynamoDb.send).toHaveBeenCalledTimes(1);
   });
 
-  it('strongly deletes household data without deleting a reused membership key', async () => {
+  it('strongly deletes household data without deleting a reused membership key or durable deletion job', async () => {
     const indexed = {
       pk: 'HOUSEHOLD#household-1#MEMBER#user-1',
       entityType: 'HOUSEHOLD_MEMBERSHIP',
@@ -235,6 +235,16 @@ describe('DynamoDbHouseholdRepository', () => {
           if (command instanceof UpdateCommand) return {};
           if (command instanceof ScanCommand) {
             expect(command.input.ConsistentRead).toBe(true);
+            expect(command.input.FilterExpression).toBe(
+              'householdId = :household AND entityType IN (:householdEntity, :membership, :invite, :activity)',
+            );
+            expect(command.input.ExpressionAttributeValues).toEqual({
+              ':household': 'household-1',
+              ':householdEntity': 'HOUSEHOLD',
+              ':membership': 'HOUSEHOLD_MEMBERSHIP',
+              ':invite': 'HOUSEHOLD_INVITE',
+              ':activity': 'HOUSEHOLD_ACTIVITY',
+            });
             return { Items: [indexed] };
           }
           if (!(command instanceof DeleteCommand))
@@ -242,7 +252,7 @@ describe('DynamoDbHouseholdRepository', () => {
           deletedKeys.push(command.input.Key);
           if (command.input.Key?.pk === indexed.pk) {
             expect((command as DeleteCommand).input.ConditionExpression).toBe(
-              'householdId = :household',
+              'householdId = :household AND entityType IN (:householdEntity, :membership, :invite, :activity)',
             );
             throw Object.assign(new Error('membership moved'), {
               name: 'ConditionalCheckFailedException',
@@ -453,7 +463,6 @@ describe('DynamoDbHouseholdRepository', () => {
 
   it('anonymizes retained household history in paged transactional batches', async () => {
     const transactions: TransactWriteCommand[] = [];
-    const deletes: DeleteCommand[] = [];
     const send = jest.fn(async (command) => {
       if (command instanceof ScanCommand) {
         expect(command.input.ConsistentRead).toBe(true);
@@ -473,7 +482,7 @@ describe('DynamoDbHouseholdRepository', () => {
                 entityType: 'HOUSEHOLD_INVITE',
                 householdId: 'household-1',
                 invitedByUserId: 'other-user',
-                invitedEmail: 'USER@example.com',
+                invitedEmail: 'user@example.com',
               },
             ],
             LastEvaluatedKey: { pk: 'page-2' },
@@ -489,15 +498,17 @@ describe('DynamoDbHouseholdRepository', () => {
               targetUserId: 'user-1',
               targetLabel: 'Private label',
             },
+            {
+              pk: 'HOUSEHOLD_MEMBER_BY_USER#user-1',
+              entityType: 'HOUSEHOLD_MEMBERSHIP',
+              householdId: 'household-1',
+              userId: 'user-1',
+            },
           ],
         };
       }
       if (command instanceof TransactWriteCommand) {
         transactions.push(command);
-        return {};
-      }
-      if (command instanceof DeleteCommand) {
-        deletes.push(command);
         return {};
       }
       throw new Error('Unexpected command');
@@ -507,8 +518,7 @@ describe('DynamoDbHouseholdRepository', () => {
       makeConfigService(),
     );
 
-    await repository.deleteAccountHouseholdData(
-      'household-1',
+    await repository.deleteAccountHouseholdReferences(
       'user-1',
       'user@example.com',
     );
@@ -516,9 +526,73 @@ describe('DynamoDbHouseholdRepository', () => {
     expect(transactions).toHaveLength(2);
     expect(JSON.stringify(transactions)).toContain('deleted-user');
     expect(JSON.stringify(transactions)).toContain('Usuario eliminado');
-    expect(deletes[0]?.input.Key).toEqual({
-      pk: 'HOUSEHOLD_MEMBER_BY_USER#user-1',
+    expect(JSON.stringify(transactions)).toContain(
+      'HOUSEHOLD_MEMBER_BY_USER#user-1',
+    );
+  });
+
+  it('scrubs former household references without a current membership', async () => {
+    const transactions: TransactWriteCommand[] = [];
+    const send = jest.fn(async (command) => {
+      if (command instanceof ScanCommand) {
+        expect(command.input.FilterExpression).not.toContain('householdId');
+        expect(command.input.ExpressionAttributeValues).toMatchObject({
+          ':user': 'user-1',
+          ':email': 'user@example.com',
+        });
+        return {
+          Items: [
+            {
+              pk: 'HOUSEHOLD_ACTIVITY#former',
+              entityType: 'HOUSEHOLD_ACTIVITY',
+              householdId: 'former-household',
+              actorUserId: 'other-user',
+              targetUserId: 'user-1',
+              targetLabel: 'Private label',
+            },
+            {
+              pk: 'HOUSEHOLD_INVITE#other',
+              entityType: 'HOUSEHOLD_INVITE',
+              householdId: 'other-household',
+              invitedByUserId: 'other-user',
+              invitedEmail: 'user@example.com',
+            },
+          ],
+        };
+      }
+      if (command instanceof TransactWriteCommand) {
+        transactions.push(command);
+        return {};
+      }
+      throw new Error('Unexpected command');
     });
+    const repository = new DynamoDbHouseholdRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      makeConfigService(),
+    );
+
+    await repository.deleteAccountHouseholdReferences(
+      'user-1',
+      ' USER@example.com ',
+    );
+
+    expect(transactions).toHaveLength(1);
+    const writes = transactions[0].input.TransactItems ?? [];
+    expect(
+      writes.map((write) => write.Update?.Key?.pk ?? write.Delete?.Key?.pk),
+    ).toEqual(['HOUSEHOLD_ACTIVITY#former', 'HOUSEHOLD_INVITE#other']);
+    expect(
+      writes.map(
+        (write) =>
+          write.Update?.ConditionExpression ??
+          write.Delete?.ConditionExpression,
+      ),
+    ).toEqual([
+      'actorUserId = :user OR targetUserId = :user',
+      'invitedByUserId = :user OR invitedEmail = :email',
+    ]);
+    expect(JSON.stringify(writes)).toContain('Usuario eliminado');
+    expect(JSON.stringify(writes)).toContain('deleted@example.invalid');
   });
 
   it('checks that the household is open before every membership write', async () => {

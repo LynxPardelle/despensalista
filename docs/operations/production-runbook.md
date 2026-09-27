@@ -75,6 +75,47 @@ would update writers without its drain. The first production backend update must
 come from `Deploy Serverless Prod` after the effective deployment-role policy has
 been verified.
 
+Run these auth-only bootstraps from `infra/cognito`; the explicit URL/provider
+contexts are mandatory because the defaults do not preserve the production Google
+callback configuration:
+
+```powershell
+$env:NODE_USE_SYSTEM_CA = '1'
+npx cdk deploy despensalista-dev-cognito --require-approval never `
+  --context projectName=despensalista --context stage=dev --context awsRegion=us-east-1 `
+  --context controlPlaneBootstrap=true --context includeServerlessBackend=false `
+  --context removalPolicy=destroy --context deletionProtection=false `
+  --context domainPrefix=despensalista-dev-765932874577 `
+  --context appDomainName=dev.despensalista.lynxpardelle.com `
+  --context productionFrontendBaseUrl=https://dev.despensalista.lynxpardelle.com `
+  --context serverlessFrontendBaseUrl=https://dev.despensalista.lynxpardelle.com
+npx cdk deploy despensalista-tst-cognito --require-approval never `
+  --context projectName=despensalista --context stage=tst --context awsRegion=us-east-1 `
+  --context controlPlaneBootstrap=true --context includeServerlessBackend=false `
+  --context removalPolicy=destroy --context deletionProtection=false `
+  --context domainPrefix=despensalista-tst-765932874577 `
+  --context appDomainName=test.despensalista.lynxpardelle.com `
+  --context productionFrontendBaseUrl=https://test.despensalista.lynxpardelle.com `
+  --context serverlessFrontendBaseUrl=https://test.despensalista.lynxpardelle.com
+npx cdk deploy despensalista-prod-cognito --require-approval never `
+  --context projectName=despensalista --context stage=prod --context awsRegion=us-east-1 `
+  --context controlPlaneBootstrap=true --context includeServerlessBackend=false `
+  --context removalPolicy=retain --context deletionProtection=true `
+  --context domainPrefix=despensalista-prod-765932874577 `
+  --context appDomainName=despensalista.lynxpardelle.com `
+  --context productionFrontendBaseUrl=https://despensalista.lynxpardelle.com `
+  --context serverlessFrontendBaseUrl=https://despensalista.lynxpardelle.com `
+  --context externallyManagedSocialProviders=Google
+```
+
+After each command, inspect the effective
+`arn:aws:iam::765932874577:policy/despensalista-<stage>-runtime-boundary` default
+version and require `cognito-idp:ListUsers` to be allowed only for that stage's
+user-pool ARN. Also require each GitHub delivery role's concurrency actions to
+name only `despensalista-<stage>-backend-api`. Confirm the production client still
+has the three DespensaLista callback/logout URLs and `SupportedIdentityProviders`
+still contains `Google` before starting a release.
+
 ## Build once and promote
 
 1. Merge reviewed application changes into `dev`. `Deploy Serverless Dev` packages
@@ -134,17 +175,24 @@ prefix in the production CDK-assets bucket, then sets reserved concurrency to ze
 and waits the configured Lambda timeout plus five seconds. The previous version
 therefore has no in-flight writer while backend and frontend are reconciled.
 
+Dev and tst also capture their prior concurrency, set the backend to zero, wait
+for in-flight requests, deploy/activate/reconcile, and only then restore that exact
+concurrency before smoke. This prevents CloudFormation rollback from briefly
+serving a new persisted-data contract and then returning to an incompatible one.
+
 After CDK completes, the workflow validates the stack's exact `DeploymentReleaseId`
 and version hash and explicitly activates that version, including when a prior
 manual rollback left the alias behind an otherwise unchanged stack. It verifies
 the immutable artifact, overwrites and synchronizes the frontend, waits for the
 CloudFront invalidation, and only then marks the release verified. Before restoring
-the exact prior concurrency setting it persists an active `smoke_pending` journal.
-A successful smoke tombstones the SSM marker and deletes only its recorded recovery
-prefix. The marker itself is retained as an inactive cooldown record.
+the exact prior concurrency setting it persists an active `reopening` journal;
+after AWS confirms writers are open it advances to `smoke_pending`. A successful
+smoke tombstones the SSM marker and deletes only its recorded recovery prefix. The
+marker itself is retained as an inactive cooldown record.
 
 At the start of either deployment or manual rollback, an active `armed`, `verified`,
-`smoke_pending`, or `rollback` journal is recovered conservatively: writers are
+`reopening`, `smoke_pending`, or `rollback` journal is recovered conservatively:
+writers are
 drained, the recorded old alias and durable frontend snapshot are restored, the
 invalidation is awaited, and the captured concurrency is reinstated. Recovery is
 idempotent after interruption. An inactive prefix is cleaned before the next
@@ -198,6 +246,29 @@ rollback validates the unchanged stack output/hash and explicitly reactivates it
 exact alias version before reconciling the frontend. To roll forward to another
 already successful release, run the rollback workflow with that release's exact
 stage receipt; for a failed unpublished release, ship a reviewed release.
+
+The release manifest, backend stack, and deployment receipt carry
+`BackendDataContractVersion=1`. A manual rollback requires all three values to
+equal the currently deployed contract; a legacy manifest/receipt with no value is
+version `0` and is rejected after this cutover. Version 1 introduces durable
+account-deletion identity state and device-cap reservations. Once writers have
+opened on it, never restore a pre-version-1 Lambda: fix forward instead. The
+automatic restore captured by a failed publish remains valid only because writers
+stay drained until verification. Increment both the manifest constant and stack
+output before any future incompatible persisted-data change.
+
+If smoke fails after writers were confirmed open on a newer contract, automatic
+rollback intentionally refuses the downgrade and leaves the `reopening` or
+`smoke_pending` marker active. Inspect the new alias and logs, then accept the only
+safe recovery direction and clear the obsolete snapshot before dispatching the
+reviewed fix-forward release:
+
+```powershell
+node .github/scripts/deployment-state.mjs finalize-drain prod
+```
+
+`finalize-drain` refuses a `reopening` marker while reserved concurrency is still
+zero; in that case `recover-drain prod` can safely restore the drained baseline.
 
 ## Data recovery
 

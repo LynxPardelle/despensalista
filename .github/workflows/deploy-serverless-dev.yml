@@ -177,6 +177,10 @@ jobs:
       - name: Validate infrastructure against AWS
         run: npm --prefix infra/cognito run build
 
+      - name: Drain dev writers for the contract cutover
+        id: drain
+        run: node .github/scripts/deployment-state.mjs drain-writers dev .rollback
+
       - name: Deploy dev releaseId
         id: deploy
         working-directory: infra/cognito
@@ -210,6 +214,10 @@ jobs:
         id: reconcile
         run: node .github/scripts/deployment-state.mjs reconcile dev .release
 
+      - name: Restore dev writer concurrency
+        id: release_writers
+        run: node .github/scripts/deployment-state.mjs release-writers dev .rollback
+
       - name: Post-deploy smoke
         id: smoke
         env:
@@ -217,7 +225,7 @@ jobs:
         run: node .github/scripts/smoke.mjs --base-url "https://$APP_DOMAIN_NAME" --attempts 18 --delay-ms 10000
 
       - name: Restore previous frontend and backend after failed publish or smoke
-        if: failure() && (steps.deploy.outcome == 'failure' || steps.activate.outcome == 'failure' || steps.reconcile.outcome == 'failure' || steps.smoke.outcome == 'failure')
+        if: failure() && (steps.drain.outcome == 'failure' || steps.deploy.outcome == 'failure' || steps.activate.outcome == 'failure' || steps.reconcile.outcome == 'failure' || steps.release_writers.outcome == 'failure' || steps.smoke.outcome == 'failure')
         run: node .github/scripts/deployment-state.mjs restore dev .rollback
 
       - name: Record exact published deployment

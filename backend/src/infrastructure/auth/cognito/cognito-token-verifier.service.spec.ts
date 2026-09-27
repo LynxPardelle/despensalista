@@ -30,6 +30,7 @@ describe('CognitoTokenVerifierService', () => {
     const createVerifier = jest.spyOn(CognitoJwtVerifier, 'create');
     const verify = jest.fn().mockResolvedValue({
       sub: 'cognito-sub',
+      username: 'cognito-access-user',
       email: 'chef@example.com',
       preferred_username: 'chef',
       auth_time: 1812499200,
@@ -47,6 +48,7 @@ describe('CognitoTokenVerifierService', () => {
     expect(verify).toHaveBeenCalledWith('access-token');
     expect(claims).toEqual({
       sub: 'cognito-sub',
+      cognitoUsername: 'cognito-access-user',
       email: 'chef@example.com',
       emailVerified: undefined,
       preferredUsername: 'chef',
@@ -60,6 +62,8 @@ describe('CognitoTokenVerifierService', () => {
     const createVerifier = jest.spyOn(CognitoJwtVerifier, 'create');
     const verify = jest.fn().mockResolvedValue({
       sub: 'cognito-sub',
+      'cognito:username': 'Google_authoritative-user',
+      username: 'ignored-access-user',
       nonce: 'nonce-value',
       name: 'Chef',
     });
@@ -75,5 +79,6 @@ describe('CognitoTokenVerifierService', () => {
     });
     expect(verify).toHaveBeenCalledWith('id-token');
     expect(claims.nonce).toBe('nonce-value');
+    expect(claims.cognitoUsername).toBe('Google_authoritative-user');
   });
 });

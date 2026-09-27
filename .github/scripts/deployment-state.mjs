@@ -46,6 +46,7 @@ function stackDeploymentState(stage, stack) {
     alias: outputs.ServerlessBackendLiveAliasArn?.split(':').at(-1),
     deploymentVersion: outputs.ServerlessBackendVersion,
     deploymentReleaseId: outputs.DeploymentReleaseId,
+    backendDataContractVersion: stackBackendDataContractVersion(stack),
     bucket: outputs.WebBucketName,
     distribution: outputs.CloudFrontDistributionId,
   };
@@ -68,11 +69,22 @@ export async function captureDeployment({ stage, directory, aws = awsCli }) {
     ? aws(['lambda', 'get-alias', '--function-name', state.functionName, '--name', state.alias]).FunctionVersion
     : publishOrReuseLatestVersion(state.functionName, aws);
   state.alias ??= 'live';
-  state.reservedConcurrency = stage === 'prod'
-    ? normalizedReservedConcurrency(aws([
-        'lambda', 'get-function-concurrency', '--function-name', state.functionName,
-      ]).ReservedConcurrentExecutions)
-    : null;
+  const aliasContract = versionBackendDataContractVersion(
+    state.functionName,
+    state.version,
+    aws,
+  );
+  if (
+    state.version === state.deploymentVersion &&
+    aliasContract !== state.backendDataContractVersion
+  ) {
+    throw new Error('Published Lambda data contract does not match the deployed stack');
+  }
+  state.backendDataContractVersion = aliasContract;
+  state.reservedConcurrency = normalizedReservedConcurrency(aws([
+    'lambda', 'get-function-concurrency', '--function-name', state.functionName,
+  ]).ReservedConcurrentExecutions);
+  state.writersDrained = false;
   aws(['s3', 'sync', `s3://${state.bucket}/`, path.join(directory, 'frontend'), '--only-show-errors']);
   await writeFile(path.join(directory, 'state.json'), JSON.stringify(state));
 }
@@ -109,7 +121,7 @@ export async function armProductionDrain({
     '--delete', '--cache-control', 'no-cache', '--only-show-errors',
   ]);
   const marker = transitionProductionDrainMarker(pending, 'armed', aws);
-  await drainProductionWriters(marker.functionName, aws, wait);
+  await drainWriters(marker.functionName, aws, wait);
   return marker;
 }
 
@@ -124,7 +136,7 @@ export async function activateProductionRelease({
   if (marker.phase !== 'armed') {
     throw new Error(`Production release cannot activate phase ${marker.phase}`);
   }
-  await drainProductionWriters(marker.functionName, aws, wait);
+  await drainWriters(marker.functionName, aws, wait);
   const response = aws([
     'cloudformation', 'describe-stacks',
     '--stack-name', 'despensalista-prod-serverless-backend',
@@ -150,6 +162,7 @@ export async function activatePublishedRelease({ stage, artifact, aws = awsCli }
   const stack = backendStack(stage, aws);
   const state = stackDeploymentState(stage, stack);
   assertDeploymentReleaseId(state, manifest);
+  assertArtifactContractMatchesState(manifest, state);
   if (!state.alias || !/^\d+$/.test(state.deploymentVersion ?? '')) {
     throw new Error('Published deployment has no exact Lambda alias/version output');
   }
@@ -175,8 +188,45 @@ export async function releaseProductionDrain({ stage, aws = awsCli }) {
   if (marker.phase !== 'verified') {
     throw new Error('Production writer drain has not verified the deployed release');
   }
-  const smokePending = transitionProductionDrainMarker(marker, 'smoke_pending', aws);
-  await restoreProductionConcurrency(smokePending, aws);
+  const reopening = transitionProductionDrainMarker(marker, 'reopening', aws);
+  await restoreDeploymentConcurrency(reopening, aws);
+  transitionProductionDrainMarker(reopening, 'smoke_pending', aws);
+  return true;
+}
+
+export async function drainCapturedWriters({
+  stage,
+  directory,
+  aws = awsCli,
+  wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
+}) {
+  if (!['dev', 'tst'].includes(stage)) {
+    throw new Error('Captured writer drain is only supported for dev and tst');
+  }
+  const statePath = path.join(directory, 'state.json');
+  const state = JSON.parse(await readFile(statePath, 'utf8'));
+  if (state.stage !== stage) throw new Error('Writer drain stage does not match snapshot');
+  if (state.unavailable) return false;
+  await drainWriters(state.functionName, aws, wait);
+  await writeFile(statePath, JSON.stringify({ ...state, writersDrained: true }));
+  return true;
+}
+
+export async function releaseCapturedWriters({
+  stage,
+  directory,
+  aws = awsCli,
+}) {
+  if (!['dev', 'tst'].includes(stage)) {
+    throw new Error('Captured writer release is only supported for dev and tst');
+  }
+  const statePath = path.join(directory, 'state.json');
+  const state = JSON.parse(await readFile(statePath, 'utf8'));
+  if (state.stage !== stage) throw new Error('Writer release stage does not match snapshot');
+  if (state.unavailable) return false;
+  if (state.writersDrained !== true) throw new Error('Stage writers were not drained');
+  await restoreDeploymentConcurrency(state, aws);
+  await writeFile(statePath, JSON.stringify({ ...state, writersDrained: false }));
   return true;
 }
 
@@ -185,8 +235,17 @@ export function finalizeProductionDrain({ stage, aws = awsCli }) {
   const marker = readProductionDrainMarker(aws, { includeInactive: true });
   if (!marker) return false;
   if (marker.active) {
-    if (marker.phase !== 'smoke_pending') {
+    if (!['reopening', 'smoke_pending'].includes(marker.phase)) {
       throw new Error(`Production drain cannot finalize phase ${marker.phase}`);
+    }
+    if (marker.phase === 'reopening') {
+      const reserved = aws([
+        'lambda', 'get-function-concurrency',
+        '--function-name', marker.functionName,
+      ]).ReservedConcurrentExecutions;
+      if (reserved === 0) {
+        throw new Error('Production Lambda remains drained; recover instead');
+      }
     }
     deactivateProductionDrainMarker(marker, aws);
   }
@@ -202,6 +261,29 @@ export async function recoverProductionDrain({
   if (stage !== 'prod') throw new Error('Writer drain is production-only');
   const marker = readProductionDrainMarker(aws);
   if (!marker) return false;
+  if (marker.phase !== 'rollback') {
+    const stack = await waitForStableBackendStack({
+      stage,
+      aws,
+      wait,
+      acceptTerminalFailure: true,
+    });
+    const currentContract = stackBackendDataContractVersion(stack);
+    if (currentContract !== marker.backendDataContractVersion) {
+      const reserved = aws([
+        'lambda', 'get-function-concurrency',
+        '--function-name', marker.functionName,
+      ]).ReservedConcurrentExecutions;
+      if (
+        !['armed', 'verified', 'reopening'].includes(marker.phase) ||
+        reserved !== 0
+      ) {
+        throw new Error(
+          'Automatic rollback cannot cross the active backend data contract; fix forward',
+        );
+      }
+    }
+  }
   const rollback = marker.phase === 'rollback'
     ? marker
     : transitionProductionDrainMarker(marker, 'rollback', aws);
@@ -238,7 +320,39 @@ export async function restoreDeployment({
   const state = JSON.parse(await readFile(path.join(directory, 'state.json'), 'utf8'));
   if (state.stage !== stage) throw new Error('Rollback stage does not match snapshot');
   if (state.unavailable) throw new Error('No previous published deployment exists; inspect failed initial deployment');
+  const baselineContract = normalizeBackendDataContractVersion(
+    state.backendDataContractVersion,
+  );
+  const current = stackState(stage, aws);
+  if (baselineContract !== current.backendDataContractVersion) {
+    const marker = stage === 'prod' ? readProductionDrainMarker(aws) : null;
+    const functionName = marker?.functionName ?? state.functionName;
+    const reserved = functionName
+      ? aws([
+          'lambda', 'get-function-concurrency',
+          '--function-name', functionName,
+        ]).ReservedConcurrentExecutions
+      : undefined;
+    const safeProductionRollback =
+      marker?.backendDataContractVersion === baselineContract &&
+      ['armed', 'verified', 'reopening'].includes(marker.phase) &&
+      reserved === 0;
+    const safeNonProductionRollback =
+      stage !== 'prod' && state.writersDrained === true && reserved === 0;
+    if (!safeProductionRollback && !safeNonProductionRollback) {
+      throw new Error(
+        'Automatic rollback cannot cross the active backend data contract; fix forward',
+      );
+    }
+  }
   await restore(state, path.join(directory, 'frontend'), aws, wait);
+  if (stage !== 'prod') {
+    await restoreDeploymentConcurrency(state, aws);
+    await writeFile(
+      path.join(directory, 'state.json'),
+      JSON.stringify({ ...state, writersDrained: false }),
+    );
+  }
 }
 
 export async function verifyPublishedRelease({ stage, artifact, aws = awsCli }) {
@@ -246,6 +360,7 @@ export async function verifyPublishedRelease({ stage, artifact, aws = awsCli }) 
   releaseDigests(manifest);
   const state = stackState(stage, aws);
   assertDeploymentReleaseId(state, manifest);
+  assertArtifactContractMatchesState(manifest, state);
   const version = await assertPublishedBackend(state, artifact, aws);
   return { ...state, version };
 }
@@ -323,6 +438,7 @@ export async function recordPublishedRelease({
   const manifest = await verifyReleaseArtifact({ artifact });
   const state = stackState(stage, aws);
   assertDeploymentReleaseId(state, manifest);
+  assertArtifactContractMatchesState(manifest, state);
   const version = await assertPublishedBackend(state, artifact, aws);
   const identity = deploymentIdentity(aws, env);
   const digests = releaseDigests(manifest);
@@ -334,6 +450,7 @@ export async function recordPublishedRelease({
     deploymentSha: deploymentSha.toLowerCase(),
     sourceSha: manifest.sourceSha,
     releaseId: manifest.releaseId,
+    backendDataContractVersion: state.backendDataContractVersion,
     backendSha256: digests.backendSha256,
     frontendManifestSha256: digests.frontendManifestSha256,
     functionName: state.functionName,
@@ -365,6 +482,18 @@ export async function restoreRelease({
   const manifest = await verifyReleaseArtifact({ artifact });
   const recorded = JSON.parse(await readFile(receipt, 'utf8'));
   const state = stackState(stage, aws);
+  const artifactContract = normalizeBackendDataContractVersion(
+    manifest.backendDataContractVersion,
+  );
+  const receiptContract = normalizeBackendDataContractVersion(
+    recorded.backendDataContractVersion,
+  );
+  if (receiptContract !== artifactContract) {
+    throw new Error('Deployment receipt data contract does not match the release artifact');
+  }
+  if (receiptContract !== state.backendDataContractVersion) {
+    throw new Error('Rollback data contract does not match the active backend contract');
+  }
   const identity = deploymentIdentity(aws, env);
   const digests = releaseDigests(manifest);
   const expected = {
@@ -434,8 +563,7 @@ function publishOrReuseLatestVersion(functionName, aws) {
   }
 }
 
-async function restoreProductionConcurrency(state, aws) {
-  if (state.stage !== 'prod') return;
+async function restoreDeploymentConcurrency(state, aws) {
   const desired = normalizedReservedConcurrency(state.reservedConcurrency);
   let lastError;
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -467,13 +595,51 @@ async function restoreProductionConcurrency(state, aws) {
       await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 100));
     }
   }
-  throw new Error('Production Lambda remains drained after rollback recovery', {
+  throw new Error(`${state.stage} Lambda remains drained after recovery`, {
     cause: lastError,
   });
 }
 
 function normalizedReservedConcurrency(value) {
   return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function normalizeBackendDataContractVersion(value) {
+  if (value === undefined || value === null || value === '') return 0;
+  const normalized = typeof value === 'string' && /^\d+$/.test(value)
+    ? Number(value)
+    : value;
+  if (!Number.isSafeInteger(normalized) || normalized < 0) {
+    throw new Error('Invalid backend data contract version');
+  }
+  return normalized;
+}
+
+function stackBackendDataContractVersion(stack) {
+  const output = (stack.Outputs ?? []).find(
+    item => item.OutputKey === 'BackendDataContractVersion',
+  )?.OutputValue;
+  return normalizeBackendDataContractVersion(output);
+}
+
+function versionBackendDataContractVersion(functionName, version, aws) {
+  const configuration = aws([
+    'lambda', 'get-function-configuration',
+    '--function-name', functionName,
+    '--qualifier', version,
+  ]);
+  return normalizeBackendDataContractVersion(
+    configuration.Environment?.Variables?.BACKEND_DATA_CONTRACT_VERSION,
+  );
+}
+
+function assertArtifactContractMatchesState(manifest, state) {
+  const artifactContract = normalizeBackendDataContractVersion(
+    manifest.backendDataContractVersion,
+  );
+  if (artifactContract !== state.backendDataContractVersion) {
+    throw new Error('Release artifact data contract does not match the deployed stack');
+  }
 }
 
 function deliveryAssetsBucket(stage, aws) {
@@ -528,13 +694,16 @@ function rollbackStateMatches(marker, state) {
     marker.deploymentReleaseId === (/^[0-9a-f]{12}$/.test(state.deploymentReleaseId ?? '')
       ? state.deploymentReleaseId
       : null) &&
+    marker.backendDataContractVersion === normalizeBackendDataContractVersion(
+      state.backendDataContractVersion,
+    ) &&
     marker.reservedConcurrency === normalizedReservedConcurrency(state.reservedConcurrency) &&
     marker.webBucket === state.bucket &&
     marker.distribution === state.distribution;
 }
 
 async function recoverProductionRollback(marker, aws, wait) {
-  await drainProductionWriters(marker.functionName, aws, wait);
+  await drainWriters(marker.functionName, aws, wait);
   const stack = await waitForStableBackendStack({
     stage: marker.stage,
     aws,
@@ -547,7 +716,7 @@ async function recoverProductionRollback(marker, aws, wait) {
       `Backend stack remains ${stack.StackStatus}; frontend restored but writers remain drained`,
     );
   }
-  await restoreProductionConcurrency(marker, aws);
+  await restoreDeploymentConcurrency(marker, aws);
   deactivateProductionDrainMarker(marker, aws);
   cleanupProductionRecovery(marker, aws);
 }
@@ -612,6 +781,9 @@ function productionDrainMarker(
   const verifiedVersion = /^\d+$/.test(state.verifiedVersion ?? '')
     ? state.verifiedVersion
     : null;
+  const backendDataContractVersion = normalizeBackendDataContractVersion(
+    state.backendDataContractVersion,
+  );
   if (
     state.stage !== 'prod' ||
     state.unavailable ||
@@ -622,7 +794,7 @@ function productionDrainMarker(
     !Object.hasOwn(state, 'reservedConcurrency') ||
     (state.reservedConcurrency !== null &&
       (!Number.isInteger(state.reservedConcurrency) || state.reservedConcurrency <= 0)) ||
-    !['armed', 'verified', 'smoke_pending', 'rollback'].includes(phase) ||
+    !['armed', 'verified', 'reopening', 'smoke_pending', 'rollback'].includes(phase) ||
     !webBucket ||
     !state.distribution ||
     !state.recoveryBucket ||
@@ -631,7 +803,8 @@ function productionDrainMarker(
     (phase !== 'rollback' &&
       (!/^[0-9a-f]{12}$/.test(releaseId ?? '') ||
         !/^[A-Za-z0-9+/]{43}=$/.test(codeSha256 ?? ''))) ||
-    ((phase === 'verified' || phase === 'smoke_pending') && verifiedVersion === null)
+    ((phase === 'verified' || phase === 'reopening' || phase === 'smoke_pending') &&
+      verifiedVersion === null)
   ) {
     throw new Error('Invalid production drain snapshot');
   }
@@ -650,6 +823,7 @@ function productionDrainMarker(
     deploymentReleaseId: /^[0-9a-f]{12}$/.test(state.deploymentReleaseId ?? '')
       ? state.deploymentReleaseId
       : null,
+    backendDataContractVersion,
     reservedConcurrency: normalizedReservedConcurrency(state.reservedConcurrency),
     releaseId,
     codeSha256,
@@ -824,7 +998,7 @@ function activateExactDeployment({
   return forward;
 }
 
-async function drainProductionWriters(functionName, aws, wait) {
+async function drainWriters(functionName, aws, wait) {
   aws([
     'lambda', 'put-function-concurrency',
     '--function-name', functionName,
@@ -835,7 +1009,7 @@ async function drainProductionWriters(functionName, aws, wait) {
     '--function-name', functionName,
   ]).Timeout;
   if (!Number.isInteger(timeout) || timeout < 1 || timeout > 900) {
-    throw new Error('Production Lambda timeout is invalid');
+    throw new Error('Lambda timeout is invalid');
   }
   await wait((timeout + 5) * 1000);
 }
@@ -917,6 +1091,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     await captureDeployment({ stage, directory: location });
   } else if (command === 'restore' && location) {
     await restoreDeployment({ stage, directory: location });
+  } else if (command === 'drain-writers' && location) {
+    await drainCapturedWriters({ stage, directory: location });
+  } else if (command === 'release-writers' && location) {
+    await releaseCapturedWriters({ stage, directory: location });
   } else if (command === 'arm-drain' && location && extraLocation) {
     await armProductionDrain({
       stage,
@@ -944,6 +1122,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   } else if (command === 'release' && location && extraLocation && deploymentSha) {
     await restoreRelease({ stage, artifact: location, receipt: extraLocation, deploymentSha });
   } else {
-    throw new Error('Usage: deployment-state.mjs <capture|restore> <stage> <directory> | arm-drain prod <rollback-directory> <artifact> | <activate-drain|release-drain|recover-drain|mark-drain-verified|finalize-drain> prod | <activate|verify|reconcile> <stage> <artifact> | <record|release> <stage> <artifact> <receipt-path-or-directory> <deployment-sha>');
+    throw new Error('Usage: deployment-state.mjs <capture|restore|drain-writers|release-writers> <stage> <directory> | arm-drain prod <rollback-directory> <artifact> | <activate-drain|release-drain|recover-drain|mark-drain-verified|finalize-drain> prod | <activate|verify|reconcile> <stage> <artifact> | <record|release> <stage> <artifact> <receipt-path-or-directory> <deployment-sha>');
   }
 }

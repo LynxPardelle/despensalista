@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 const MANIFEST_NAME = 'release-manifest.json';
 const PAYLOAD_DIRECTORY = 'payload';
 const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/i;
+const BACKEND_DATA_CONTRACT_VERSION = 1;
 
 const DEPLOY_ALLOWLIST = [
   ['backend/lambda.zip', 'backend/lambda.zip'],
@@ -51,6 +52,7 @@ export async function createReleaseArtifact({ root, output, sourceSha }) {
     schemaVersion: 1,
     sourceSha: sourceSha.toLowerCase(),
     releaseId: sourceSha.slice(0, 12).toLowerCase(),
+    backendDataContractVersion: BACKEND_DATA_CONTRACT_VERSION,
     files,
   };
   await writeFile(
@@ -76,6 +78,9 @@ export async function verifyReleaseArtifact({ artifact, sourceSha }) {
     manifest.schemaVersion !== 1 ||
     !SOURCE_SHA_PATTERN.test(manifest.sourceSha ?? '') ||
     manifest.releaseId !== manifest.sourceSha.slice(0, 12).toLowerCase() ||
+    (manifest.backendDataContractVersion !== undefined &&
+      (!Number.isSafeInteger(manifest.backendDataContractVersion) ||
+        manifest.backendDataContractVersion < 0)) ||
     !Array.isArray(manifest.files)
   ) {
     throw new Error('Invalid release manifest');

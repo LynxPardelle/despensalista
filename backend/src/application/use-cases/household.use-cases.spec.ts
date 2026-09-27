@@ -61,7 +61,7 @@ describe('household use cases', () => {
       findInviteById: jest.fn(),
       findInviteByTokenHash: jest.fn(),
       findActivitiesByHouseholdId: jest.fn(),
-      deleteAccountHouseholdData: jest.fn(),
+      deleteAccountHouseholdReferences: jest.fn(),
       deleteHouseholdCascade: jest.fn(),
       beginHouseholdDeletion: jest.fn(),
       cancelHouseholdDeletion: jest.fn(),
