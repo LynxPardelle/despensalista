@@ -79,6 +79,7 @@ jobs:
           npm --prefix frontend audit --omit=dev --audit-level=moderate
           npm --prefix frontend run test:ci
           npm --prefix frontend run build
+          npm --prefix frontend exec -- playwright install ffmpeg
           npm --prefix frontend run test:e2e
 
       - name: Test backend
