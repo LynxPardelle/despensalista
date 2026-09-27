@@ -265,8 +265,8 @@ test('gates CI and release on authenticated Mongo replica-set transactions', asy
   assert.match(smoke, /down --volumes --remove-orphans/);
   assert.match(smoke, /exec -T mongodb mongosh --quiet --file \/dev\/stdin/);
   const transaction = await readFile(path.join(repositoryRoot, '.github/scripts/mongodb-transaction-smoke.js'), 'utf8');
-  assert.doesNotMatch(transaction, /assert\.commandWorked/);
-  assert.match(transaction, /assert\.eq\(hello\.ok, 1/);
+  assert.doesNotMatch(transaction, /\bassert(?:\.|\()/);
+  assert.match(transaction, /function expectEqual\(actual, expected, message\)/);
 });
 
 test('installs Playwright media support before browser journeys', async () => {
