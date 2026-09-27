@@ -218,9 +218,6 @@ export class DespensaListaCognitoStack extends cdk.Stack {
       new cdk.CfnOutput(this, 'SesEmailIdentityName', {
         value: sesIdentity.emailIdentityName,
       });
-      new cdk.CfnOutput(this, 'SesFromAddress', {
-        value: `no-reply@${sesIdentity.emailIdentityName}`,
-      });
       new cdk.CfnOutput(this, 'CognitoEmailSendingAccount', {
         value: 'COGNITO_DEFAULT',
       });

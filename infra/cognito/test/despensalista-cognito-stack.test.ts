@@ -132,6 +132,7 @@ test('production creates the DespensaLista SES identity and Easy DKIM records', 
     Object.keys(template.findResources('AWS::Route53::RecordSet')).length,
     3,
   );
+  assert.equal(template.toJSON().Outputs?.SesFromAddress, undefined);
 });
 
 test('deployment OIDC trust is exact repository and environment, with no bootstrap deploy-role escalation', () => {
