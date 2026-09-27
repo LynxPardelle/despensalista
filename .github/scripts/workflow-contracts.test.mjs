@@ -264,6 +264,17 @@ test('gates CI and release on authenticated Mongo replica-set transactions', asy
   assert.match(smoke, /trap cleanup EXIT/);
   assert.match(smoke, /down --volumes --remove-orphans/);
   assert.match(smoke, /exec -T mongodb mongosh --quiet --file \/dev\/stdin/);
+  const transaction = await readFile(path.join(repositoryRoot, '.github/scripts/mongodb-transaction-smoke.js'), 'utf8');
+  assert.doesNotMatch(transaction, /assert\.commandWorked/);
+  assert.match(transaction, /assert\.eq\(hello\.ok, 1/);
+});
+
+test('installs Playwright media support before browser journeys', async () => {
+  const workflow = await readWorkflow('ci-cd.yml');
+  assert.ok(
+    workflow.indexOf('npx playwright install ffmpeg') <
+      workflow.indexOf('npm run test:e2e'),
+  );
 });
 
 async function readWorkflow(name) {
