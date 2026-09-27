@@ -212,7 +212,7 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
     'lambda:GetFunctionConfiguration',
     'lambda:PutFunctionConcurrency',
     'lambda:DeleteFunctionConcurrency',
-  ], [backendFunctionArn]));
+  ], [backendFunctionArn, `${backendFunctionArn}:*`]));
   if (stage === 'prod') {
     const usersTableArn = arn('dynamodb', 'table', `${prefix}-users`);
     github.addToPolicy(scoped([
