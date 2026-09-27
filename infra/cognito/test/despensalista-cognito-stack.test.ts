@@ -178,6 +178,10 @@ test('GitHub delivery drains only its exact backend and only production deletes 
       JSON.stringify(concurrency.Resource),
       new RegExp(`function:despensalista-${stage}-backend-api`),
     );
+    assert.match(
+      JSON.stringify(concurrency.Resource),
+      new RegExp(`function:despensalista-${stage}-backend-api:\\*`),
+    );
     assert.doesNotMatch(JSON.stringify(concurrency.Resource), /backend-api\*/);
     const serialized = JSON.stringify(statements);
     assert.doesNotMatch(serialized, /PANTRY_QUOTA#/);
@@ -198,6 +202,10 @@ test('GitHub delivery drains only its exact backend and only production deletes 
   assert.match(
     JSON.stringify(concurrency.Resource),
     /function:despensalista-prod-backend-api/,
+  );
+  assert.match(
+    JSON.stringify(concurrency.Resource),
+    /function:despensalista-prod-backend-api:\*/,
   );
   assert.doesNotMatch(JSON.stringify(concurrency.Resource), /backend-api\*/);
 
