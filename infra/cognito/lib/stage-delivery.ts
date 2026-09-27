@@ -105,6 +105,12 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
     maxSessionDuration: cdk.Duration.hours(1),
   });
   const protectedRoles = [roleArn(`${prefix}-github-deploy`), roleArn(`${prefix}-cfn-execution`)];
+  const runtimeRoles = [
+    roleArn(`${prefix}-runtime-*`),
+    ...(stage === 'prod'
+      ? []
+      : [roleArn(`${prefix}-serverl-CustomS3AutoDeleteObjects-*`)]),
+  ];
   execution.addToPolicy(scoped(['iam:GetRole'], protectedRoles));
   execution.addToPolicy(new iam.PolicyStatement({
     effect: iam.Effect.DENY, actions: ['iam:Create*', 'iam:Delete*', 'iam:Update*', 'iam:Put*', 'iam:Attach*', 'iam:Detach*', 'iam:Tag*', 'iam:Untag*', 'iam:PassRole'], resources: [...protectedRoles, boundaryArn],
@@ -116,13 +122,13 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
     effect: iam.Effect.DENY, actions: ['iam:CreateRole', 'iam:PutRolePermissionsBoundary'], resources: ['*'],
     conditions: { StringNotEquals: { 'iam:PermissionsBoundary': boundaryArn } },
   }));
-  execution.addToPolicy(scoped(['iam:CreateRole', 'iam:PutRolePermissionsBoundary'], [roleArn(`${prefix}-runtime-*`)], { StringEquals: { 'iam:PermissionsBoundary': boundaryArn } }));
+  execution.addToPolicy(scoped(['iam:CreateRole', 'iam:PutRolePermissionsBoundary'], runtimeRoles, { StringEquals: { 'iam:PermissionsBoundary': boundaryArn } }));
   execution.addToPolicy(scoped([
     'iam:GetRole', 'iam:DeleteRole', 'iam:UpdateRole', 'iam:UpdateAssumeRolePolicy', 'iam:TagRole', 'iam:UntagRole',
     'iam:PutRolePolicy', 'iam:DeleteRolePolicy', 'iam:GetRolePolicy', 'iam:ListRolePolicies',
     'iam:AttachRolePolicy', 'iam:DetachRolePolicy', 'iam:ListAttachedRolePolicies',
-  ], [roleArn(`${prefix}-runtime-*`)]));
-  execution.addToPolicy(scoped(['iam:PassRole'], [roleArn(`${prefix}-runtime-*`)], { StringEquals: { 'iam:PassedToService': ['lambda.amazonaws.com', 'codedeploy.amazonaws.com'] } }));
+  ], runtimeRoles));
+  execution.addToPolicy(scoped(['iam:PassRole'], runtimeRoles, { StringEquals: { 'iam:PassedToService': ['lambda.amazonaws.com', 'codedeploy.amazonaws.com'] } }));
   execution.addToPolicy(scoped(['iam:GetPolicy', 'iam:GetPolicyVersion'], [boundaryArn]));
   execution.addToPolicy(scoped(['lambda:*'], [functionArn, `arn:${stack.partition}:lambda:${stack.region}:${stack.account}:layer:${prefix}-*`]));
   execution.addToPolicy(scoped(['dynamodb:*'], [tableArn, `${tableArn}/*`]));

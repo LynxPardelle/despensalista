@@ -299,6 +299,10 @@ test('delivery controls require a protected stage boundary and only unavoidable 
   const serialized = JSON.stringify(template);
   assert.match(serialized, /despensalista-dev-runtime-boundary/);
   assert.match(serialized, /despensalista-dev-cfn-execution/);
+  assert.match(
+    serialized,
+    /despensalista-dev-serverl-CustomS3AutoDeleteObjects-\*/,
+  );
   assert.match(serialized, /iam:PermissionsBoundary/);
   assert.match(serialized, /iam:DeleteRolePermissionsBoundary/);
   assert.match(serialized, /route53:ChangeResourceRecordSetsNormalizedRecordNames/);
