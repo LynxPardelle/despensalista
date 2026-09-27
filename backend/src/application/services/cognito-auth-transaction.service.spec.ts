@@ -37,4 +37,19 @@ describe('CognitoAuthTransactionService', () => {
       '/pantry',
     );
   });
+
+  it('rejects redirects containing backslashes', () => {
+    expect(service.normalizeRedirectTo('/\\evil.example/pantry')).toBe(
+      '/pantry',
+    );
+    expect(service.normalizeRedirectTo('/pantry\\settings')).toBe('/pantry');
+  });
+
+  it('rejects redirects containing control characters', () => {
+    expect(service.normalizeRedirectTo('/pantry\nhttps://evil.example')).toBe(
+      '/pantry',
+    );
+    expect(service.normalizeRedirectTo('/pantry\u0000')).toBe('/pantry');
+    expect(service.normalizeRedirectTo('/pantry\u007f')).toBe('/pantry');
+  });
 });

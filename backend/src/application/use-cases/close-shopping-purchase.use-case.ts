@@ -1,21 +1,33 @@
 import {
   BadRequestException,
+  ConflictException,
   Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { MAX_SHOPPING_CHECKOUT_ITEMS } from '../constants/query-limits';
+import { InventoryLot } from '../../domain/entities/inventory-lot.entity';
 import {
   ProductType,
   ProductTypeShoppingMetadataPatch,
 } from '../../domain/entities/product-type.entity';
-import { InventoryLot } from '../../domain/entities/inventory-lot.entity';
-import { InventoryLotRepository } from '../../domain/repositories/inventory-lot.repository';
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
 import { ProductTypeId } from '../../domain/value-objects/product-type-id.vo';
 import { UserId } from '../../domain/value-objects/user-id.vo';
-import { INVENTORY_LOT_REPOSITORY, PRODUCT_TYPE_REPOSITORY } from '../tokens';
+import { MAX_SHOPPING_CHECKOUT_ITEMS } from '../constants/query-limits';
+import {
+  IdempotencyPayloadConflictError,
+  IdempotentMutationResult,
+  PantryMutationConflictError,
+  PantryMutationPort,
+  PantryQuotaExceededError,
+  ProductTypeTransactionChange,
+} from '../ports/pantry-mutation.port';
+import { PANTRY_MUTATION_PORT, PRODUCT_TYPE_REPOSITORY } from '../tokens';
 import { parseQuantityUnit } from '../utils/enum-parsers';
+import {
+  buildPantryIdempotencyContext,
+  deterministicMutationEntityId,
+} from '../utils/pantry-idempotency';
 
 export interface CloseShoppingPurchaseItemCommand {
   productTypeId: string;
@@ -29,6 +41,7 @@ export interface CloseShoppingPurchaseItemCommand {
 
 export interface CloseShoppingPurchaseCommand {
   userId: string;
+  idempotencyKey?: string;
   items: CloseShoppingPurchaseItemCommand[];
 }
 
@@ -41,107 +54,181 @@ interface PreparedPurchaseItem {
 @Injectable()
 export class CloseShoppingPurchaseUseCase {
   constructor(
-    @Inject(INVENTORY_LOT_REPOSITORY)
-    private readonly inventoryLotRepository: InventoryLotRepository,
     @Inject(PRODUCT_TYPE_REPOSITORY)
     private readonly productTypeRepository: ProductTypeRepository,
+    @Inject(PANTRY_MUTATION_PORT)
+    private readonly pantryMutationPort: PantryMutationPort,
   ) {}
 
   async execute(
     command: CloseShoppingPurchaseCommand,
-  ): Promise<InventoryLot[]> {
+  ): Promise<IdempotentMutationResult<InventoryLot[]>> {
     if (command.items.length === 0) {
       throw new BadRequestException('Checkout must include at least one item');
     }
-
     if (command.items.length > MAX_SHOPPING_CHECKOUT_ITEMS) {
       throw new BadRequestException(
         `Checkout cannot include more than ${MAX_SHOPPING_CHECKOUT_ITEMS} items`,
       );
     }
 
-    const userId = UserId.fromString(command.userId);
-    const preparedItems = await Promise.all(
-      command.items.map((item) => this.prepareItem(userId, item)),
-    );
-    const purchaseDate = new Date();
-    const createdLots: InventoryLot[] = [];
-
-    for (const prepared of preparedItems) {
-      const createdLot = await this.createLot(userId, prepared, purchaseDate);
-      createdLots.push(createdLot);
+    let receipt: ReturnType<typeof buildPantryIdempotencyContext>;
+    try {
+      receipt = buildPantryIdempotencyContext({
+        ownerUserId: command.userId,
+        operation: 'close_shopping_purchase',
+        idempotencyKey: command.idempotencyKey,
+        request: command.items.map((item) => ({
+          ...item,
+          variantName: item.variantName?.trim() || undefined,
+          shoppingLocation: item.shoppingLocation?.trim() || undefined,
+          expiresAt: item.expiresAt?.toISOString(),
+        })),
+      });
+    } catch (error) {
+      throw new BadRequestException((error as Error).message);
     }
 
-    return createdLots;
+    try {
+      const replay = await this.pantryMutationPort.findReceipt(receipt);
+      if (replay) {
+        const response = Array.isArray(replay.response) ? replay.response : [];
+        return {
+          value: response.map((lot) => InventoryLot.fromPrimitives(lot)),
+          replayed: true,
+        };
+      }
+
+      const userId = UserId.fromString(command.userId);
+      const productTypeChanges = await this.loadProductTypes(
+        userId,
+        command.items,
+      );
+      const productTypeById = new Map(
+        productTypeChanges.map((change) => [
+          change.updated.id.toString(),
+          change.updated,
+        ]),
+      );
+      const preparedItems = command.items.map((item) =>
+        this.prepareItem(item, productTypeById.get(item.productTypeId)),
+      );
+      const purchaseDate = new Date();
+      const lots: InventoryLot[] = [];
+
+      for (const [index, prepared] of preparedItems.entries()) {
+        const generatedLot = InventoryLot.create(
+          userId,
+          prepared.productType.id,
+          prepared.command.variantName,
+          prepared.command.quantity,
+          prepared.unit,
+          prepared.command.expiresAt,
+          purchaseDate,
+        );
+        lots.push(
+          InventoryLot.fromPrimitives({
+            ...generatedLot.toPrimitives(),
+            id: deterministicMutationEntityId(
+              'lot',
+              receipt.operationId,
+              index,
+            ),
+          }),
+        );
+        const patch = this.toShoppingMetadataPatch(prepared.command);
+        if (patch) {
+          prepared.productType.updateShoppingMetadata(patch);
+        }
+      }
+
+      productTypeChanges.forEach((change) => {
+        change.changed =
+          JSON.stringify(change.expected.toPrimitives()) !==
+          JSON.stringify(change.updated.toPrimitives());
+      });
+      const committed = await this.pantryMutationPort.checkout({
+        receipt,
+        lots,
+        productTypes: productTypeChanges,
+      });
+
+      return {
+        value: committed.value.map((lot) => InventoryLot.fromPrimitives(lot)),
+        replayed: committed.replayed,
+      };
+    } catch (error) {
+      throw mapMutationError(error);
+    }
   }
 
-  private async prepareItem(
+  private async loadProductTypes(
     userId: UserId,
-    item: CloseShoppingPurchaseItemCommand,
-  ): Promise<PreparedPurchaseItem> {
-    const productType = await this.productTypeRepository.findById(
-      ProductTypeId.fromString(item.productTypeId),
+    items: CloseShoppingPurchaseItemCommand[],
+  ): Promise<ProductTypeTransactionChange[]> {
+    const uniqueIds = [...new Set(items.map((item) => item.productTypeId))];
+    return Promise.all(
+      uniqueIds.map(async (id) => {
+        const productType = await this.productTypeRepository.findById(
+          ProductTypeId.fromString(id),
+        );
+        if (
+          !productType ||
+          productType.userId.toString() !== userId.toString()
+        ) {
+          throw new NotFoundException('Product type not found for this user');
+        }
+        if (productType.isArchived()) {
+          throw new BadRequestException(
+            'Archived product types cannot be checked out',
+          );
+        }
+        return {
+          expected: ProductType.fromPrimitives(productType.toPrimitives()),
+          updated: productType,
+          changed: false,
+        };
+      }),
     );
+  }
 
-    if (!productType || productType.userId.toString() !== userId.toString()) {
+  private prepareItem(
+    item: CloseShoppingPurchaseItemCommand,
+    productType: ProductType | undefined,
+  ): PreparedPurchaseItem {
+    if (!productType) {
       throw new NotFoundException('Product type not found for this user');
     }
-
-    if (productType.isArchived()) {
-      throw new BadRequestException(
-        'Archived product types cannot be checked out',
-      );
-    }
-
     const unit = parseQuantityUnit(item.unit);
-
     if (productType.defaultUnit !== unit) {
       throw new BadRequestException(
         `Lot unit must match product type default unit (${productType.defaultUnit})`,
       );
     }
-
     return { command: item, productType, unit };
-  }
-
-  private async createLot(
-    userId: UserId,
-    prepared: PreparedPurchaseItem,
-    purchaseDate: Date,
-  ): Promise<InventoryLot> {
-    const lot = InventoryLot.create(
-      userId,
-      prepared.productType.id,
-      prepared.command.variantName,
-      prepared.command.quantity,
-      prepared.unit,
-      prepared.command.expiresAt,
-      purchaseDate,
-    );
-    const createdLot = await this.inventoryLotRepository.save(lot);
-    const shoppingMetadata = this.toShoppingMetadataPatch(prepared.command);
-
-    if (shoppingMetadata) {
-      prepared.productType.updateShoppingMetadata(shoppingMetadata);
-      await this.productTypeRepository.save(prepared.productType);
-    }
-
-    return createdLot;
   }
 
   private toShoppingMetadataPatch(
     item: CloseShoppingPurchaseItemCommand,
   ): ProductTypeShoppingMetadataPatch | null {
     const patch: ProductTypeShoppingMetadataPatch = {};
-
     if (item.paidUnitPrice !== undefined) {
       patch.estimatedUnitPrice = item.paidUnitPrice;
     }
-
     if (item.shoppingLocation !== undefined) {
       patch.shoppingLocation = item.shoppingLocation;
     }
-
     return Object.keys(patch).length > 0 ? patch : null;
   }
+}
+
+function mapMutationError(error: unknown): Error {
+  if (
+    error instanceof IdempotencyPayloadConflictError ||
+    error instanceof PantryMutationConflictError ||
+    error instanceof PantryQuotaExceededError
+  ) {
+    return new ConflictException(error.message);
+  }
+  return error instanceof Error ? error : new Error('Pantry mutation failed');
 }

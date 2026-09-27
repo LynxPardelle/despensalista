@@ -5,15 +5,17 @@ import {
   DefaultValuePipe,
   Delete,
   Get,
+  Headers,
   Param,
   ParseIntPipe,
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { FastifyRequest } from 'fastify';
+import { FastifyReply, FastifyRequest } from 'fastify';
 import { ArchiveInventoryLotUseCase } from '../../../application/use-cases/archive-inventory-lot.use-case';
 import { ConsumeInventoryLotUseCase } from '../../../application/use-cases/consume-inventory-lot.use-case';
 import { CreateInventoryLotUseCase } from '../../../application/use-cases/create-inventory-lot.use-case';
@@ -34,6 +36,7 @@ import { ExpiringProductGroupResponseDto } from '../dtos/pantry-overview-respons
 import { InventoryLotResponseDto } from '../dtos/inventory-lot-response.dto';
 import { InventoryLotMapper } from '../mappers/inventory-lot.mapper';
 import { PantryOverviewMapper } from '../mappers/pantry-overview.mapper';
+import { CollectionPageQueryDto } from '../dtos/collection-page-query.dto';
 
 @Controller('inventory-lots')
 @ApiTags('inventory-lots')
@@ -94,6 +97,25 @@ export class InventoryLotsController {
     return lots.map((lot) => InventoryLotMapper.toResponse(lot));
   }
 
+  @Get('page')
+  async page(
+    @CurrentUser() currentUser: AuthenticatedUser,
+    @Query() query: CollectionPageQueryDto,
+  ) {
+    const access = await this.resolveHouseholdPantryAccessUseCase.executeRead(
+      currentUser.userId,
+    );
+    const result = await this.listInventoryLotsUseCase.page(
+      access.pantryOwnerUserId,
+      query,
+      query.productTypeId,
+    );
+    return {
+      ...result,
+      items: result.items.map((item) => InventoryLotMapper.toResponse(item)),
+    };
+  }
+
   @Get('expiring')
   @ApiOperation({
     summary: 'Listar lotes próximos a caducar agrupados por tipo base',
@@ -126,23 +148,28 @@ export class InventoryLotsController {
     @CurrentUser() currentUser: AuthenticatedUser,
     @Body() consumeInventoryLotDto: ConsumeInventoryLotDto,
     @Req() request: FastifyRequest,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Res({ passthrough: true }) reply: FastifyReply,
   ): Promise<InventoryLotResponseDto | null> {
     this.authCookieService.ensureXsrfForRequest(request);
     const access = await this.resolveHouseholdPantryAccessUseCase.executeWrite(
       currentUser.userId,
     );
 
-    const inventoryLot = await this.consumeInventoryLotUseCase.execute(
-      id,
-      access.pantryOwnerUserId,
-      consumeInventoryLotDto.quantity,
-      {
-        wasteReason: consumeInventoryLotDto.wasteReason,
-        wasteNote: consumeInventoryLotDto.wasteNote,
-      },
-    );
+    const result = await this.consumeInventoryLotUseCase.execute({
+      lotId: id,
+      userId: access.pantryOwnerUserId,
+      quantity: consumeInventoryLotDto.quantity,
+      wasteReason: consumeInventoryLotDto.wasteReason,
+      wasteNote: consumeInventoryLotDto.wasteNote,
+      idempotencyKey,
+    });
+    reply.header('Idempotency-Key', idempotencyKey ?? '');
+    if (result.replayed) {
+      reply.header('Idempotency-Replayed', 'true');
+    }
 
-    return inventoryLot ? InventoryLotMapper.toResponse(inventoryLot) : null;
+    return result.value ? InventoryLotMapper.toResponse(result.value) : null;
   }
 
   @Post(':id/archive')

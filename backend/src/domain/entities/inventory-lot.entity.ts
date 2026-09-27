@@ -138,7 +138,9 @@ export class InventoryLot {
     }
 
     this._quantity = Number((this._quantity - amount).toFixed(2));
-    this._updatedAt = new Date();
+    this._updatedAt = new Date(
+      Math.max(Date.now(), this._updatedAt.getTime() + 1),
+    );
   }
 
   isEmpty(): boolean {
@@ -148,13 +150,17 @@ export class InventoryLot {
   archive(reason?: string): void {
     this._archivedAt = new Date();
     this._archivedReason = normalizeOptionalText(reason);
-    this._updatedAt = new Date();
+    this._updatedAt = new Date(
+      Math.max(Date.now(), this._updatedAt.getTime() + 1),
+    );
   }
 
   restore(): void {
     this._archivedAt = undefined;
     this._archivedReason = undefined;
-    this._updatedAt = new Date();
+    this._updatedAt = new Date(
+      Math.max(Date.now(), this._updatedAt.getTime() + 1),
+    );
   }
 
   isArchived(): boolean {

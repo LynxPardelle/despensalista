@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { CognitoUserAdmin } from '../ports/cognito-auth.port';
-import { UserDao } from '../ports/daos';
+import { AccountDeletionJob, UserDao } from '../ports/daos';
 import {
   COGNITO_USER_ADMIN,
   HOUSEHOLD_REPOSITORY,
@@ -13,11 +13,13 @@ import {
   USER_DEVICE_REPOSITORY,
 } from '../tokens';
 import { HouseholdRepository } from '../../domain/repositories/household.repository';
+import { HouseholdMembership } from '../../domain/entities/household.entity';
 import { UserDeviceRepository } from '../../domain/repositories/user-device.repository';
 import { UserId } from '../../domain/value-objects/user-id.vo';
 import { DeletePantryDataUseCase } from './delete-pantry-data.use-case';
 
 const DELETE_ACCOUNT_CONFIRMATION = 'ELIMINAR CUENTA';
+const ACCOUNT_DELETION_PENDING_UNTIL = '9999-12-31T23:59:59.999Z';
 
 export interface DeleteAccountResult {
   deletedInventoryLotCount: number;
@@ -60,17 +62,62 @@ export class DeleteAccountUseCase {
       throw new NotFoundException('User not found');
     }
 
-    await this.assertHouseholdCanBeDeletedOrLeft(command.userId);
+    const { membership, householdDeletionToken } =
+      await this.assertHouseholdCanBeDeletedOrLeft(command.userId);
+    let deletionJob: AccountDeletionJob | null;
+    try {
+      deletionJob = await this.userDao.beginAccountDeletion(
+        userId,
+        new Date(ACCOUNT_DELETION_PENDING_UNTIL),
+        membership
+          ? {
+              householdId: membership.householdId,
+              householdRole: membership.role,
+              householdDeletionToken,
+            }
+          : undefined,
+      );
+    } catch (error) {
+      await this.cancelOwnerLock(
+        command.userId,
+        membership,
+        householdDeletionToken,
+      );
+      throw error;
+    }
 
+    if (!deletionJob) {
+      await this.cancelOwnerLock(
+        command.userId,
+        membership,
+        householdDeletionToken,
+      );
+      throw new NotFoundException('User not found');
+    }
+
+    return this.resume(deletionJob);
+  }
+
+  async resume(job: AccountDeletionJob): Promise<DeleteAccountResult> {
+    const userId = UserId.fromString(job.userId);
     const pantryResult = await this.deletePantryDataUseCase.execute({
-      userId: command.userId,
+      userId: job.userId,
       confirmationText: 'ELIMINAR',
+      accountDeletion: true,
+      deletionToken: job.pantryDeletionToken,
     });
-    await this.deleteHouseholdOrMembership(command.userId);
+    await this.deleteHouseholdOrMembership(job);
+    await this.householdRepository.deleteAccountHouseholdReferences(
+      job.userId,
+      job.email,
+    );
     const deletedKnownDeviceCount =
       await this.userDeviceRepository.deleteByUserId(userId);
     const deletedCognitoIdentityCount =
-      await this.cognitoUserAdmin.deleteUsersBySubjectIds(user.authSubjectIds);
+      await this.cognitoUserAdmin.deleteUsersBySubjectIds(
+        job.authSubjectIds,
+        job.authUsernamesBySubject,
+      );
     await this.userDao.delete(userId);
 
     return {
@@ -80,46 +127,59 @@ export class DeleteAccountUseCase {
     };
   }
 
-  private async assertHouseholdCanBeDeletedOrLeft(
-    userId: string,
-  ): Promise<void> {
+  private async assertHouseholdCanBeDeletedOrLeft(userId: string): Promise<{
+    membership: HouseholdMembership | null;
+    householdDeletionToken?: string;
+  }> {
     const membership =
       await this.householdRepository.findMembershipByUserId(userId);
 
     if (!membership || membership.role !== 'owner') {
-      return;
+      return { membership };
     }
 
-    const members = await this.householdRepository.findMembersByHouseholdId(
+    const lock = await this.householdRepository.beginHouseholdDeletion(
       membership.householdId,
+      userId,
     );
-    const otherMembers = members.filter((member) => member.userId !== userId);
 
-    if (otherMembers.length > 0) {
+    if (!lock.canDelete) {
       throw new BadRequestException(
         'Remove household members before deleting the owner account',
       );
     }
+
+    return { membership, householdDeletionToken: lock.token };
   }
 
-  private async deleteHouseholdOrMembership(userId: string): Promise<void> {
-    const membership =
-      await this.householdRepository.findMembershipByUserId(userId);
+  private async cancelOwnerLock(
+    userId: string,
+    membership: HouseholdMembership | null,
+    token: string | undefined,
+  ): Promise<void> {
+    if (membership?.role !== 'owner' || !token) return;
+    await this.householdRepository.cancelHouseholdDeletion(
+      membership.householdId,
+      userId,
+      token,
+    );
+  }
 
-    if (!membership) {
+  private async deleteHouseholdOrMembership(
+    job: AccountDeletionJob,
+  ): Promise<void> {
+    if (!job.householdId || !job.householdRole) {
       return;
     }
 
-    if (membership.role === 'owner') {
-      await this.householdRepository.deleteHouseholdCascade(
-        membership.householdId,
-      );
+    if (job.householdRole === 'owner') {
+      await this.householdRepository.deleteHouseholdCascade(job.householdId);
       return;
     }
 
     await this.householdRepository.deleteMembership(
-      membership.householdId,
-      userId,
+      job.householdId,
+      job.userId,
     );
   }
 }

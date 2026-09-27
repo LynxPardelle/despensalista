@@ -53,15 +53,17 @@ export class AuthGuard implements CanActivate {
       take(1),
       map(([status]) =>
         authMode === 'anonymous'
-          ? this.resolveAnonymousRoute(status)
+          ? this.resolveAnonymousRoute(status, route.queryParamMap?.get('redirectTo'))
           : this.resolveAuthenticatedRoute(status, state.url),
       ),
     );
   }
 
-  private resolveAnonymousRoute(status: string): boolean | UrlTree {
+  private resolveAnonymousRoute(status: string, redirectTo?: string | null): boolean | UrlTree {
+    const localRedirect = redirectTo?.startsWith('/') &&
+      !redirectTo.startsWith('//') && !/[\\\x00-\x1f\x7f-\x9f]/.test(redirectTo);
     return status === 'authenticated'
-      ? this.router.createUrlTree(['/pantry'])
+      ? localRedirect ? this.router.parseUrl(redirectTo!) : this.router.createUrlTree(['/pantry'])
       : true;
   }
 

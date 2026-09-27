@@ -3,7 +3,8 @@ import { ProductType } from '../../domain/entities/product-type.entity';
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
 import { ProductTypeId } from '../../domain/value-objects/product-type-id.vo';
 import { UserId } from '../../domain/value-objects/user-id.vo';
-import { PRODUCT_TYPE_REPOSITORY } from '../tokens';
+import { PRODUCT_TYPE_REPOSITORY, PANTRY_MUTATION_PORT } from '../tokens';
+import { PantryMutationPort } from '../ports/pantry-mutation.port';
 import {
   DepletionRuleInput,
   parseDefaultDepletionRule,
@@ -20,6 +21,8 @@ export class UpdateProductTypeDepletionRuleUseCase {
   constructor(
     @Inject(PRODUCT_TYPE_REPOSITORY)
     private readonly productTypeRepository: ProductTypeRepository,
+    @Inject(PANTRY_MUTATION_PORT)
+    private readonly pantryMutationPort: PantryMutationPort,
   ) {}
 
   async execute(
@@ -37,6 +40,7 @@ export class UpdateProductTypeDepletionRuleUseCase {
       throw new NotFoundException('Product type not found');
     }
 
+    const expected = ProductType.fromPrimitives(productType.toPrimitives());
     productType.updateDefaultDepletionRule(
       parseDefaultDepletionRule(
         command.defaultDepletionRule,
@@ -44,6 +48,6 @@ export class UpdateProductTypeDepletionRuleUseCase {
       ),
     );
 
-    return this.productTypeRepository.save(productType);
+    return this.pantryMutationPort.updateProductType(expected, productType);
   }
 }

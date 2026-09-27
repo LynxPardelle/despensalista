@@ -12,6 +12,9 @@
   --color-accent: #c47a4b;
   --color-accent-deep: #9e5731;
   --color-accent-soft: #efd9bc;
+  --color-primary-text: #fff9f4;
+  --color-primary-start: #9e5731;
+  --color-primary-end: #a85b32;
   --color-success-soft: #dde6cf;
   --color-danger-text: #8f2d20;
   --color-warning-text: #8a5615;
@@ -113,8 +116,12 @@ button:focus-visible {
 }
 
 .primary-button {
-  color: #fff9f4;
-  background: linear-gradient(135deg, #b86536, #d1895e);
+  color: var(--color-primary-text);
+  background: linear-gradient(
+    135deg,
+    var(--color-primary-start),
+    var(--color-primary-end)
+  );
   box-shadow: 0 10px 30px rgba(160, 92, 48, 0.24);
 }
 

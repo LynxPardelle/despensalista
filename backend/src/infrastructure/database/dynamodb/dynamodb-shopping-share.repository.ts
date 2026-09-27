@@ -1,12 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import {
-  DeleteCommand,
-  GetCommand,
-  PutCommand,
-  QueryCommand,
-  ScanCommand,
-} from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import {
   ShoppingShare,
   ShoppingSharePrimitives,
@@ -43,19 +37,6 @@ export class DynamoDbShoppingShareRepository implements ShoppingShareRepository 
     this.tableName = configService.getOrThrow<string>('DYNAMODB_USERS_TABLE');
   }
 
-  async save(share: ShoppingShare): Promise<ShoppingShare> {
-    const item = this.toItem(share.toPrimitives());
-
-    await this.dynamoDb.send(
-      new PutCommand({
-        TableName: this.tableName,
-        Item: item,
-      }),
-    );
-
-    return this.toDomain(item);
-  }
-
   async findByTokenHash(tokenHash: string): Promise<ShoppingShare | null> {
     const result = await this.dynamoDb.send(
       new GetCommand({
@@ -79,43 +60,7 @@ export class DynamoDbShoppingShareRepository implements ShoppingShareRepository 
       Limit: 1,
     });
 
-    if (item) {
-      return this.toDomain(item);
-    }
-
-    let exclusiveStartKey: Record<string, unknown> | undefined;
-
-    do {
-      const result = await this.dynamoDb.send(
-        new ScanCommand({
-          TableName: this.tableName,
-          FilterExpression: '#entityType = :entityType AND #id = :id',
-          ExpressionAttributeNames: {
-            '#entityType': 'entityType',
-            '#id': 'id',
-          },
-          ExpressionAttributeValues: {
-            ':entityType': 'SHOPPING_SHARE',
-            ':id': id,
-          },
-          ...(exclusiveStartKey
-            ? { ExclusiveStartKey: exclusiveStartKey }
-            : {}),
-        }),
-      );
-
-      const [item] = (result.Items ?? []) as ShoppingShareItem[];
-
-      if (item) {
-        return this.toDomain(item);
-      }
-
-      exclusiveStartKey = result.LastEvaluatedKey as
-        | Record<string, unknown>
-        | undefined;
-    } while (exclusiveStartKey);
-
-    return null;
+    return item ? this.toDomain(item) : null;
   }
 
   async listActiveByOwnerUserId(
@@ -136,43 +81,7 @@ export class DynamoDbShoppingShareRepository implements ShoppingShareRepository 
       .filter((share) => !share.isRevoked() && !share.isExpired(now))
       .slice(0, 25);
 
-    if (indexedShares.length > 0) {
-      return indexedShares;
-    }
-
-    const items: ShoppingShareItem[] = [];
-    let exclusiveStartKey: Record<string, unknown> | undefined;
-
-    do {
-      const result = await this.dynamoDb.send(
-        new ScanCommand({
-          TableName: this.tableName,
-          FilterExpression:
-            '#entityType = :entityType AND ownerUserId = :ownerUserId AND expiresAt > :now AND attribute_not_exists(revokedAt)',
-          ExpressionAttributeNames: {
-            '#entityType': 'entityType',
-          },
-          ExpressionAttributeValues: {
-            ':entityType': 'SHOPPING_SHARE',
-            ':ownerUserId': ownerUserId,
-            ':now': now.toISOString(),
-          },
-          ...(exclusiveStartKey
-            ? { ExclusiveStartKey: exclusiveStartKey }
-            : {}),
-        }),
-      );
-
-      items.push(...((result.Items ?? []) as ShoppingShareItem[]));
-      exclusiveStartKey = result.LastEvaluatedKey as
-        | Record<string, unknown>
-        | undefined;
-    } while (exclusiveStartKey);
-
-    return items
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-      .slice(0, 25)
-      .map((item) => this.toDomain(item));
+    return indexedShares;
   }
 
   async deleteByOwnerUserId(userId: UserId): Promise<number> {
@@ -183,35 +92,8 @@ export class DynamoDbShoppingShareRepository implements ShoppingShareRepository 
         ':gsi2pk': shoppingShareOwnerKey(userId.toString()),
       },
     });
-    const legacyItems: ShoppingShareItem[] = [];
-    let exclusiveStartKey: Record<string, unknown> | undefined;
-
-    do {
-      const result = await this.dynamoDb.send(
-        new ScanCommand({
-          TableName: this.tableName,
-          FilterExpression:
-            'entityType = :entityType AND ownerUserId = :ownerUserId',
-          ExpressionAttributeValues: {
-            ':entityType': 'SHOPPING_SHARE',
-            ':ownerUserId': userId.toString(),
-          },
-          ...(exclusiveStartKey
-            ? { ExclusiveStartKey: exclusiveStartKey }
-            : {}),
-        }),
-      );
-
-      legacyItems.push(...((result.Items ?? []) as ShoppingShareItem[]));
-      exclusiveStartKey = result.LastEvaluatedKey as
-        | Record<string, unknown>
-        | undefined;
-    } while (exclusiveStartKey);
-
-    const items = deduplicateByPk([...indexedItems, ...legacyItems]);
-
     await Promise.all(
-      items.map((item) =>
+      indexedItems.map((item) =>
         this.dynamoDb.send(
           new DeleteCommand({
             TableName: this.tableName,
@@ -221,27 +103,7 @@ export class DynamoDbShoppingShareRepository implements ShoppingShareRepository 
       ),
     );
 
-    return items.length;
-  }
-
-  private toItem(primitives: ShoppingSharePrimitives): ShoppingShareItem {
-    return {
-      pk: shoppingShareKey(primitives.tokenHash),
-      entityType: 'SHOPPING_SHARE',
-      gsi1pk: shoppingShareByIdKey(primitives.id),
-      gsi1sk: primitives.tokenHash,
-      gsi2pk: shoppingShareOwnerKey(primitives.ownerUserId),
-      gsi2sk: `CREATED#${primitives.createdAt.toISOString()}#${primitives.id}`,
-      id: primitives.id,
-      ownerUserId: primitives.ownerUserId,
-      tokenHash: primitives.tokenHash,
-      text: primitives.text,
-      createdAt: primitives.createdAt.toISOString(),
-      expiresAt: primitives.expiresAt.toISOString(),
-      revokedAt: primitives.revokedAt?.toISOString(),
-      updatedAt: primitives.updatedAt.toISOString(),
-      expiresAtEpochSeconds: Math.floor(primitives.expiresAt.getTime() / 1000),
-    };
+    return indexedItems.length;
   }
 
   private toDomain(item: ShoppingShareItem): ShoppingShare {
@@ -294,12 +156,4 @@ function shoppingShareByIdKey(id: string): string {
 
 function shoppingShareOwnerKey(ownerUserId: string): string {
   return `SHOPPING_SHARE_OWNER#${ownerUserId}`;
-}
-
-function deduplicateByPk<T extends { pk: string }>(items: T[]): T[] {
-  const uniqueItems = new Map<string, T>();
-
-  items.forEach((item) => uniqueItems.set(item.pk, item));
-
-  return [...uniqueItems.values()];
 }

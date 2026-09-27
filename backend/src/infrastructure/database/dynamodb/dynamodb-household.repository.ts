@@ -1,11 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'node:crypto';
 import {
   DeleteCommand,
   GetCommand,
-  PutCommand,
   QueryCommand,
   ScanCommand,
+  TransactWriteCommand,
+  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import {
   Household,
@@ -17,8 +19,20 @@ import {
   HouseholdMembershipPrimitives,
   HouseholdPrimitives,
 } from '../../../domain/entities/household.entity';
-import { HouseholdRepository } from '../../../domain/repositories/household.repository';
+import {
+  HouseholdDeletionLock,
+  HouseholdRepository,
+} from '../../../domain/repositories/household.repository';
 import { DynamoDbDocumentClientService } from './dynamodb-document-client.service';
+
+const ANONYMIZED_USER_ID = 'deleted-user';
+const ANONYMIZED_EMAIL = 'deleted@example.invalid';
+const ANONYMIZED_LABEL = 'Usuario eliminado';
+const HOUSEHOLD_UNLOCK_MAX_ATTEMPTS = 3;
+
+type TransactItem = NonNullable<
+  ConstructorParameters<typeof TransactWriteCommand>[0]['TransactItems']
+>[number];
 
 type HouseholdItem = Omit<HouseholdPrimitives, 'createdAt' | 'updatedAt'> & {
   pk: string;
@@ -81,10 +95,127 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
     this.tableName = configService.getOrThrow<string>('DYNAMODB_USERS_TABLE');
   }
 
+  async createHouseholdWithOwner(
+    household: Household,
+    membership: HouseholdMembership,
+  ): Promise<HouseholdMembership> {
+    try {
+      await this.dynamoDb.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            ...this.activeUserChecks([membership.userId]),
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: this.toHouseholdItem(household),
+                ConditionExpression: 'attribute_not_exists(pk)',
+              },
+            },
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: this.toMembershipItem(membership),
+                ConditionExpression: 'attribute_not_exists(pk)',
+              },
+            },
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: this.toActivityItem(
+                  HouseholdActivity.create({
+                    householdId: household.id,
+                    actorUserId: membership.userId,
+                    type: 'household_created',
+                  }),
+                ),
+              },
+            },
+          ],
+        }),
+      );
+      return membership;
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        error.name !== 'TransactionCanceledException'
+      )
+        throw error;
+      const winner = await this.findMembershipByUserId(membership.userId);
+      if (winner) return winner;
+      throw new ConflictException('Household changed; refresh and retry');
+    }
+  }
+
+  async acceptInvite(
+    invite: HouseholdInvite,
+    membership: HouseholdMembership,
+  ): Promise<HouseholdMembership> {
+    const item = this.toInviteItem(invite);
+    try {
+      await this.dynamoDb.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            ...this.activeUserChecks([membership.userId, item.invitedByUserId]),
+            {
+              ConditionCheck: {
+                TableName: this.tableName,
+                Key: { pk: householdKey(invite.householdId) },
+                ConditionExpression:
+                  'attribute_exists(pk) AND attribute_not_exists(deleting)',
+              },
+            },
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: this.toMembershipItem(membership),
+                ConditionExpression:
+                  'attribute_not_exists(pk) OR (householdId = :household AND #role = :role)',
+                ExpressionAttributeNames: { '#role': 'role' },
+                ExpressionAttributeValues: {
+                  ':household': membership.householdId,
+                  ':role': membership.role,
+                },
+              },
+            },
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: item,
+                ConditionExpression:
+                  'tokenHash = :hash AND expiresAt > :now AND attribute_not_exists(acceptedAt) AND attribute_not_exists(revokedAt)',
+                ExpressionAttributeValues: {
+                  ':hash': item.tokenHash,
+                  ':now': new Date().toISOString(),
+                },
+              },
+            },
+          ],
+        }),
+      );
+      return membership;
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        error.name !== 'TransactionCanceledException'
+      )
+        throw error;
+      throw new ConflictException(
+        'Invitation or household membership changed; refresh and retry',
+      );
+    }
+  }
+
   async saveHousehold(household: Household): Promise<Household> {
     const item = this.toHouseholdItem(household);
 
-    await this.put(item);
+    await this.dynamoDb.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          ...this.activeUserChecks([household.ownerUserId]),
+          { Put: { TableName: this.tableName, Item: item } },
+        ],
+      }),
+    );
 
     return this.toHousehold(item);
   }
@@ -94,15 +225,90 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
   ): Promise<HouseholdMembership> {
     const item = this.toMembershipItem(membership);
 
-    await this.put(item);
+    await this.dynamoDb.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          ...this.activeUserChecks([membership.userId]),
+          {
+            ConditionCheck: {
+              TableName: this.tableName,
+              Key: { pk: householdKey(membership.householdId) },
+              ConditionExpression:
+                'attribute_exists(pk) AND attribute_not_exists(deleting)',
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: item,
+              ConditionExpression:
+                'attribute_not_exists(pk) OR householdId = :household',
+              ExpressionAttributeValues: {
+                ':household': membership.householdId,
+              },
+            },
+          },
+        ],
+      }),
+    );
 
     return this.toMembership(item);
   }
 
   async saveInvite(invite: HouseholdInvite): Promise<HouseholdInvite> {
     const item = this.toInviteItem(invite);
+    const invitedUser = await this.findUserLookup(item.invitedEmail);
 
-    await this.put(item);
+    try {
+      await this.dynamoDb.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            ...this.activeUserChecks([
+              item.invitedByUserId,
+              invitedUser?.userId,
+            ]),
+            ...(invitedUser
+              ? [
+                  {
+                    ConditionCheck: {
+                      TableName: this.tableName,
+                      Key: { pk: emailKey(item.invitedEmail) },
+                      ConditionExpression: 'userId = :expectedUserId',
+                      ExpressionAttributeValues: {
+                        ':expectedUserId': invitedUser.userId,
+                      },
+                    },
+                  } satisfies TransactItem,
+                ]
+              : []),
+            {
+              ConditionCheck: {
+                TableName: this.tableName,
+                Key: { pk: householdKey(invite.householdId) },
+                ConditionExpression:
+                  'attribute_exists(pk) AND attribute_not_exists(deleting)',
+              },
+            },
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: item,
+                ConditionExpression: item.revokedAt
+                  ? 'attribute_exists(pk) AND attribute_not_exists(acceptedAt) AND attribute_not_exists(privacyRedacted)'
+                  : 'attribute_not_exists(pk)',
+              },
+            },
+          ],
+        }),
+      );
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        error.name !== 'TransactionCanceledException'
+      )
+        throw error;
+      throw new ConflictException('Invitation changed; refresh and retry');
+    }
 
     return this.toInvite(item);
   }
@@ -110,7 +316,31 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
   async saveActivity(activity: HouseholdActivity): Promise<HouseholdActivity> {
     const item = this.toActivityItem(activity);
 
-    await this.put(item);
+    try {
+      await this.dynamoDb.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            ...this.activeUserChecks([item.actorUserId, item.targetUserId]),
+            {
+              ConditionCheck: {
+                TableName: this.tableName,
+                Key: { pk: householdKey(activity.householdId) },
+                ConditionExpression:
+                  'attribute_exists(pk) AND attribute_not_exists(deleting)',
+              },
+            },
+            { Put: { TableName: this.tableName, Item: item } },
+          ],
+        }),
+      );
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        error.name !== 'TransactionCanceledException'
+      )
+        throw error;
+      // A concurrent household deletion also removes its activity stream.
+    }
 
     return this.toActivity(item);
   }
@@ -120,15 +350,27 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       new GetCommand({
         TableName: this.tableName,
         Key: { pk: householdKey(id) },
+        ConsistentRead: true,
       }),
     );
 
-    return result.Item ? this.toHousehold(result.Item as HouseholdItem) : null;
+    return result.Item && !result.Item.deleting
+      ? this.toHousehold(result.Item as HouseholdItem)
+      : null;
   }
 
   async findMembershipByUserId(
     userId: string,
   ): Promise<HouseholdMembership | null> {
+    const canonical = await this.dynamoDb.send(
+      new GetCommand({
+        TableName: this.tableName,
+        Key: { pk: membershipByUserKey(userId) },
+        ConsistentRead: true,
+      }),
+    );
+    if (canonical.Item)
+      return this.toMembership(canonical.Item as MembershipItem);
     const [item] = await this.query<MembershipItem>({
       IndexName: 'gsi1',
       KeyConditionExpression: 'gsi1pk = :gsi1pk',
@@ -138,38 +380,76 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       Limit: 1,
     });
 
-    if (item) {
+    if (!item) return null;
+    // Migrate an existing legacy key atomically; never recreate a removed membership from a stale GSI.
+    if (item.pk === membershipByUserKey(userId)) return null;
+    try {
+      await this.dynamoDb.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            ...this.activeUserChecks([item.userId]),
+            {
+              ConditionCheck: {
+                TableName: this.tableName,
+                Key: { pk: householdKey(item.householdId) },
+                ConditionExpression:
+                  'attribute_exists(pk) AND attribute_not_exists(deleting)',
+              },
+            },
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: { ...item, pk: membershipByUserKey(userId) },
+                ConditionExpression: 'attribute_not_exists(pk)',
+              },
+            },
+            {
+              Delete: {
+                TableName: this.tableName,
+                Key: { pk: item.pk },
+                ConditionExpression: 'updatedAt = :expected',
+                ExpressionAttributeValues: { ':expected': item.updatedAt },
+              },
+            },
+          ],
+        }),
+      );
       return this.toMembership(item);
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        error.name !== 'TransactionCanceledException'
+      )
+        throw error;
+      const winner = await this.dynamoDb.send(
+        new GetCommand({
+          TableName: this.tableName,
+          Key: { pk: membershipByUserKey(userId) },
+          ConsistentRead: true,
+        }),
+      );
+      if (winner.Item) return this.toMembership(winner.Item as MembershipItem);
+      // Closing blocks migration, but must not look like "no membership" and
+      // cause first-access code to create another household for a legacy user.
+      const legacy = await this.dynamoDb.send(
+        new GetCommand({
+          TableName: this.tableName,
+          Key: { pk: item.pk },
+          ConsistentRead: true,
+        }),
+      );
+      return legacy.Item
+        ? this.toMembership(legacy.Item as MembershipItem)
+        : null;
     }
-
-    const [legacyItem] = await this.scan<MembershipItem>({
-      FilterExpression: '#entityType = :entityType AND userId = :userId',
-      ExpressionAttributeNames: {
-        '#entityType': 'entityType',
-      },
-      ExpressionAttributeValues: {
-        ':entityType': 'HOUSEHOLD_MEMBERSHIP',
-        ':userId': userId,
-      },
-    });
-
-    return legacyItem ? this.toMembership(legacyItem) : null;
   }
 
   async findMembershipByHouseholdAndUserId(
     householdId: string,
     userId: string,
   ): Promise<HouseholdMembership | null> {
-    const result = await this.dynamoDb.send(
-      new GetCommand({
-        TableName: this.tableName,
-        Key: { pk: membershipKey(householdId, userId) },
-      }),
-    );
-
-    return result.Item
-      ? this.toMembership(result.Item as MembershipItem)
-      : null;
+    const membership = await this.findMembershipByUserId(userId);
+    return membership?.householdId === householdId ? membership : null;
   }
 
   async findMembersByHouseholdId(
@@ -185,32 +465,17 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       },
     });
 
-    if (items.length > 0) {
-      return items.map((item) => this.toMembership(item));
-    }
-
-    const legacyItems = await this.scan<MembershipItem>({
-      FilterExpression:
-        '#entityType = :entityType AND householdId = :householdId',
-      ExpressionAttributeNames: {
-        '#entityType': 'entityType',
-      },
-      ExpressionAttributeValues: {
-        ':entityType': 'HOUSEHOLD_MEMBERSHIP',
-        ':householdId': householdId,
-      },
-    });
-
-    return legacyItems
-      .sort((left, right) => left.joinedAt.localeCompare(right.joinedAt))
-      .map((item) => this.toMembership(item));
+    return items.map((item) => this.toMembership(item));
   }
 
   async deleteMembership(householdId: string, userId: string): Promise<void> {
     await this.dynamoDb.send(
       new DeleteCommand({
         TableName: this.tableName,
-        Key: { pk: membershipKey(householdId, userId) },
+        Key: { pk: membershipByUserKey(userId) },
+        ConditionExpression:
+          'attribute_not_exists(pk) OR householdId = :household',
+        ExpressionAttributeValues: { ':household': householdId },
       }),
     );
   }
@@ -235,27 +500,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       .filter((invite) => invite.isActive(now))
       .slice(0, 25);
 
-    if (indexedInvites.length > 0) {
-      return indexedInvites;
-    }
-
-    const legacyItems = await this.scan<InviteItem>({
-      FilterExpression:
-        '#entityType = :entityType AND householdId = :householdId AND expiresAt > :now AND attribute_not_exists(acceptedAt) AND attribute_not_exists(revokedAt)',
-      ExpressionAttributeNames: {
-        '#entityType': 'entityType',
-      },
-      ExpressionAttributeValues: {
-        ':entityType': 'HOUSEHOLD_INVITE',
-        ':householdId': householdId,
-        ':now': now.toISOString(),
-      },
-    });
-
-    return legacyItems
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-      .slice(0, 25)
-      .map((item) => this.toInvite(item));
+    return indexedInvites;
   }
 
   async findInviteById(id: string): Promise<HouseholdInvite | null> {
@@ -281,22 +526,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       Limit: 1,
     });
 
-    if (item) {
-      return this.toInvite(item);
-    }
-
-    const [legacyItem] = await this.scan<InviteItem>({
-      FilterExpression: '#entityType = :entityType AND tokenHash = :tokenHash',
-      ExpressionAttributeNames: {
-        '#entityType': 'entityType',
-      },
-      ExpressionAttributeValues: {
-        ':entityType': 'HOUSEHOLD_INVITE',
-        ':tokenHash': tokenHash,
-      },
-    });
-
-    return legacyItem ? this.toInvite(legacyItem) : null;
+    return item ? this.toInvite(item) : null;
   }
 
   async findActivitiesByHouseholdId(
@@ -315,96 +545,357 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       },
     });
 
-    if (items.length > 0) {
-      return items.map((item) => this.toActivity(item));
+    return items.map((item) => this.toActivity(item));
+  }
+
+  async deleteAccountHouseholdReferences(
+    userId: string,
+    email: string,
+  ): Promise<void> {
+    const normalizedEmail = email.trim().toLocaleLowerCase('en-US');
+    let cursor: Record<string, unknown> | undefined;
+
+    do {
+      // ponytail: O(shared users table) is the current privacy-safe ceiling;
+      // migrate household children to an owner base partition/strong manifest before table growth.
+      const page = await this.dynamoDb.send(
+        new ScanCommand({
+          TableName: this.tableName,
+          ConsistentRead: true,
+          FilterExpression:
+            '(entityType = :activity AND (actorUserId = :user OR targetUserId = :user)) OR (entityType = :invite AND (invitedByUserId = :user OR invitedEmail = :email)) OR (entityType = :membership AND userId = :user)',
+          ExpressionAttributeValues: {
+            ':activity': 'HOUSEHOLD_ACTIVITY',
+            ':invite': 'HOUSEHOLD_INVITE',
+            ':membership': 'HOUSEHOLD_MEMBERSHIP',
+            ':user': userId,
+            ':email': normalizedEmail,
+          },
+          ...(cursor ? { ExclusiveStartKey: cursor } : {}),
+        }),
+      );
+      const changes = (page.Items ?? []).map((item) =>
+        this.accountDeletionChange(item, userId, normalizedEmail),
+      );
+      for (let offset = 0; offset < changes.length; offset += 100) {
+        await this.dynamoDb.send(
+          new TransactWriteCommand({
+            TransactItems: changes.slice(offset, offset + 100),
+          }),
+        );
+      }
+      cursor = page.LastEvaluatedKey;
+    } while (cursor);
+  }
+
+  async beginHouseholdDeletion(
+    householdId: string,
+    ownerUserId: string,
+  ): Promise<HouseholdDeletionLock> {
+    const token = randomUUID();
+    let parentLocked = true;
+    try {
+      await this.dynamoDb.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: { pk: householdKey(householdId) },
+          UpdateExpression: 'SET deleting = :token',
+          ConditionExpression: 'ownerUserId = :owner',
+          ExpressionAttributeValues: { ':token': token, ':owner': ownerUserId },
+        }),
+      );
+    } catch (error) {
+      if ((error as Error).name === 'ConditionalCheckFailedException') {
+        const parent = await this.dynamoDb.send(
+          new GetCommand({
+            TableName: this.tableName,
+            Key: { pk: householdKey(householdId) },
+            ConsistentRead: true,
+          }),
+        );
+        if (parent.Item)
+          throw new ConflictException('Household changed; refresh and retry');
+        parentLocked = false;
+      } else {
+        throw error;
+      }
     }
+    let cursor: Record<string, unknown> | undefined;
+    do {
+      // Acceptance/migration now cannot add or move member records. A GSI is
+      // unsuitable here because an omitted recent member would permit data loss.
+      // ponytail: O(shared users table); add a transactionally maintained member manifest before growth.
+      const page = await this.dynamoDb.send(
+        new ScanCommand({
+          TableName: this.tableName,
+          ConsistentRead: true,
+          FilterExpression:
+            'entityType = :member AND householdId = :household AND userId <> :owner',
+          ExpressionAttributeValues: {
+            ':member': 'HOUSEHOLD_MEMBERSHIP',
+            ':household': householdId,
+            ':owner': ownerUserId,
+          },
+          ...(cursor ? { ExclusiveStartKey: cursor } : {}),
+        }),
+      );
+      if (page.Items?.length) {
+        try {
+          await this.dynamoDb.send(
+            new UpdateCommand({
+              TableName: this.tableName,
+              Key: { pk: householdKey(householdId) },
+              UpdateExpression: 'REMOVE deleting',
+              ConditionExpression: 'deleting = :token',
+              ExpressionAttributeValues: { ':token': token },
+            }),
+          );
+        } catch (error) {
+          // Never reopen a newer concurrent deletion attempt's lock.
+          if ((error as Error).name !== 'ConditionalCheckFailedException')
+            throw error;
+        }
+        return { canDelete: false };
+      }
+      cursor = page.LastEvaluatedKey;
+    } while (cursor);
+    return {
+      canDelete: true,
+      ...(parentLocked ? { token } : {}),
+    };
+  }
 
-    const legacyItems = await this.scan<ActivityItem>({
-      FilterExpression:
-        '#entityType = :entityType AND householdId = :householdId',
-      ExpressionAttributeNames: {
-        '#entityType': 'entityType',
-      },
-      ExpressionAttributeValues: {
-        ':entityType': 'HOUSEHOLD_ACTIVITY',
-        ':householdId': householdId,
-      },
-    });
-
-    return legacyItems
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-      .slice(0, limit)
-      .map((item) => this.toActivity(item));
+  async cancelHouseholdDeletion(
+    householdId: string,
+    ownerUserId: string,
+    token: string,
+  ): Promise<void> {
+    for (let attempt = 1; attempt <= HOUSEHOLD_UNLOCK_MAX_ATTEMPTS; attempt++) {
+      try {
+        await this.dynamoDb.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              {
+                ConditionCheck: {
+                  TableName: this.tableName,
+                  Key: { pk: accountDeletionJobKey(ownerUserId) },
+                  ConditionExpression: 'attribute_not_exists(pk)',
+                },
+              },
+              {
+                Update: {
+                  TableName: this.tableName,
+                  Key: { pk: householdKey(householdId) },
+                  UpdateExpression: 'REMOVE deleting',
+                  ConditionExpression:
+                    'ownerUserId = :owner AND deleting = :token',
+                  ExpressionAttributeValues: {
+                    ':owner': ownerUserId,
+                    ':token': token,
+                  },
+                },
+              },
+            ],
+          }),
+        );
+        return;
+      } catch (error) {
+        if ((error as Error).name !== 'TransactionCanceledException') {
+          throw error;
+        }
+        const job = await this.dynamoDb.send(
+          new GetCommand({
+            TableName: this.tableName,
+            Key: { pk: accountDeletionJobKey(ownerUserId) },
+            ConsistentRead: true,
+          }),
+        );
+        if (job.Item) return;
+        const household = await this.dynamoDb.send(
+          new GetCommand({
+            TableName: this.tableName,
+            Key: { pk: householdKey(householdId) },
+            ConsistentRead: true,
+          }),
+        );
+        if (
+          household.Item?.ownerUserId !== ownerUserId ||
+          household.Item?.deleting !== token
+        ) {
+          return;
+        }
+        if (attempt === HOUSEHOLD_UNLOCK_MAX_ATTEMPTS) throw error;
+      }
+    }
   }
 
   async deleteHouseholdCascade(householdId: string): Promise<void> {
-    const indexedItems = await this.query<
-      HouseholdItem | MembershipItem | InviteItem | ActivityItem
-    >({
-      IndexName: 'gsi2',
-      KeyConditionExpression: 'gsi2pk = :gsi2pk',
-      ExpressionAttributeValues: {
-        ':gsi2pk': householdRecordsKey(householdId),
-      },
-    });
-    const legacyItems = await this.scan<
-      HouseholdItem | MembershipItem | InviteItem | ActivityItem
-    >({
-      FilterExpression: 'pk = :householdPk OR householdId = :householdId',
-      ExpressionAttributeValues: {
-        ':householdPk': householdKey(householdId),
-        ':householdId': householdId,
-      },
-    });
-    const items = deduplicateByPk([...indexedItems, ...legacyItems]);
-
-    await Promise.all(
-      items.map((item) =>
-        this.dynamoDb.send(
-          new DeleteCommand({
-            TableName: this.tableName,
-            Key: { pk: item.pk },
-          }),
-        ),
-      ),
-    );
-  }
-
-  private async put(
-    item: HouseholdItem | MembershipItem | InviteItem | ActivityItem,
-  ): Promise<void> {
+    // Keep a closed tombstone until the strong sweep succeeds, so a retry can resume.
+    try {
+      await this.dynamoDb.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: { pk: householdKey(householdId) },
+          UpdateExpression: 'SET deleting = if_not_exists(deleting, :token)',
+          ConditionExpression: 'attribute_exists(pk)',
+          ExpressionAttributeValues: { ':token': randomUUID() },
+        }),
+      );
+    } catch (error) {
+      if ((error as Error).name !== 'ConditionalCheckFailedException')
+        throw error;
+    }
+    let cursor: Record<string, unknown> | undefined;
+    do {
+      // Privacy cleanup needs a strong read; GSI propagation can miss recent writes.
+      // ponytail: O(shared users table); move children to an owner partition/strong manifest before growth.
+      const page = await this.dynamoDb.send(
+        new ScanCommand({
+          TableName: this.tableName,
+          ConsistentRead: true,
+          FilterExpression:
+            'householdId = :household AND entityType IN (:householdEntity, :membership, :invite, :activity)',
+          ExpressionAttributeValues: {
+            ':household': householdId,
+            ':householdEntity': 'HOUSEHOLD',
+            ':membership': 'HOUSEHOLD_MEMBERSHIP',
+            ':invite': 'HOUSEHOLD_INVITE',
+            ':activity': 'HOUSEHOLD_ACTIVITY',
+          },
+          ...(cursor ? { ExclusiveStartKey: cursor } : {}),
+        }),
+      );
+      for (const item of page.Items ?? []) {
+        if (typeof item.pk !== 'string')
+          throw new Error('Invalid household record key');
+        try {
+          await this.dynamoDb.send(
+            new DeleteCommand({
+              TableName: this.tableName,
+              Key: { pk: item.pk },
+              ConditionExpression:
+                'householdId = :household AND entityType IN (:householdEntity, :membership, :invite, :activity)',
+              ExpressionAttributeValues: {
+                ':household': householdId,
+                ':householdEntity': 'HOUSEHOLD',
+                ':membership': 'HOUSEHOLD_MEMBERSHIP',
+                ':invite': 'HOUSEHOLD_INVITE',
+                ':activity': 'HOUSEHOLD_ACTIVITY',
+              },
+            }),
+          );
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            error.name !== 'ConditionalCheckFailedException'
+          )
+            throw error;
+          // The canonical user key may already belong to another household.
+        }
+      }
+      cursor = page.LastEvaluatedKey;
+    } while (cursor);
     await this.dynamoDb.send(
-      new PutCommand({
+      new DeleteCommand({
         TableName: this.tableName,
-        Item: item,
+        Key: { pk: householdKey(householdId) },
       }),
     );
   }
 
-  private async scan<T>(
-    input: Omit<ConstructorParameters<typeof ScanCommand>[0], 'TableName'>,
-  ): Promise<T[]> {
-    const items: T[] = [];
-    let exclusiveStartKey: Record<string, unknown> | undefined;
-
-    do {
-      const result = await this.dynamoDb.send(
-        new ScanCommand({
+  private activeUserChecks(userIds: Array<string | undefined>): TransactItem[] {
+    const now = new Date().toISOString();
+    return [...new Set(userIds.filter((id): id is string => Boolean(id)))].map(
+      (userId) => ({
+        ConditionCheck: {
           TableName: this.tableName,
-          ...input,
-          ...(exclusiveStartKey
-            ? { ExclusiveStartKey: exclusiveStartKey }
-            : {}),
-        }),
-      );
+          Key: { pk: userKey(userId) },
+          ConditionExpression:
+            'attribute_exists(pk) AND #status = :active AND (attribute_not_exists(deletionFenceExpiresAt) OR deletionFenceExpiresAt <= :now)',
+          ExpressionAttributeNames: { '#status': 'status' },
+          ExpressionAttributeValues: { ':active': 'active', ':now': now },
+        },
+      }),
+    );
+  }
 
-      items.push(...((result.Items ?? []) as T[]));
-      exclusiveStartKey = result.LastEvaluatedKey as
-        | Record<string, unknown>
-        | undefined;
-    } while (exclusiveStartKey);
+  private async findUserLookup(
+    email: string,
+  ): Promise<{ userId: string } | undefined> {
+    const result = await this.dynamoDb.send(
+      new GetCommand({
+        TableName: this.tableName,
+        Key: { pk: emailKey(email) },
+        ConsistentRead: true,
+      }),
+    );
+    return typeof result.Item?.userId === 'string'
+      ? { userId: result.Item.userId }
+      : undefined;
+  }
 
-    return items;
+  private accountDeletionChange(
+    item: Record<string, unknown>,
+    userId: string,
+    email: string,
+  ): TransactItem {
+    if (typeof item.pk !== 'string')
+      throw new Error('Invalid household record key');
+    if (item.entityType === 'HOUSEHOLD_MEMBERSHIP') {
+      return {
+        Delete: {
+          TableName: this.tableName,
+          Key: { pk: item.pk },
+          ConditionExpression: 'userId = :user',
+          ExpressionAttributeValues: { ':user': userId },
+        },
+      };
+    }
+    if (item.entityType === 'HOUSEHOLD_ACTIVITY') {
+      const actorMatches = item.actorUserId === userId;
+      const targetMatches = item.targetUserId === userId;
+      const updates = [
+        ...(actorMatches ? ['actorUserId = :anonymousUser'] : []),
+        ...(targetMatches
+          ? ['targetUserId = :anonymousUser', 'targetLabel = :anonymousLabel']
+          : []),
+      ];
+      return {
+        Update: {
+          TableName: this.tableName,
+          Key: { pk: item.pk },
+          UpdateExpression: `SET ${updates.join(', ')}`,
+          ConditionExpression: 'actorUserId = :user OR targetUserId = :user',
+          ExpressionAttributeValues: {
+            ':user': userId,
+            ':anonymousUser': ANONYMIZED_USER_ID,
+            ...(targetMatches ? { ':anonymousLabel': ANONYMIZED_LABEL } : {}),
+          },
+        },
+      };
+    }
+    if (item.entityType === 'HOUSEHOLD_INVITE') {
+      const inviterMatches = item.invitedByUserId === userId;
+      const now = new Date().toISOString();
+      return {
+        Update: {
+          TableName: this.tableName,
+          Key: { pk: item.pk },
+          UpdateExpression: `SET invitedEmail = :anonymousEmail, revokedAt = :now, updatedAt = :now, privacyRedacted = :redacted${inviterMatches ? ', invitedByUserId = :anonymousUser' : ''}`,
+          ConditionExpression:
+            'invitedByUserId = :user OR invitedEmail = :email',
+          ExpressionAttributeValues: {
+            ':user': userId,
+            ':email': email,
+            ':anonymousEmail': ANONYMIZED_EMAIL,
+            ':now': now,
+            ':redacted': true,
+            ...(inviterMatches ? { ':anonymousUser': ANONYMIZED_USER_ID } : {}),
+          },
+        },
+      };
+    }
+    throw new Error('Unsupported household privacy record');
   }
 
   private async query<T>(
@@ -453,7 +944,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
     const primitives = membership.toPrimitives();
 
     return {
-      pk: membershipKey(primitives.householdId, primitives.userId),
+      pk: membershipByUserKey(primitives.userId),
       entityType: 'HOUSEHOLD_MEMBERSHIP',
       gsi1pk: membershipByUserKey(primitives.userId),
       gsi1sk: primitives.householdId,
@@ -570,8 +1061,16 @@ function householdKey(id: string): string {
   return `HOUSEHOLD#${id}`;
 }
 
-function membershipKey(householdId: string, userId: string): string {
-  return `HOUSEHOLD#${householdId}#MEMBER#${userId}`;
+function accountDeletionJobKey(userId: string): string {
+  return `ACCOUNT_DELETION_JOB#${userId}`;
+}
+
+function userKey(id: string): string {
+  return `USER#${id}`;
+}
+
+function emailKey(email: string): string {
+  return `EMAIL#${email.trim().toLocaleLowerCase('en-US')}`;
 }
 
 function inviteKey(id: string): string {
@@ -592,12 +1091,4 @@ function membershipByUserKey(userId: string): string {
 
 function inviteByTokenKey(tokenHash: string): string {
   return `HOUSEHOLD_INVITE_BY_TOKEN#${tokenHash}`;
-}
-
-function deduplicateByPk<T extends { pk: string }>(items: T[]): T[] {
-  const uniqueItems = new Map<string, T>();
-
-  items.forEach((item) => uniqueItems.set(item.pk, item));
-
-  return [...uniqueItems.values()];
 }

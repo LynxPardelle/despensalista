@@ -46,6 +46,7 @@ export class SignOutAllSessionsUseCase {
       revokedCognitoSessionCount:
         await this.cognitoUserAdmin.signOutUsersBySubjectIds(
           user.authSubjectIds,
+          user.authUsernamesBySubject,
         ),
     };
   }

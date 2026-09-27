@@ -11,6 +11,10 @@ describe('CognitoProfileSyncService', () => {
     findByAuthSubject: jest.fn(),
     findByEmail: jest.fn(),
     findByUsername: jest.fn(),
+    beginAccountDeletion: jest.fn(),
+    findPendingAccountDeletions: jest.fn(),
+    claimPendingAccountDeletion: jest.fn(),
+    deferAccountDeletion: jest.fn(),
     delete: jest.fn(),
   });
 
@@ -24,11 +28,13 @@ describe('CognitoProfileSyncService', () => {
     email?: string;
     username?: string;
     status?: UserAccountStatus;
+    authSubjectIds?: string[];
   }) =>
     User.fromPrimitives({
       id: overrides?.id ?? 'cognito-sub-existing',
       email: overrides?.email ?? 'old@example.com',
       username: overrides?.username ?? 'old-name',
+      authSubjectIds: overrides?.authSubjectIds,
       status: overrides?.status ?? UserAccountStatus.ACTIVE,
       createdAt: new Date('2026-01-01T00:00:00.000Z'),
       updatedAt: new Date('2026-01-02T00:00:00.000Z'),
@@ -41,6 +47,7 @@ describe('CognitoProfileSyncService', () => {
 
     const user = await service.syncFromClaims({
       sub: 'cognito-sub-123',
+      cognitoUsername: 'Google_authoritative-123',
       email: 'CHEF@Example.COM',
       emailVerified: true,
       preferredUsername: 'Chef',
@@ -50,6 +57,9 @@ describe('CognitoProfileSyncService', () => {
     expect(user.email).toBe('chef@example.com');
     expect(user.username).toBe('Chef');
     expect(user.authSubjectIds).toEqual(['cognito-sub-123']);
+    expect(user.authUsernamesBySubject).toEqual({
+      'cognito-sub-123': 'Google_authoritative-123',
+    });
     expect(userDao.save.mock.calls[0]?.[0]).toBe(user);
   });
 
@@ -58,12 +68,14 @@ describe('CognitoProfileSyncService', () => {
     const existing = makeUser({
       id: 'cognito-sub-disabled',
       status: UserAccountStatus.DISABLED,
+      authSubjectIds: ['cognito-sub-disabled'],
     });
     userDao.findById.mockResolvedValue(existing);
     userDao.findByUsername.mockResolvedValue(null);
 
     const user = await service.syncFromClaims({
       sub: 'cognito-sub-disabled',
+      cognitoUsername: 'cognito-disabled-user',
       email: 'new@example.com',
       emailVerified: true,
       name: 'Nuevo Nombre',
@@ -72,6 +84,9 @@ describe('CognitoProfileSyncService', () => {
     expect(user.email).toBe('new@example.com');
     expect(user.username).toBe('Nuevo Nombre');
     expect(user.authSubjectIds).toEqual(['cognito-sub-disabled']);
+    expect(user.authUsernamesBySubject).toEqual({
+      'cognito-sub-disabled': 'cognito-disabled-user',
+    });
     expect(user.status).toBe(UserAccountStatus.DISABLED);
   });
 
@@ -81,8 +96,22 @@ describe('CognitoProfileSyncService', () => {
     await expect(
       service.syncFromClaims({
         sub: 'cognito-sub-no-email',
+        cognitoUsername: 'cognito-no-email-user',
       }),
     ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('rejects Cognito claims without an authoritative username', async () => {
+    const { service, userDao } = makeService();
+
+    await expect(
+      service.syncFromClaims({
+        sub: 'cognito-sub-no-username',
+        email: 'chef@example.com',
+        emailVerified: true,
+      }),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(userDao.save).not.toHaveBeenCalled();
   });
 
   it('adds a stable suffix when the derived username is already owned by another user', async () => {
@@ -99,6 +128,7 @@ describe('CognitoProfileSyncService', () => {
 
     const user = await service.syncFromClaims({
       sub: '1234567890abcdef',
+      cognitoUsername: 'cognito-collision-user',
       email: 'chef@example.com',
       emailVerified: true,
     });
@@ -120,6 +150,7 @@ describe('CognitoProfileSyncService', () => {
 
     const user = await service.syncFromClaims({
       sub: 'same-sub',
+      cognitoUsername: 'cognito-same-user',
       email: 'same@example.com',
       emailVerified: true,
       preferredUsername: 'chef',
@@ -142,6 +173,7 @@ describe('CognitoProfileSyncService', () => {
 
     const user = await service.syncFromClaims({
       sub: 'new-cognito-sub',
+      cognitoUsername: 'Google_linked-user',
       email: 'CHEF@example.com',
       emailVerified: true,
       preferredUsername: 'chef',
@@ -149,6 +181,9 @@ describe('CognitoProfileSyncService', () => {
 
     expect(user.id.toString()).toBe('stable-app-user');
     expect(user.authSubjectIds).toEqual(['new-cognito-sub']);
+    expect(user.authUsernamesBySubject).toEqual({
+      'new-cognito-sub': 'Google_linked-user',
+    });
   });
 
   it('rejects linking by email when Cognito has not verified the email claim', async () => {
@@ -165,6 +200,7 @@ describe('CognitoProfileSyncService', () => {
     await expect(
       service.syncFromClaims({
         sub: 'new-cognito-sub',
+        cognitoUsername: 'Google_unverified-user',
         email: 'chef@example.com',
         emailVerified: false,
       }),

@@ -61,6 +61,8 @@
             <input
               type="number"
               formControlName="expirationWarningDays"
+              [attr.aria-invalid]="preferencesForm.controls.expirationWarningDays.invalid && preferencesForm.controls.expirationWarningDays.touched"
+              [attr.aria-describedby]="preferencesForm.invalid && preferencesForm.touched ? 'preferences-error' : null"
               min="1"
               max="60"
               step="1"
@@ -84,6 +86,8 @@
             <input
               type="number"
               formControlName="depletionWarningThresholdRatio"
+              [attr.aria-invalid]="preferencesForm.controls.depletionWarningThresholdRatio.invalid && preferencesForm.controls.depletionWarningThresholdRatio.touched"
+              [attr.aria-describedby]="preferencesForm.invalid && preferencesForm.touched ? 'preferences-error' : null"
               min="0.25"
               max="4"
               step="0.25"
@@ -102,6 +106,8 @@
             <input
               type="number"
               formControlName="shoppingPlanLeadDays"
+              [attr.aria-invalid]="preferencesForm.controls.shoppingPlanLeadDays.invalid && preferencesForm.controls.shoppingPlanLeadDays.touched"
+              [attr.aria-describedby]="preferencesForm.invalid && preferencesForm.touched ? 'preferences-error' : null"
               min="0"
               max="30"
               step="1"
@@ -127,7 +133,7 @@
         </fieldset>
 
         @if (preferencesForm.invalid && preferencesForm.touched) {
-          <p class="field-error" role="alert">
+          <p id="preferences-error" class="field-error" role="alert">
             Los rangos permitidos son: caducidad 1-60, sensibilidad 0.25-4,
             compras 0-30.
           </p>
@@ -255,6 +261,10 @@
       <aside class="panel household-panel">
         <p class="panel-kicker">Hogar</p>
         <h2>Colaboraci&oacute;n</h2>
+        <p class="helper-copy">
+          Cada cuenta pertenece a un hogar. Si eres integrante de otro hogar, su propietario debe quitarte antes de aceptar una nueva invitación.
+          Las cuentas propietarias conservan su hogar; no se trasladan automáticamente su despensa ni sus datos.
+        </p>
 
         @if (householdLoading) {
           <p class="loading-copy" aria-live="polite">Cargando hogar...</p>
@@ -365,6 +375,10 @@
             </section>
           }
 
+        } @else if (householdError) {
+          <p class="field-error" role="alert">{{ householdError }}</p>
+        }
+
           <form class="preferences-form" [formGroup]="householdAcceptForm" (ngSubmit)="acceptHouseholdInvite()">
             <label class="field">
               <span>Aceptar invitaci&oacute;n</span>
@@ -378,10 +392,6 @@
               {{ householdAccepting ? 'Aceptando...' : 'Aceptar invitaci&oacute;n' }}
             </button>
           </form>
-        } @else if (householdError) {
-          <p class="field-error" role="alert">{{ householdError }}</p>
-          <button class="secondary-button" type="button" (click)="loadHouseholdWorkspace()">Reintentar</button>
-        }
       </aside>
 
       <aside class="panel export-panel">

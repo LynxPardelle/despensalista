@@ -6,7 +6,8 @@ import {
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
 import { ProductTypeId } from '../../domain/value-objects/product-type-id.vo';
 import { UserId } from '../../domain/value-objects/user-id.vo';
-import { PRODUCT_TYPE_REPOSITORY } from '../tokens';
+import { PRODUCT_TYPE_REPOSITORY, PANTRY_MUTATION_PORT } from '../tokens';
+import { PantryMutationPort } from '../ports/pantry-mutation.port';
 
 export interface UpdateProductTypeShoppingMetadataCommand {
   productTypeId: string;
@@ -19,6 +20,8 @@ export class UpdateProductTypeShoppingMetadataUseCase {
   constructor(
     @Inject(PRODUCT_TYPE_REPOSITORY)
     private readonly productTypeRepository: ProductTypeRepository,
+    @Inject(PANTRY_MUTATION_PORT)
+    private readonly pantryMutationPort: PantryMutationPort,
   ) {}
 
   async execute(
@@ -29,9 +32,10 @@ export class UpdateProductTypeShoppingMetadataUseCase {
       command.userId,
     );
 
+    const expected = ProductType.fromPrimitives(productType.toPrimitives());
     productType.updateShoppingMetadata(command.shoppingMetadata);
 
-    return this.productTypeRepository.save(productType);
+    return this.pantryMutationPort.updateProductType(expected, productType);
   }
 
   private async findOwnedProductType(

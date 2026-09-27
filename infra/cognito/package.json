@@ -4,17 +4,18 @@
   "private": true,
   "scripts": {
     "build": "tsc --noEmit",
+    "test": "node --test -r ts-node/register test/*.test.ts",
     "synth": "cdk synth",
     "diff": "cdk diff",
     "deploy": "cdk deploy",
     "synth:dev": "cdk synth --context stage=dev --context includeServerlessBackend=true --context removalPolicy=destroy --context domainPrefix=despensalista-dev-validate --context productionFrontendBaseUrl=https://dev.despensalista.lynxpardelle.com --context serverlessFrontendBaseUrl=https://dev.despensalista.lynxpardelle.com --context appDomainName=dev.despensalista.lynxpardelle.com",
     "synth:tst": "cdk synth --context stage=tst --context includeServerlessBackend=true --context removalPolicy=destroy --context domainPrefix=despensalista-tst-validate --context productionFrontendBaseUrl=https://test.despensalista.lynxpardelle.com --context serverlessFrontendBaseUrl=https://test.despensalista.lynxpardelle.com --context appDomainName=test.despensalista.lynxpardelle.com",
     "synth:prod": "cdk synth --context stage=prod --context includeServerlessBackend=true --context removalPolicy=retain --context deletionProtection=true --context domainPrefix=despensalista-prod-validate --context productionFrontendBaseUrl=https://despensalista.lynxpardelle.com --context serverlessFrontendBaseUrl=https://despensalista.lynxpardelle.com --context appDomainName=despensalista.lynxpardelle.com --context externallyManagedSocialProviders=Google",
-    "validate": "npm run build && npm run synth",
-    "validate:serverless": "npm run build && npm run synth:dev && npm run synth:tst && npm run synth:prod"
+    "validate": "npm run build && npm test && npm run synth",
+    "validate:serverless": "npm run build && npm test && npm run synth:dev && npm run synth:tst && npm run synth:prod"
   },
   "dependencies": {
-    "aws-cdk-lib": "^2.258.0",
+    "aws-cdk-lib": "^2.267.0",
     "constructs": "^10.4.2"
   },
   "devDependencies": {

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import AppServerModule from './main.server';
 import {
   applyApiCacheHeaders,
+  buildApiProxyTarget,
   buildProxyHeaders,
   isAbortError,
 } from './server-proxy';
@@ -60,7 +61,7 @@ app.use('/api', express.json({ limit: '1mb' }), async (req, res, next) => {
 
   try {
     const targetPath = req.originalUrl || '/api';
-    const targetUrl = new URL(targetPath, backendUrl);
+    const targetUrl = buildApiProxyTarget(backendUrl, targetPath);
     const headers = buildProxyHeaders(req);
 
     const requestInit: RequestInit = {

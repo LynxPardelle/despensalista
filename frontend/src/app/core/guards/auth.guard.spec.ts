@@ -1,6 +1,6 @@
 import { PLATFORM_ID } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { ActivatedRouteSnapshot, Router, RouterStateSnapshot, UrlTree } from '@angular/router';
+import { ActivatedRouteSnapshot, convertToParamMap, Router, RouterStateSnapshot, UrlTree } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 import { BehaviorSubject, Observable, firstValueFrom, isObservable } from 'rxjs';
 import { AuthFacade } from '../services/auth.facade';
@@ -50,6 +50,36 @@ describe('AuthGuard', () => {
 
     expect(result).toBeTrue();
     expect(authFacade.bootstrap).not.toHaveBeenCalled();
+  });
+
+  it('preserves an invitation when an existing session visits the login route', async () => {
+    document.cookie = 'XSRF-TOKEN=test; path=/';
+    authFacade.sessionStatus$.next('authenticated');
+    const invitation = '/profile?householdInvite=fresh-token';
+    const result = await resolveGuardResult(guard.canActivate({
+      data: { authMode: 'anonymous' },
+      queryParamMap: convertToParamMap({ redirectTo: invitation }),
+    } as unknown as ActivatedRouteSnapshot, { url: '/login' } as RouterStateSnapshot));
+    expect(TestBed.inject(Router).serializeUrl(result as UrlTree)).toBe(invitation);
+  });
+
+  it('preserves the requested invitation route while asking an anonymous user to sign in', async () => {
+    const invitation = '/profile?householdInvite=fresh-token';
+    const result = await resolveGuardResult(guard.canActivate({
+      data: { authMode: 'authenticated' },
+    } as unknown as ActivatedRouteSnapshot, { url: invitation } as RouterStateSnapshot));
+    expect((result as UrlTree).queryParams['redirectTo']).toBe(invitation);
+  });
+
+  it('rejects external login return destinations for an existing session', async () => {
+    document.cookie = 'XSRF-TOKEN=test; path=/';
+    authFacade.sessionStatus$.next('authenticated');
+    for (const redirectTo of ['//evil.example', '/\\evil.example', 'https://evil.example']) {
+      const result = await resolveGuardResult(guard.canActivate({
+        data: { authMode: 'anonymous' }, queryParamMap: convertToParamMap({ redirectTo }),
+      } as unknown as ActivatedRouteSnapshot, { url: '/login' } as RouterStateSnapshot));
+      expect(TestBed.inject(Router).serializeUrl(result as UrlTree)).toBe('/pantry');
+    }
   });
 });
 

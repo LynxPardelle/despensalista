@@ -1,3 +1,4 @@
+import { getUserErrorMessage } from '../../shared/user-error';
 import { Injectable } from '@angular/core';
 import {
   HttpClient,
@@ -110,17 +111,7 @@ export class AuthApiService {
   }
 
   getErrorMessage(error: unknown): string {
-    if (error instanceof HttpErrorResponse) {
-      const apiMessage =
-        typeof error.error?.message === 'string' ? error.error.message : null;
-      return apiMessage ?? error.message;
-    }
-
-    if (error instanceof Error) {
-      return error.message;
-    }
-
-    return 'No se pudo completar la solicitud de autenticacion.';
+    return getUserErrorMessage(error);
   }
 
   isUnauthorized(error: unknown): boolean {

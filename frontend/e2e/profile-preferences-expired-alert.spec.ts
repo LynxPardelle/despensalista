@@ -45,7 +45,83 @@ test.beforeEach(async ({ page }) => {
           shoppingPlanLeadDays: 5,
           showGuidanceTips: true,
         },
+        retentionPolicy: {
+          archivedRecordRetentionDays: 365,
+          archivedRecordAutoDeleteEnabled: false,
+          temporaryShoppingShareRetentionDays: 7,
+          permanentlyDeletedRecords: 'removed_immediately',
+          accountDeletion: 'local_and_cognito_delete_requested',
+        },
+        security: {
+          stepUp: {
+            enabled: false,
+            maxAgeSeconds: 900,
+            fresh: true,
+          },
+        },
+        knownDevices: [],
       }),
+    });
+  });
+
+  await page.route('**/api/household', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        household: {
+          id: 'household-1',
+          name: 'Hogar de chef',
+          ownerUserId: 'user-1',
+          createdAt: '2026-04-01T00:00:00.000Z',
+          updatedAt: '2026-04-02T00:00:00.000Z',
+        },
+        currentMember: {
+          householdId: 'household-1',
+          userId: 'user-1',
+          email: 'chef@example.com',
+          username: 'chef',
+          role: 'owner',
+          joinedAt: '2026-04-01T00:00:00.000Z',
+          updatedAt: '2026-04-02T00:00:00.000Z',
+        },
+        members: [],
+        invites: [],
+        activities: [],
+      }),
+    });
+  });
+
+  await page.route('**/api/pantry/waste-overview', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        userId: 'user-1',
+        generatedAt: '2026-04-28T12:00:00.000Z',
+        windowDays: 30,
+        eventCount: 0,
+        estimatedLossTotal: 0,
+        totalQuantityByUnit: [],
+        reasonBreakdown: [],
+        recentEvents: [],
+      }),
+    });
+  });
+
+  await page.route('**/api/pantry/shopping-lists', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: '[]',
+    });
+  });
+
+  await page.route('**/api/pantry/shopping-shares', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: '[]',
     });
   });
 
@@ -149,6 +225,49 @@ test.beforeEach(async ({ page }) => {
       }),
     });
   });
+});
+
+test('a fresh invitation survives login and is accepted before any household or pantry read', async ({ page }) => {
+  let authenticated = false;
+  const prematureReads: string[] = [];
+  page.on('request', request => {
+    const path = new URL(request.url()).pathname;
+    if (path === '/api/household' || path === '/api/pantry/overview') prematureReads.push(path);
+  });
+  await page.route('**/api/auth/me', async route => route.fulfill({
+    status: authenticated ? 200 : 401,
+    contentType: 'application/json',
+    body: JSON.stringify(authenticated ? {
+      id: 'user-1', email: 'chef@example.com', username: 'chef', status: 'active',
+      createdAt: '2026-04-01T00:00:00.000Z', updatedAt: '2026-04-01T00:00:00.000Z',
+    } : { message: 'Unauthorized' }),
+  }));
+  await page.route('**/api/auth/cognito/providers', route => route.fulfill({
+    contentType: 'application/json', body: JSON.stringify({ providers: ['COGNITO'] }),
+  }));
+  await page.route('**/api/auth/cognito/login?**', async route => {
+    const destination = new URL(route.request().url()).searchParams.get('redirectTo');
+    expect(destination).toBe('/profile?householdInvite=fresh-invite-token');
+    authenticated = true;
+    await route.fulfill({ status: 302, headers: { location: destination! } });
+  });
+  await page.route('**/api/household/invites/accept', async route => {
+    expect(route.request().postDataJSON()).toEqual({ token: 'fresh-invite-token' });
+    expect(prematureReads).toEqual([]);
+    const now = '2026-04-01T00:00:00.000Z';
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({
+      household: { id: 'invited-household', name: 'Hogar invitado', ownerUserId: 'owner', createdAt: now, updatedAt: now },
+      currentMember: { householdId: 'invited-household', userId: 'user-1', email: 'chef@example.com', username: 'chef', role: 'editor', joinedAt: now, updatedAt: now },
+      members: [], invites: [], activities: [],
+    }) });
+  });
+  await page.goto('/profile?householdInvite=fresh-invite-token');
+  await expect(page).toHaveURL(/\/login\?redirectTo=/);
+  await page.getByRole('button', { name: 'Entrar con correo' }).click();
+  await expect(page.getByText('Invitacion aceptada.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Hogar invitado', { exact: false })).toBeVisible();
+  await expect(page).toHaveURL(/\/profile$/);
+  expect(prematureReads).toEqual([]);
 });
 
 test('loads profile preferences and saves an update', async ({ page }) => {
@@ -342,7 +461,7 @@ test('shows replenishment guidance, purchase date, per-type settings, and archiv
     });
   });
 
-  await page.route('**/api/pantry/archived', async (route) => {
+  await page.route('**/api/pantry/archived**', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -372,12 +491,15 @@ test('shows replenishment guidance, purchase date, per-type settings, and archiv
   await page.getByRole('button', { name: 'Guardar ajustes' }).click();
   expect(savedPlanningSettings).toBe(true);
 
-  page.once('dialog', async (dialog) => {
-    expect(dialog.message()).toContain('Archivar "Botella grande"');
-    await dialog.accept();
-  });
   await page.getByRole('button', { name: 'Archivar lote' }).click();
-  expect(archivedLot).toBe(true);
+  const archiveConfirmation = page.getByRole('group', {
+    name: 'Confirmar archivo de Botella grande',
+  });
+  await expect(archiveConfirmation).toContainText('Archivar Botella grande');
+  await archiveConfirmation
+    .getByRole('button', { name: 'Confirmar archivo' })
+    .click();
+  await expect.poll(() => archivedLot).toBe(true);
 
   await page.getByRole('button', { name: 'Ver archivados' }).click();
   await expect(page.getByText('No hay elementos archivados.')).toBeVisible();

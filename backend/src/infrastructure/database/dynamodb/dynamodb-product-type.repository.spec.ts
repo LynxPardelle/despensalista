@@ -7,6 +7,31 @@ import { DynamoDbDocumentClientService } from './dynamodb-document-client.servic
 import { DynamoDbProductTypeRepository } from './dynamodb-product-type.repository';
 
 describe('DynamoDbProductTypeRepository', () => {
+  it('reads active products beyond pages containing archived products', async () => {
+    const send = jest
+      .fn()
+      .mockResolvedValueOnce({
+        Items: [
+          {
+            ...buildProductTypeItem('archived', 'A'),
+            archivedAt: '2026-01-01',
+          },
+        ],
+        LastEvaluatedKey: { id: 'archived' },
+      })
+      .mockResolvedValueOnce({ Items: [buildProductTypeItem('active', 'B')] });
+    const repository = new DynamoDbProductTypeRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      {
+        getOrThrow: () => 'types',
+        get: () => undefined,
+      } as unknown as ConfigService,
+    );
+    const products = await repository.findByUserId(UserId.fromString('user-1'));
+    expect(products.map((product) => product.id.toString())).toEqual([
+      'active',
+    ]);
+  });
   it('serializes price history dates before persisting shopping metadata', async () => {
     let capturedItem: Record<string, unknown> | undefined;
     const dynamoDb = {
@@ -105,7 +130,7 @@ describe('DynamoDbProductTypeRepository', () => {
     ]);
   });
 
-  it('pages archived product types without dropping filtered DynamoDB results', async () => {
+  it('pages archived product types from the archive-ordered sparse index', async () => {
     const firstItem = {
       ...buildProductTypeItem('type-1', 'Arroz'),
       archivedAt: '2026-05-20T00:00:00.000Z',
@@ -115,25 +140,16 @@ describe('DynamoDbProductTypeRepository', () => {
       archivedAt: '2026-05-19T00:00:00.000Z',
     };
     const dynamoDb = {
-      send: jest
-        .fn()
-        .mockImplementationOnce(async (command: QueryCommand) => {
-          expect(command.input.Limit).toBe(2);
+      send: jest.fn().mockImplementation(async (command: QueryCommand) => {
+        expect(command.input.IndexName).toBe('UserArchivedAtIndex');
+        expect(command.input.ScanIndexForward).toBe(false);
+        expect(command.input.Limit).toBe(2);
 
-          return {
-            Items: [firstItem],
-            LastEvaluatedKey: { id: firstItem.id },
-          };
-        })
-        .mockImplementationOnce(async (command: QueryCommand) => {
-          expect(command.input.Limit).toBe(1);
-          expect(command.input.ExclusiveStartKey).toEqual({ id: firstItem.id });
-
-          return {
-            Items: [secondItem],
-            LastEvaluatedKey: { id: secondItem.id },
-          };
-        }),
+        return {
+          Items: [firstItem, secondItem],
+          LastEvaluatedKey: { id: secondItem.id },
+        };
+      }),
     } as unknown as DynamoDbDocumentClientService;
     const repository = new DynamoDbProductTypeRepository(
       dynamoDb,
@@ -150,6 +166,7 @@ describe('DynamoDbProductTypeRepository', () => {
       'type-2',
     ]);
     expect(page.nextCursor).toBeDefined();
+    expect(dynamoDb.send).toHaveBeenCalledTimes(1);
   });
 
   it('rejects invalid archived product type cursors before querying DynamoDB', async () => {
@@ -161,12 +178,31 @@ describe('DynamoDbProductTypeRepository', () => {
       makeConfigService('product-types'),
     );
 
-    await expect(
-      repository.findArchivedPageByUserId(UserId.fromString('user-1'), {
-        limit: 2,
-        cursor: 'bad-cursor',
-      }),
-    ).rejects.toThrow('Invalid archived product type cursor');
+    const invalidCursors = [
+      'bad-cursor',
+      Buffer.from('null').toString('base64url'),
+      Buffer.from(
+        JSON.stringify({
+          id: 'type-1',
+          userId: 'another-user',
+          archivedAt: '2026-05-20T00:00:00.000Z',
+        }),
+      ).toString('base64url'),
+      Buffer.from(
+        JSON.stringify({
+          id: 'type-1',
+          userId: 'user-1',
+        }),
+      ).toString('base64url'),
+    ];
+    for (const cursor of invalidCursors) {
+      await expect(
+        repository.findArchivedPageByUserId(UserId.fromString('user-1'), {
+          limit: 2,
+          cursor,
+        }),
+      ).rejects.toThrow('Invalid archived product type cursor');
+    }
     expect(dynamoDb.send).not.toHaveBeenCalled();
   });
 });

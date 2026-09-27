@@ -325,7 +325,9 @@
 
         <label class="field">
           <span>Cantidad del lote</span>
-          <input type="number" formControlName="quantity" min="0.1" step="0.1" />
+          <input type="number" formControlName="quantity" min="0.1" step="0.1"
+            [attr.aria-invalid]="lotForm.controls.quantity.invalid && lotForm.controls.quantity.touched"
+            [attr.aria-describedby]="lotForm.invalid && lotForm.touched ? 'lot-form-error' : null" />
         </label>
 
         <label class="field">
@@ -398,7 +400,7 @@
         </fieldset>
 
         @if (lotForm.invalid && lotForm.touched) {
-          <p class="field-error field-full">
+          <p id="lot-form-error" class="field-error field-full" role="alert">
             Revisa la informaci&oacute;n del lote antes de guardarlo.
           </p>
         }
@@ -1068,6 +1070,11 @@
               <p class="helper-copy" aria-live="polite">
                 {{ pendingShoppingCheckoutCount }} cierres de compra pendientes de sincronizar.
               </p>
+            }
+            @if (hasExpiredPendingCheckouts) {
+              <button type="button" class="ghost-button" (click)="discardExpiredPendingCheckouts()">
+                Ya revisé la despensa: descartar cierres vencidos
+              </button>
             }
 
             @if (shoppingModeActive) {
@@ -2174,6 +2181,8 @@
                               <span>Consumir de este lote</span>
                               <input
                                 #consumeInput
+                                [attr.aria-invalid]="consumeErrors[lot.lotId] ? 'true' : null"
+                                [attr.aria-describedby]="consumeErrors[lot.lotId] ? 'consume-error-' + lot.lotId : null"
                                 type="number"
                                 min="0.1"
                                 step="0.1"
@@ -2257,7 +2266,10 @@
                           }
 
                           @if (consumeErrors[lot.lotId]) {
-                            <p class="field-error lot-error">{{ consumeErrors[lot.lotId] }}</p>
+                            <p [id]="'consume-error-' + lot.lotId" class="field-error lot-error" role="alert">{{ consumeErrors[lot.lotId] }}</p>
+                          }
+                          @if (consumeNotices[lot.lotId]) {
+                            <p class="helper-copy" aria-live="polite">{{ consumeNotices[lot.lotId] }}</p>
                           }
                         </div>
                       }

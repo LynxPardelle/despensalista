@@ -10,7 +10,6 @@ import {
   ProductTypeShoppingMetadataPrimitives,
 } from '../../../domain/entities/product-type.entity';
 import {
-  MAX_ACTIVE_PRODUCT_TYPES_PER_USER,
   MAX_ARCHIVED_PANTRY_PAGE_SIZE,
   MAX_ARCHIVED_PRODUCT_TYPES_PER_USER,
   MAX_PRODUCT_TYPE_SEARCH_RESULTS,
@@ -23,6 +22,7 @@ import {
 import { ProductTypeRepository } from '../../../domain/repositories/product-type.repository';
 import { ProductTypeId } from '../../../domain/value-objects/product-type-id.vo';
 import { UserId } from '../../../domain/value-objects/user-id.vo';
+import { decodeArchiveCursor } from '../archive-cursor';
 import { DynamoDbDocumentClientService } from './dynamodb-document-client.service';
 
 type ProductTypeItem = Omit<
@@ -116,10 +116,7 @@ export class DynamoDbProductTypeRepository implements ProductTypeRepository {
   }
 
   async findByUserId(userId: UserId): Promise<ProductType[]> {
-    const productTypes = await this.findAllByUserId(
-      userId,
-      MAX_ACTIVE_PRODUCT_TYPES_PER_USER,
-    );
+    const productTypes = await this.findAllByUserId(userId);
 
     return productTypes
       .filter((productType) => !productType.archivedAt)
@@ -132,15 +129,12 @@ export class DynamoDbProductTypeRepository implements ProductTypeRepository {
 
     do {
       const page = await this.findArchivedPageByUserId(userId, {
-        limit: MAX_ARCHIVED_PRODUCT_TYPES_PER_USER - productTypes.length,
+        limit: MAX_ARCHIVED_PANTRY_PAGE_SIZE,
         cursor,
       });
       productTypes.push(...page.items);
       cursor = page.nextCursor;
-    } while (
-      cursor &&
-      productTypes.length < MAX_ARCHIVED_PRODUCT_TYPES_PER_USER
-    );
+    } while (cursor);
 
     return productTypes;
   }
@@ -150,45 +144,33 @@ export class DynamoDbProductTypeRepository implements ProductTypeRepository {
     options: CursorPageOptions,
   ): Promise<CursorPage<ProductType>> {
     const limit = clampArchivedLimit(options.limit);
-    const items: ProductTypeItem[] = [];
-    let exclusiveStartKey = decodeDynamoCursor(options.cursor);
-
-    do {
-      const result = await this.dynamoDb.send(
-        new QueryCommand({
-          TableName: this.tableName,
-          IndexName: 'UserBaseNameIndex',
-          KeyConditionExpression: 'userId = :userId',
-          ExpressionAttributeValues: {
-            ':userId': userId.toString(),
-          },
-          Limit: limit - items.length,
-          ...(exclusiveStartKey
-            ? { ExclusiveStartKey: exclusiveStartKey }
-            : {}),
-        }),
-      );
-      items.push(
-        ...((result.Items ?? []) as ProductTypeItem[]).filter((item) =>
-          Boolean(item.archivedAt),
-        ),
-      );
-      exclusiveStartKey = result.LastEvaluatedKey as
-        | Record<string, unknown>
-        | undefined;
-    } while (exclusiveStartKey && items.length < limit);
-
-    const pageItems = items.slice(0, limit);
+    const result = await this.dynamoDb.send(
+      new QueryCommand({
+        TableName: this.tableName,
+        IndexName: 'UserArchivedAtIndex',
+        KeyConditionExpression: 'userId = :userId',
+        ExpressionAttributeValues: {
+          ':userId': userId.toString(),
+        },
+        ScanIndexForward: false,
+        Limit: limit,
+        ...(options.cursor
+          ? {
+              ExclusiveStartKey: decodeDynamoCursor(
+                options.cursor,
+                userId.toString(),
+              ),
+            }
+          : {}),
+      }),
+    );
 
     return {
-      items: pageItems
-        .map((item) => this.toDomain(item))
-        .sort(
-          (a, b) =>
-            (b.archivedAt?.getTime() ?? 0) - (a.archivedAt?.getTime() ?? 0),
-        ),
-      nextCursor: exclusiveStartKey
-        ? encodeDynamoCursor(exclusiveStartKey)
+      items: ((result.Items ?? []) as ProductTypeItem[]).map((item) =>
+        this.toDomain(item),
+      ),
+      nextCursor: result.LastEvaluatedKey
+        ? encodeDynamoCursor(result.LastEvaluatedKey)
         : undefined,
     };
   }
@@ -265,10 +247,7 @@ export class DynamoDbProductTypeRepository implements ProductTypeRepository {
     return productTypes.length;
   }
 
-  private async findAllByUserId(
-    userId: UserId,
-    limit?: number,
-  ): Promise<ProductType[]> {
+  private async findAllByUserId(userId: UserId): Promise<ProductType[]> {
     const items: ProductTypeItem[] = [];
     let exclusiveStartKey: Record<string, unknown> | undefined;
 
@@ -281,7 +260,6 @@ export class DynamoDbProductTypeRepository implements ProductTypeRepository {
           ExpressionAttributeValues: {
             ':userId': userId.toString(),
           },
-          ...(limit ? { Limit: limit } : {}),
           ...(exclusiveStartKey
             ? { ExclusiveStartKey: exclusiveStartKey }
             : {}),
@@ -289,9 +267,9 @@ export class DynamoDbProductTypeRepository implements ProductTypeRepository {
       );
 
       items.push(...((result.Items ?? []) as ProductTypeItem[]));
-      exclusiveStartKey = limit
-        ? undefined
-        : (result.LastEvaluatedKey as Record<string, unknown> | undefined);
+      exclusiveStartKey = result.LastEvaluatedKey as
+        | Record<string, unknown>
+        | undefined;
     } while (exclusiveStartKey);
 
     return items.map((item) => this.toDomain(item));
@@ -397,18 +375,13 @@ function encodeDynamoCursor(
 
 function decodeDynamoCursor(
   cursor: string | undefined,
+  expectedUserId: string,
 ): Record<string, unknown> | undefined {
-  if (!cursor) {
-    return undefined;
-  }
-
-  try {
-    return JSON.parse(
-      Buffer.from(cursor, 'base64url').toString('utf8'),
-    ) as Record<string, unknown>;
-  } catch {
-    throw new Error('Invalid archived product type cursor');
-  }
+  return decodeArchiveCursor(
+    cursor,
+    expectedUserId,
+    'Invalid archived product type cursor',
+  );
 }
 
 function serializeShoppingMetadata(

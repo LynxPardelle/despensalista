@@ -54,15 +54,10 @@ export class GetHouseholdWorkspaceUseCase {
     const household = Household.create(user, now);
     const ownerMembership = household.createOwnerMembership(user, now);
 
-    await this.householdRepository.saveHousehold(household);
-    await recordHouseholdActivity(this.householdRepository, {
-      householdId: household.id,
-      type: 'household_created',
-      actorUserId: user.id.toString(),
-      createdAt: now,
-    });
-
-    return this.householdRepository.saveMembership(ownerMembership);
+    return this.householdRepository.createHouseholdWithOwner(
+      household,
+      ownerMembership,
+    );
   }
 }
 
@@ -160,33 +155,21 @@ export class AcceptHouseholdInviteUseCase {
       throw new BadRequestException('User already belongs to a household');
     }
 
-    if (currentMembership?.householdId === invite.householdId) {
-      invite.accept();
-      await this.householdRepository.saveInvite(invite);
-      await recordHouseholdActivity(this.householdRepository, {
+    const now = new Date();
+    const membership =
+      currentMembership ??
+      HouseholdMembership.create({
         householdId: invite.householdId,
-        type: 'invite_accepted',
-        actorUserId: user.id.toString(),
-        targetUserId: user.id.toString(),
-        targetLabel: user.username,
+        user,
         role: invite.role,
+        now,
       });
 
-      return buildWorkspace(this.householdRepository, currentMembership);
-    }
-
-    const now = new Date();
-    const membership = HouseholdMembership.create({
-      householdId: invite.householdId,
-      user,
-      role: invite.role,
-      now,
-    });
-
     invite.accept(now);
-    const savedMembership =
-      await this.householdRepository.saveMembership(membership);
-    await this.householdRepository.saveInvite(invite);
+    const savedMembership = await this.householdRepository.acceptInvite(
+      invite,
+      membership,
+    );
     await recordHouseholdActivity(this.householdRepository, {
       householdId: invite.householdId,
       type: 'invite_accepted',
@@ -225,6 +208,7 @@ export class RevokeHouseholdInviteUseCase {
       throw new NotFoundException('Household invite not found');
     }
 
+    if (!invite.isActive()) return invite;
     invite.revoke();
     const savedInvite = await this.householdRepository.saveInvite(invite);
     await recordHouseholdActivity(this.householdRepository, {
@@ -355,9 +339,10 @@ export class ResolveHouseholdPantryAccessUseCase {
     const household = Household.create(user, now);
     const ownerMembership = household.createOwnerMembership(user, now);
 
-    await this.householdRepository.saveHousehold(household);
-
-    return this.householdRepository.saveMembership(ownerMembership);
+    return this.householdRepository.createHouseholdWithOwner(
+      household,
+      ownerMembership,
+    );
   }
 }
 

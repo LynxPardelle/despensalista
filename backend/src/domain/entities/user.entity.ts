@@ -6,9 +6,11 @@ export interface UserPrimitives {
   email: string;
   username: string;
   authSubjectIds?: string[];
+  authUsernamesBySubject?: Record<string, string>;
   status: UserAccountStatus;
   createdAt: Date;
   updatedAt: Date;
+  deletionFenceExpiresAt?: Date;
 }
 
 export class User {
@@ -17,9 +19,11 @@ export class User {
     private _email: string,
     private _username: string,
     private _authSubjectIds: string[],
+    private _authUsernamesBySubject: Record<string, string>,
     private _status: UserAccountStatus,
     private readonly _createdAt: Date = new Date(),
     private _updatedAt: Date = new Date(),
+    private readonly _deletionFenceExpiresAt?: Date,
   ) {}
 
   static create(email: string, username: string): User {
@@ -29,19 +33,29 @@ export class User {
       normalizeEmail(email),
       normalizeUsername(username),
       [],
+      {},
       UserAccountStatus.ACTIVE,
     );
   }
 
   static fromPrimitives(primitives: UserPrimitives): User {
+    const authUsernamesBySubject = normalizeAuthUsernamesBySubject(
+      primitives.authUsernamesBySubject ?? {},
+    );
+
     return new User(
       UserId.fromString(primitives.id),
       primitives.email,
       primitives.username,
-      normalizeAuthSubjectIds(primitives.authSubjectIds ?? []),
+      normalizeAuthSubjectIds([
+        ...(primitives.authSubjectIds ?? []),
+        ...Object.keys(authUsernamesBySubject),
+      ]),
+      authUsernamesBySubject,
       primitives.status,
       primitives.createdAt,
       primitives.updatedAt,
+      primitives.deletionFenceExpiresAt,
     );
   }
 
@@ -65,12 +79,22 @@ export class User {
     return [...this._authSubjectIds];
   }
 
+  get authUsernamesBySubject(): Record<string, string> {
+    return { ...this._authUsernamesBySubject };
+  }
+
   get createdAt(): Date {
     return this._createdAt;
   }
 
   get updatedAt(): Date {
     return this._updatedAt;
+  }
+
+  isAccountDeletionPending(now = new Date()): boolean {
+    return Boolean(
+      this._deletionFenceExpiresAt && this._deletionFenceExpiresAt > now,
+    );
   }
 
   updateUsername(newUsername: string): void {
@@ -87,15 +111,31 @@ export class User {
     return this._authSubjectIds.includes(normalizeAuthSubjectId(authSubjectId));
   }
 
-  linkAuthSubject(authSubjectId: string): void {
+  linkAuthSubject(authSubjectId: string, cognitoUsername?: string): void {
     const normalizedAuthSubjectId = normalizeAuthSubjectId(authSubjectId);
+    const normalizedCognitoUsername = cognitoUsername
+      ? normalizeCognitoUsername(cognitoUsername)
+      : undefined;
+    let changed = false;
 
-    if (this._authSubjectIds.includes(normalizedAuthSubjectId)) {
-      return;
+    if (!this._authSubjectIds.includes(normalizedAuthSubjectId)) {
+      this._authSubjectIds = [...this._authSubjectIds, normalizedAuthSubjectId];
+      changed = true;
     }
 
-    this._authSubjectIds = [...this._authSubjectIds, normalizedAuthSubjectId];
-    this._updatedAt = new Date();
+    if (
+      normalizedCognitoUsername &&
+      this._authUsernamesBySubject[normalizedAuthSubjectId] !==
+        normalizedCognitoUsername
+    ) {
+      this._authUsernamesBySubject = {
+        ...this._authUsernamesBySubject,
+        [normalizedAuthSubjectId]: normalizedCognitoUsername,
+      };
+      changed = true;
+    }
+
+    if (changed) this._updatedAt = new Date();
   }
 
   disable(): void {
@@ -114,9 +154,13 @@ export class User {
       email: this._email,
       username: this._username,
       authSubjectIds: this.authSubjectIds,
+      authUsernamesBySubject: this.authUsernamesBySubject,
       status: this._status,
       createdAt: this._createdAt,
       updatedAt: this._updatedAt,
+      ...(this._deletionFenceExpiresAt
+        ? { deletionFenceExpiresAt: this._deletionFenceExpiresAt }
+        : {}),
     };
   }
 }
@@ -153,4 +197,25 @@ function normalizeAuthSubjectId(authSubjectId: string): string {
 
 function normalizeAuthSubjectIds(authSubjectIds: string[]): string[] {
   return [...new Set(authSubjectIds.map(normalizeAuthSubjectId))];
+}
+
+function normalizeCognitoUsername(cognitoUsername: string): string {
+  const normalizedCognitoUsername = cognitoUsername.trim();
+
+  if (!normalizedCognitoUsername) {
+    throw new Error('Cognito username cannot be empty');
+  }
+
+  return normalizedCognitoUsername;
+}
+
+function normalizeAuthUsernamesBySubject(
+  authUsernamesBySubject: Record<string, string>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(authUsernamesBySubject).map(([subjectId, username]) => [
+      normalizeAuthSubjectId(subjectId),
+      normalizeCognitoUsername(username),
+    ]),
+  );
 }

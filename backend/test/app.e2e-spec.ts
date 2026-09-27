@@ -17,32 +17,7 @@ describe('AppController (e2e)', () => {
   let app: NestFastifyApplication;
 
   beforeEach(async () => {
-    const moduleFixture: TestingModule = await Test.createTestingModule({
-      imports: [
-        ConfigModule.forRoot({
-          isGlobal: true,
-          ignoreEnvFile: true,
-          load: [
-            () => ({
-              API_PREFIX: 'api',
-              CORS_ORIGIN: 'http://localhost:4200',
-              HELMET_ENABLED: 'false',
-              METRICS_ACCESS_TOKEN: 'test-metrics-token',
-              SWAGGER_ENABLED: 'false',
-            }),
-          ],
-        }),
-      ],
-      controllers: [AppController],
-      providers: [AppService, ApiMetricsService],
-    }).compile();
-
-    app = moduleFixture.createNestApplication<NestFastifyApplication>(
-      new FastifyAdapter(),
-    );
-    await configureApp(app, app.get(ConfigService));
-    await app.init();
-    await app.getHttpAdapter().getInstance().ready();
+    app = await createTestApp(false);
   });
 
   afterEach(async () => {
@@ -61,6 +36,23 @@ describe('AppController (e2e)', () => {
       status: 'ok',
       service: 'despensalista-backend',
     });
+  });
+
+  it('rejects direct origin access when origin verification is enabled', async () => {
+    const guarded = await createTestApp(false, 'origin-secret');
+    try {
+      await request(guarded.getHttpServer()).get('/api/healthz').expect(403);
+      await request(guarded.getHttpServer())
+        .get('/api/healthz')
+        .set('x-origin-verify', 'wrong')
+        .expect(403);
+      await request(guarded.getHttpServer())
+        .get('/api/healthz')
+        .set('x-origin-verify', 'origin-secret')
+        .expect(200);
+    } finally {
+      await guarded.close();
+    }
   });
 
   it('/api/metrics (GET)', async () => {
@@ -84,4 +76,61 @@ describe('AppController (e2e)', () => {
         );
       });
   });
+
+  it('/api/docs/ (GET) when Swagger is enabled', async () => {
+    const swaggerAppPromise = createTestApp(true);
+    await expect(swaggerAppPromise).resolves.toBeDefined();
+    const swaggerApp = await swaggerAppPromise;
+
+    try {
+      await request(swaggerApp.getHttpServer())
+        .get('/api/docs/')
+        .expect(200)
+        .expect('Content-Type', /text\/html/);
+    } finally {
+      await swaggerApp.close();
+    }
+  });
 });
+
+async function createTestApp(
+  swaggerEnabled: boolean,
+  originSecret?: string,
+): Promise<NestFastifyApplication> {
+  const moduleFixture: TestingModule = await Test.createTestingModule({
+    imports: [
+      ConfigModule.forRoot({
+        isGlobal: true,
+        ignoreEnvFile: true,
+        load: [
+          () => ({
+            API_PREFIX: 'api',
+            CORS_ORIGIN: 'http://localhost:4200',
+            HELMET_ENABLED: 'false',
+            ORIGIN_VERIFY_HEADER_NAME: originSecret
+              ? 'x-origin-verify'
+              : undefined,
+            ORIGIN_VERIFY_HEADER_VALUE: originSecret,
+            METRICS_ACCESS_TOKEN: 'test-metrics-token',
+            SWAGGER_ENABLED: swaggerEnabled ? 'true' : 'false',
+          }),
+        ],
+      }),
+    ],
+    controllers: [AppController],
+    providers: [AppService, ApiMetricsService],
+  }).compile();
+  const testApp = moduleFixture.createNestApplication<NestFastifyApplication>(
+    new FastifyAdapter(),
+  );
+
+  try {
+    await configureApp(testApp, testApp.get(ConfigService));
+    await testApp.init();
+    await testApp.getHttpAdapter().getInstance().ready();
+    return testApp;
+  } catch (error) {
+    await testApp.close();
+    throw error;
+  }
+}

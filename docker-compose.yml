@@ -3,6 +3,16 @@ services:
     image: mongo:7.0
     container_name: despensalista-mongodb
     restart: unless-stopped
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        umask 077
+        if [ ! -s /data/db/.replica-set.key ]; then
+          openssl rand -base64 756 > /data/db/.replica-set.key
+        fi
+        chown mongodb:mongodb /data/db/.replica-set.key
+        chmod 400 /data/db/.replica-set.key
+        exec docker-entrypoint.sh mongod --bind_ip_all --replSet rs0 --keyFile /data/db/.replica-set.key
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-despensalista_root}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-change-this-root-password}
@@ -15,16 +25,20 @@ services:
     volumes:
       - mongodb_data:/data/db
       - ./docker/mongodb/initdb:/docker-entrypoint-initdb.d:ro
+      - ./docker/mongodb/replica-health.js:/usr/local/bin/replica-health.js:ro
     healthcheck:
       test:
         [
-          "CMD-SHELL",
-          "mongosh --quiet --username \"$${MONGO_INITDB_ROOT_USERNAME}\" --password \"$${MONGO_INITDB_ROOT_PASSWORD}\" --authenticationDatabase admin --eval \"quit(db.adminCommand({ ping: 1 }).ok ? 0 : 2)\"",
+          "CMD",
+          "mongosh",
+          "--quiet",
+          "--file",
+          "/usr/local/bin/replica-health.js",
         ]
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 20s
+      start_period: 40s
     networks:
       - despensalista-network
 
@@ -40,7 +54,7 @@ services:
       NODE_ENV: ${NODE_ENV:-development}
       PORT: ${PORT:-3000}
       DATABASE_NAME: ${DATABASE_NAME:-despensalista}
-      DATABASE_URL: ${DATABASE_URL:-mongodb://${MONGO_APP_USERNAME:-despensalista_app}:${MONGO_APP_PASSWORD:-change-this-app-password}@mongodb:${MONGO_PORT:-27017}/${MONGO_APP_DATABASE:-despensalista}?authSource=${MONGO_APP_DATABASE:-despensalista}}
+      DATABASE_URL: ${DATABASE_URL:-mongodb://${MONGO_APP_USERNAME:-despensalista_app}:${MONGO_APP_PASSWORD:-change-this-app-password}@mongodb:${MONGO_PORT:-27017}/${MONGO_APP_DATABASE:-despensalista}?authSource=${MONGO_APP_DATABASE:-despensalista}&replicaSet=rs0}
       MONGO_HOST: ${MONGO_HOST:-mongodb}
       MONGO_PORT: ${MONGO_PORT:-27017}
       MONGO_APP_DATABASE: ${MONGO_APP_DATABASE:-despensalista}

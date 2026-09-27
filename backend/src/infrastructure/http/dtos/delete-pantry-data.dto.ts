@@ -40,6 +40,7 @@ export class DeleteAccountResponseDto extends DeletePantryDataResponseDto {
 
 export class SignOutAllSessionsDto {
   @ApiProperty({ example: 'CERRAR SESIONES' })
+  @IsString()
   confirmationText: string;
 }
 

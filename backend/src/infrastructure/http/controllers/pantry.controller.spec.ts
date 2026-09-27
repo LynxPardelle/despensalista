@@ -1,4 +1,4 @@
-import { FastifyRequest } from 'fastify';
+import { FastifyReply, FastifyRequest } from 'fastify';
 import { AuthCookieService } from '../auth/auth-cookie.service';
 import { AuthenticatedUser } from '../auth/authenticated-user.interface';
 import { CloseShoppingPurchaseUseCase } from '../../../application/use-cases/close-shopping-purchase.use-case';
@@ -59,7 +59,10 @@ describe('PantryController', () => {
       execute: jest.fn().mockResolvedValue(makeWasteOverview()),
     } as unknown as jest.Mocked<GetWasteOverviewUseCase>;
     closeShoppingPurchaseUseCase = {
-      execute: jest.fn().mockResolvedValue([makeInventoryLot()]),
+      execute: jest.fn().mockResolvedValue({
+        value: [makeInventoryLot()],
+        replayed: false,
+      }),
     } as unknown as jest.Mocked<CloseShoppingPurchaseUseCase>;
     createShoppingShareUseCase = {
       execute: jest.fn().mockResolvedValue({
@@ -166,7 +169,7 @@ describe('PantryController', () => {
       archivedInventoryLotsPerUser: 250,
       archivedPantryPageSize: 50,
       inventoryLotsPerProductType: 500,
-      shoppingCheckoutItems: 50,
+      shoppingCheckoutItems: 49,
       savedShoppingListsPerUser: 25,
       savedShoppingListItems: 100,
     });
@@ -295,6 +298,8 @@ describe('PantryController', () => {
         ],
       },
       request,
+      '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
+      makeReply(),
     );
 
     expect(authCookieService.ensureXsrfForRequest).toHaveBeenCalledWith(
@@ -302,6 +307,7 @@ describe('PantryController', () => {
     );
     expect(closeShoppingPurchaseUseCase.execute).toHaveBeenCalledWith({
       userId: 'user-1',
+      idempotencyKey: '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
       items: [
         {
           productTypeId: 'type-1',
@@ -586,6 +592,8 @@ describe('PantryController', () => {
         method: 'POST',
         headers: {},
       } as unknown as FastifyRequest,
+      '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
+      makeReply(),
     );
 
     expect(
@@ -593,6 +601,7 @@ describe('PantryController', () => {
     ).toHaveBeenCalledWith('member-user');
     expect(closeShoppingPurchaseUseCase.execute).toHaveBeenCalledWith({
       userId: 'owner-user',
+      idempotencyKey: '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
       items: [
         {
           productTypeId: 'type-1',
@@ -607,6 +616,12 @@ describe('PantryController', () => {
     });
   });
 });
+
+function makeReply(): FastifyReply {
+  return {
+    header: jest.fn().mockReturnThis(),
+  } as unknown as FastifyReply;
+}
 
 function makeProfile() {
   return {

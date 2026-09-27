@@ -16,6 +16,7 @@ export class CognitoProfileSyncService {
   async syncFromClaims(claims: CognitoVerifiedClaims): Promise<User> {
     const email = claims.email?.trim().toLocaleLowerCase('en-US');
     const authSubjectId = claims.sub.trim();
+    const cognitoUsername = claims.cognitoUsername?.trim();
 
     if (!email) {
       throw new UnauthorizedException('Cognito email claim is required');
@@ -23,6 +24,10 @@ export class CognitoProfileSyncService {
 
     if (!authSubjectId) {
       throw new UnauthorizedException('Cognito subject claim is required');
+    }
+
+    if (!cognitoUsername) {
+      throw new UnauthorizedException('Cognito username claim is required');
     }
 
     const existingUserBySubject =
@@ -57,7 +62,7 @@ export class CognitoProfileSyncService {
       }
     }
 
-    user.linkAuthSubject(authSubjectId);
+    user.linkAuthSubject(authSubjectId, cognitoUsername);
 
     return this.userDao.save(user);
   }

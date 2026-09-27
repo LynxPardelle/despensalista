@@ -1,6 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  GetCommand,
+  UpdateCommand,
+  UpdateCommandOutput,
+} from '@aws-sdk/lib-dynamodb';
 import { UserPreferencesDao } from '../../../application/ports/daos';
 import {
   UserPreferences,
@@ -49,25 +53,47 @@ export class DynamoDbUserPreferencesDao implements UserPreferencesDao {
         ? preferences
         : UserPreferences.resolve(preferences);
 
-    const result = await this.dynamoDb.send(
-      new UpdateCommand({
-        TableName: this.tableName,
-        Key: {
-          pk: userKey(userId.toString()),
-        },
-        UpdateExpression:
-          'SET preferences = :preferences, updatedAt = :updatedAt',
-        ExpressionAttributeValues: {
-          ':preferences': resolvedPreferences.toPrimitives(),
-          ':updatedAt': new Date().toISOString(),
-        },
-        ReturnValues: 'ALL_NEW',
-      }),
-    );
+    const now = new Date().toISOString();
+    let result: UpdateCommandOutput;
+    try {
+      result = await this.dynamoDb.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: {
+            pk: userKey(userId.toString()),
+          },
+          UpdateExpression:
+            'SET preferences = :preferences, updatedAt = :updatedAt',
+          ConditionExpression:
+            '#entityType = :user AND #status = :active AND (attribute_not_exists(deletionFenceExpiresAt) OR deletionFenceExpiresAt <= :now)',
+          ExpressionAttributeNames: {
+            '#entityType': 'entityType',
+            '#status': 'status',
+          },
+          ExpressionAttributeValues: {
+            ':preferences': resolvedPreferences.toPrimitives(),
+            ':updatedAt': now,
+            ':now': now,
+            ':user': 'USER',
+            ':active': 'active',
+          },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+    } catch (error) {
+      if ((error as Error).name === 'ConditionalCheckFailedException') {
+        throw accountDeletedError();
+      }
+      throw error;
+    }
     const item = result.Attributes as UserPreferencesProjection | undefined;
 
     return UserPreferences.resolve(item?.preferences);
   }
+}
+
+function accountDeletedError(): UnauthorizedException {
+  return new UnauthorizedException('Account deletion is in progress');
 }
 
 function userKey(id: string): string {

@@ -5,7 +5,6 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
-  ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
 import {
   ShoppingList,
@@ -73,42 +72,7 @@ export class DynamoDbShoppingListRepository implements ShoppingListRepository {
       Limit: 25,
     });
 
-    if (indexedItems.length > 0) {
-      return indexedItems.map((item) => this.toDomain(item));
-    }
-
-    const legacyItems: ShoppingListItem[] = [];
-    let exclusiveStartKey: Record<string, unknown> | undefined;
-
-    do {
-      const result = await this.dynamoDb.send(
-        new ScanCommand({
-          TableName: this.tableName,
-          FilterExpression:
-            '#entityType = :entityType AND ownerUserId = :ownerUserId',
-          ExpressionAttributeNames: {
-            '#entityType': 'entityType',
-          },
-          ExpressionAttributeValues: {
-            ':entityType': 'SHOPPING_LIST',
-            ':ownerUserId': ownerUserId,
-          },
-          ...(exclusiveStartKey
-            ? { ExclusiveStartKey: exclusiveStartKey }
-            : {}),
-        }),
-      );
-
-      legacyItems.push(...((result.Items ?? []) as ShoppingListItem[]));
-      exclusiveStartKey = result.LastEvaluatedKey as
-        | Record<string, unknown>
-        | undefined;
-    } while (exclusiveStartKey);
-
-    return legacyItems
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .slice(0, 25)
-      .map((item) => this.toDomain(item));
+    return indexedItems.map((item) => this.toDomain(item));
   }
 
   async delete(id: string): Promise<void> {
@@ -128,38 +92,8 @@ export class DynamoDbShoppingListRepository implements ShoppingListRepository {
         ':gsi2pk': shoppingListOwnerKey(userId.toString()),
       },
     });
-    const legacyItems: ShoppingListItem[] = [];
-    let exclusiveStartKey: Record<string, unknown> | undefined;
-
-    do {
-      const result = await this.dynamoDb.send(
-        new ScanCommand({
-          TableName: this.tableName,
-          FilterExpression:
-            '#entityType = :entityType AND ownerUserId = :ownerUserId',
-          ExpressionAttributeNames: {
-            '#entityType': 'entityType',
-          },
-          ExpressionAttributeValues: {
-            ':entityType': 'SHOPPING_LIST',
-            ':ownerUserId': userId.toString(),
-          },
-          ...(exclusiveStartKey
-            ? { ExclusiveStartKey: exclusiveStartKey }
-            : {}),
-        }),
-      );
-
-      legacyItems.push(...((result.Items ?? []) as ShoppingListItem[]));
-      exclusiveStartKey = result.LastEvaluatedKey as
-        | Record<string, unknown>
-        | undefined;
-    } while (exclusiveStartKey);
-
-    const items = deduplicateByPk([...indexedItems, ...legacyItems]);
-
     await Promise.all(
-      items.map((item) =>
+      indexedItems.map((item) =>
         this.dynamoDb.send(
           new DeleteCommand({
             TableName: this.tableName,
@@ -169,7 +103,7 @@ export class DynamoDbShoppingListRepository implements ShoppingListRepository {
       ),
     );
 
-    return items.length;
+    return indexedItems.length;
   }
 
   private toItem(primitives: ShoppingListPrimitives): ShoppingListItem {
@@ -235,12 +169,4 @@ function shoppingListKey(id: string): string {
 
 function shoppingListOwnerKey(ownerUserId: string): string {
   return `SHOPPING_LIST_OWNER#${ownerUserId}`;
-}
-
-function deduplicateByPk<T extends { pk: string }>(items: T[]): T[] {
-  const uniqueItems = new Map<string, T>();
-
-  items.forEach((item) => uniqueItems.set(item.pk, item));
-
-  return [...uniqueItems.values()];
 }

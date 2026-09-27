@@ -1,3 +1,4 @@
+import { makePantryMutationMock } from '../ports/pantry-mutation.mock';
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
 import { QuantityUnit } from '../../domain/enums';
 import { CreateProductTypeUseCase } from './create-product-type.use-case';
@@ -19,7 +20,10 @@ describe('CreateProductTypeUseCase', () => {
   it('persists a default depletion rule when creating a product type', async () => {
     const repository = makeRepository();
     repository.findByBaseName.mockResolvedValue(null);
-    const useCase = new CreateProductTypeUseCase(repository);
+    const useCase = new CreateProductTypeUseCase(
+      repository,
+      makePantryMutationMock({ types: repository }),
+    );
 
     const productType = await useCase.execute({
       userId: 'rule-user',
@@ -48,7 +52,10 @@ describe('CreateProductTypeUseCase', () => {
   it('rejects depletion rules that use a different unit than the product type', async () => {
     const repository = makeRepository();
     repository.findByBaseName.mockResolvedValue(null);
-    const useCase = new CreateProductTypeUseCase(repository);
+    const useCase = new CreateProductTypeUseCase(
+      repository,
+      makePantryMutationMock({ types: repository }),
+    );
 
     await expect(
       useCase.execute({
@@ -73,7 +80,10 @@ describe('CreateProductTypeUseCase', () => {
   it('persists shopping metadata when creating a LatAm product type', async () => {
     const repository = makeRepository();
     repository.findByBaseName.mockResolvedValue(null);
-    const useCase = new CreateProductTypeUseCase(repository);
+    const useCase = new CreateProductTypeUseCase(
+      repository,
+      makePantryMutationMock({ types: repository }),
+    );
 
     const productType = await useCase.execute({
       userId: 'rule-user',

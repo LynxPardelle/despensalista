@@ -7,16 +7,18 @@ import {
   GoneException,
   Get,
   Header,
+  Headers,
   Logger,
   NotFoundException,
   Param,
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { FastifyRequest } from 'fastify';
+import { FastifyReply, FastifyRequest } from 'fastify';
 import { CloseShoppingPurchaseUseCase } from '../../../application/use-cases/close-shopping-purchase.use-case';
 import { GetArchivedPantryItemsUseCase } from '../../../application/use-cases/get-archived-pantry-items.use-case';
 import { GetPantryOverviewUseCase } from '../../../application/use-cases/get-pantry-overview.use-case';
@@ -202,6 +204,8 @@ export class PantryController {
     @CurrentUser() currentUser: AuthenticatedUser,
     @Body() dto: CheckoutPantryDto,
     @Req() request: FastifyRequest,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Res({ passthrough: true }) reply: FastifyReply,
   ): Promise<InventoryLotResponseDto[]> {
     this.authCookieService.ensureXsrfForRequest(request);
     const requestId = getRequestId(request) ?? 'none';
@@ -212,8 +216,9 @@ export class PantryController {
       currentUser.userId,
     );
 
-    const inventoryLots = await this.closeShoppingPurchaseUseCase.execute({
+    const result = await this.closeShoppingPurchaseUseCase.execute({
       userId: access.pantryOwnerUserId,
+      idempotencyKey,
       items: dto.items.map((item) => ({
         productTypeId: item.productTypeId,
         variantName: item.variantName,
@@ -225,11 +230,15 @@ export class PantryController {
       })),
     });
 
+    reply.header('Idempotency-Key', idempotencyKey ?? '');
+    if (result.replayed) {
+      reply.header('Idempotency-Replayed', 'true');
+    }
     this.logger.log(
-      `pantry_checkout_completed requestId=${requestId} userId=${currentUser.userId} pantryOwnerUserId=${access.pantryOwnerUserId} householdId=${access.householdId} createdLotCount=${inventoryLots.length}`,
+      `pantry_checkout_completed requestId=${requestId} userId=${currentUser.userId} pantryOwnerUserId=${access.pantryOwnerUserId} householdId=${access.householdId} createdLotCount=${result.value.length} replayed=${result.replayed}`,
     );
 
-    return inventoryLots.map((lot) => InventoryLotMapper.toResponse(lot));
+    return result.value.map((lot) => InventoryLotMapper.toResponse(lot));
   }
 
   @Get('shopping-lists')

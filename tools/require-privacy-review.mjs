@@ -40,8 +40,11 @@ sensitiveFiles.forEach((file) => console.error(`- ${file}`));
 process.exit(1);
 
 function getChangedFiles(baseRef, headRef, includeWorktree) {
-  const diffArgs =
-    baseRef && gitCommitExists(baseRef)
+  const diffArgs = /^0{40}$/.test(baseRef)
+    // A newly pushed branch has no before commit: compare its whole tree with
+    // the empty tree, not only its most recent (possibly unrelated) commit.
+    ? ['ls-tree', '-r', '--name-only', headRef]
+    : baseRef && gitCommitExists(baseRef)
       ? ['diff', '--name-only', `${baseRef}...${headRef}`]
       : getFallbackDiffArgs(headRef);
 
@@ -89,7 +92,7 @@ function getFallbackDiffArgs(headRef) {
     return ['diff', '--name-only', parentRef, headRef];
   }
 
-  return ['diff-tree', '--no-commit-id', '--name-only', '-r', headRef];
+  return ['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', headRef];
 }
 
 function requiresPrivacyReview(file) {

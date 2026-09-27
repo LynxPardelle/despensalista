@@ -97,7 +97,7 @@ export class GetUserProfileUseCase {
       return id;
     }
 
-    await this.userDeviceRepository.save(
+    const savedDevice = await this.userDeviceRepository.save(
       UserDevice.create({
         id,
         userId,
@@ -106,7 +106,7 @@ export class GetUserProfileUseCase {
       }),
     );
 
-    return id;
+    return savedDevice ? id : undefined;
   }
 
   private toKnownDevice(

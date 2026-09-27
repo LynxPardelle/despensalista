@@ -57,22 +57,47 @@ export class DynamoDbWasteEventRepository implements WasteEventRepository {
   }
 
   async deleteByUserId(userId: UserId): Promise<number> {
-    const items = await this.findByUserId(userId, { limit: 1000 });
+    let deletedCount = 0;
+    let exclusiveStartKey: Record<string, unknown> | undefined;
 
-    await Promise.all(
-      items.map((item) =>
-        this.dynamoDb.send(
-          new DeleteCommand({
-            TableName: this.tableName,
-            Key: {
-              id: item.id,
-            },
-          }),
+    do {
+      const result = await this.dynamoDb.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          IndexName: 'UserUpdatedAtIndex',
+          KeyConditionExpression: 'userId = :userId',
+          ExpressionAttributeValues: {
+            ':userId': userId.toString(),
+          },
+          ...(exclusiveStartKey
+            ? { ExclusiveStartKey: exclusiveStartKey }
+            : {}),
+        }),
+      );
+      const pageItems = (result.Items ?? []) as Array<
+        WasteEventItem | { entityType?: string }
+      >;
+      const items = pageItems.filter(isWasteEventItem);
+
+      await Promise.all(
+        items.map((item) =>
+          this.dynamoDb.send(
+            new DeleteCommand({
+              TableName: this.tableName,
+              Key: {
+                id: item.id,
+              },
+            }),
+          ),
         ),
-      ),
-    );
+      );
+      deletedCount += items.length;
+      exclusiveStartKey = result.LastEvaluatedKey as
+        | Record<string, unknown>
+        | undefined;
+    } while (exclusiveStartKey);
 
-    return items.length;
+    return deletedCount;
   }
 
   private async findByUserId(
