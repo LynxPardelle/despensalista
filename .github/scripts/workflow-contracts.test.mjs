@@ -270,11 +270,15 @@ test('gates CI and release on authenticated Mongo replica-set transactions', asy
 });
 
 test('installs Playwright media support before browser journeys', async () => {
-  const workflow = await readWorkflow('ci-cd.yml');
-  assert.ok(
-    workflow.indexOf('npx playwright install ffmpeg') <
-      workflow.indexOf('npm run test:e2e'),
-  );
+  for (const workflowName of ['ci-cd.yml', 'deploy-serverless-dev.yml']) {
+    const workflow = await readWorkflow(workflowName);
+    const mediaInstall = workflow.indexOf('playwright install ffmpeg');
+    const browserJourneys = workflow.indexOf('test:e2e');
+    assert.ok(
+      mediaInstall >= 0 && mediaInstall < browserJourneys,
+      `${workflowName} must install ffmpeg before browser journeys`,
+    );
+  }
 });
 
 async function readWorkflow(name) {
