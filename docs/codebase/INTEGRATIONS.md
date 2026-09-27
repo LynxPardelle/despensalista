@@ -10,10 +10,10 @@
   de usuarios.
 - Los tres pools requieren TOTP (`MfaConfiguration=ON`) para usuarios locales;
   Google conserva la politica MFA de su propio proveedor.
-- Produccion usa el remitente verificado
-  `no-reply@despensalista.lynxpardelle.com` con entrega administrada por
-  Cognito. SES/DKIM esta verificado, pero el acceso de produccion SES sigue
-  denegado y el limite administrado es 50 mensajes diarios por cuenta.
+- Produccion usa el remitente administrado por Cognito. SES/DKIM para
+  `despensalista.lynxpardelle.com` esta verificado, pero el acceso de produccion
+  SES sigue denegado; el remitente propio permanece desactivado y el limite
+  administrado es 50 mensajes diarios por cuenta.
 
 ## DynamoDB
 

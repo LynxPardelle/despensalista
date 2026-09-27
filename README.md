@@ -420,9 +420,10 @@ Verificacion de replenishment, reglas por tipo y archivado:
   carreras en la ruta normal de la aplicacion.
 - Las estimaciones de durabilidad se calculan dinamicamente al leer el overview
   y no mutan cantidades ni borran lotes de forma automatica.
-- En AWS, Cognito entrega registro y recuperacion con el remitente verificado
-  `no-reply@despensalista.lynxpardelle.com`; mientras SES siga sin acceso de
-  produccion se conserva la cuota administrada de 50 mensajes diarios.
+- En AWS, Cognito entrega registro y recuperacion con su remitente administrado
+  y la cuota compartida de 50 mensajes diarios. La identidad
+  `despensalista.lynxpardelle.com` y DKIM estan verificados, pero el remitente
+  propio no se habilita mientras SES siga sin acceso de produccion.
 
 ## Skills evaluadas en esta pasada
 

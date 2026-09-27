@@ -22,8 +22,9 @@ The serverless stack defines the staged application resources:
 - Route53 A/AAAA aliases for the production domain.
 - An attempted CloudFront FREE subscription and five included WAF rules; if AWS
   rejects eligibility, neither the subscription nor Web ACL is retained.
-- Required local-user TOTP MFA. The production configuration uses the verified
-  custom From address under `COGNITO_DEFAULT` and its 50-message daily quota.
+- Required local-user TOTP MFA. Every stage uses Cognito's managed sender under
+  `COGNITO_DEFAULT`; the verified SES/DKIM identity stays inactive until SES
+  production access permits the custom sender.
 - Stage-specific GitHub OIDC deployment roles, immutable Lambda versions and `live` alias.
 - Five production alarms (about USD 0.50/month), bounded API/Lambda logs, and
   production all-at-once deployment with alarm-backed rollback. When the
@@ -37,9 +38,9 @@ isolated origin-verification secret, totaling about USD 1.20/month. The first
 deployment of this contract retains the former shared `nonprod` secret for safe
 migration; remove it manually only after both dev and tst pass their smoke tests.
 CloudWatch Synthetics is deliberately excluded. SES/DKIM is provisioned only in
-prod. The verified custom
-From works with Cognito-managed delivery while the account remains in the SES
-sandbox; direct `DEVELOPER` sending still requires SES production access.
+prod, but the verified custom From remains inactive while the account is in the
+SES sandbox. Cognito's managed sender stays active until direct `DEVELOPER`
+sending is approved for production access.
 
 The CustomMessage guard atomically applies hashed-recipient and daily counters
 without reserving Lambda concurrency. Daily limits are dev 2, tst 3, and prod 30;

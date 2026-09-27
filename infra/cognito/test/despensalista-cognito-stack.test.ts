@@ -96,10 +96,10 @@ test('production requires software-token MFA and protects the user pool', () => 
     DeletionProtection: 'ACTIVE',
     EnabledMfas: ['SOFTWARE_TOKEN_MFA'],
     MfaConfiguration: 'ON',
-    EmailConfiguration: {
-      EmailSendingAccount: 'COGNITO_DEFAULT',
-      From: 'DespensaLista <no-reply@despensalista.lynxpardelle.com>',
-    },
+  });
+  const userPool = Object.values(template.findResources('AWS::Cognito::UserPool'))[0] as any;
+  assert.deepEqual(userPool.Properties.EmailConfiguration, {
+    EmailSendingAccount: 'COGNITO_DEFAULT',
   });
 });
 
@@ -132,6 +132,7 @@ test('production creates the DespensaLista SES identity and Easy DKIM records', 
     Object.keys(template.findResources('AWS::Route53::RecordSet')).length,
     3,
   );
+  assert.equal(template.toJSON().Outputs?.SesFromAddress, undefined);
 });
 
 test('deployment OIDC trust is exact repository and environment, with no bootstrap deploy-role escalation', () => {

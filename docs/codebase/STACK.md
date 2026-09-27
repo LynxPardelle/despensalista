@@ -42,9 +42,9 @@ estado desplegado de un stage.
   protecciones productivas de borrado.
 - S3 es privado, versionado para recuperacion de releases y CloudFront usa
   Origin Access Control.
-- Los pools locales requieren TOTP. El stack de produccion puede usar el
-  remitente custom verificado bajo `COGNITO_DEFAULT` (50 mensajes/dia) sin
-  habilitar envio SES directo mientras la cuenta siga en sandbox.
+- Los pools locales requieren TOTP y usan `COGNITO_DEFAULT` (50 mensajes/dia)
+  sin remitente custom. La identidad SES/DKIM verificada queda preparada para
+  habilitarse solo cuando la cuenta salga del sandbox.
 - GitHub Actions ejecuta CI, validacion CDK y promociones inmutables
   `dev -> tst -> prod` por OIDC. Cada stage tiene rol de deploy, rol
   CloudFormation, permissions boundary y bucket de assets aislados.
