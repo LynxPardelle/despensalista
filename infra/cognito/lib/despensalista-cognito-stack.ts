@@ -71,13 +71,7 @@ export class DespensaListaCognitoStack extends cdk.Stack {
         ? 'ACTIVE'
         : 'INACTIVE',
       emailConfiguration: {
-        // Managed delivery accepts a verified custom sender while SES remains
-        // sandboxed. Bootstrap the exact-pool SES sending policy first.
         emailSendingAccount: 'COGNITO_DEFAULT',
-        ...(this.isProduction(stage) ? {
-          from: 'DespensaLista <no-reply@despensalista.lynxpardelle.com>',
-          sourceArn: this.formatArn({ service: 'ses', resource: 'identity', resourceName: 'despensalista.lynxpardelle.com' }),
-        } : {}),
       },
       accountRecoverySetting: {
         recoveryMechanisms: [

@@ -73,12 +73,11 @@ Google-federated users retain their provider's authentication controls.
 
 The SES identity is `despensalista.lynxpardelle.com`; the intended sender is
 `DespensaLista <no-reply@despensalista.lynxpardelle.com>`. Its permitted purpose is
-transactional account verification and recovery. The production configuration
-uses that verified custom From while retaining Cognito-managed
-`COGNITO_DEFAULT` delivery and its 50-message daily quota; this does not require
-SES production access. It must not switch to direct `DEVELOPER` delivery until
-AWS approves production access. No marketing mailing list or third-party email
-provider is introduced.
+transactional account verification and recovery. The live production
+configuration retains Cognito-managed `COGNITO_DEFAULT` delivery without a
+custom From while SES remains sandboxed. It must not switch to the intended
+sender or direct `DEVELOPER` delivery until AWS approves production access. No
+marketing mailing list or third-party email provider is introduced.
 
 ## Logs
 

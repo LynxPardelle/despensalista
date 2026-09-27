@@ -55,13 +55,11 @@ de borrado antes de aceptar escrituras relacionadas con una cuenta.
    destructivas.
 
 Los tres pools se configuran con TOTP obligatorio para usuarios locales
-(`MfaConfiguration=ON`). Google aplica su propia politica MFA. El stack de
-produccion configura el remitente verificado
-`DespensaLista <no-reply@despensalista.lynxpardelle.com>` bajo
-`COGNITO_DEFAULT`: esto mantiene
-la entrega administrada de Cognito y su cuota de 50 mensajes diarios. SES/DKIM
-esta verificado, pero cambiar a envio directo `DEVELOPER` requiere que AWS
-apruebe acceso de produccion SES.
+(`MfaConfiguration=ON`). Google aplica su propia politica MFA. Todos mantienen
+`COGNITO_DEFAULT`, sin `From` ni `SourceArn`, para usar la entrega administrada
+de Cognito y su cuota de 50 mensajes diarios. SES/DKIM esta verificado para
+`despensalista.lynxpardelle.com`, pero el remitente propio y el envio directo
+`DEVELOPER` requieren que AWS apruebe acceso de produccion SES.
 
 ## Modelo de datos
 

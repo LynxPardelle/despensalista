@@ -22,8 +22,9 @@ The serverless stack defines the staged application resources:
 - Route53 A/AAAA aliases for the production domain.
 - An attempted CloudFront FREE subscription and five included WAF rules; if AWS
   rejects eligibility, neither the subscription nor Web ACL is retained.
-- Required local-user TOTP MFA. The production configuration uses the verified
-  custom From address under `COGNITO_DEFAULT` and its 50-message daily quota.
+- Required local-user TOTP MFA. Every stage uses Cognito's managed sender under
+  `COGNITO_DEFAULT`; the verified SES/DKIM identity stays inactive until SES
+  production access permits the custom sender.
 - Stage-specific GitHub OIDC deployment roles, immutable Lambda versions and `live` alias.
 - Five production alarms (about USD 0.50/month), bounded API/Lambda logs, and
   production all-at-once deployment with alarm-backed rollback. When the

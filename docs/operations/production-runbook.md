@@ -366,7 +366,7 @@ Price references: [CloudFront](https://aws.amazon.com/cloudfront/pricing/),
 ## SES approval blocker
 
 On 2026-09-25 the domain `despensalista.lynxpardelle.com` and RSA-2048 Easy DKIM
-were verified `SUCCESS`. Intended sender:
+were verified `SUCCESS`. Future intended SES sender:
 `DespensaLista <no-reply@despensalista.lynxpardelle.com>`.
 
 The account remains in the SES sandbox. Its prior Moyra production-access case
@@ -377,13 +377,13 @@ requires a paid support subscription, which was not purchased. Open that case
 in the AWS Support console to read the explanation and request reconsideration
 for the verified transactional-auth domain.
 
-The production stack keeps Cognito `EmailSendingAccount=COGNITO_DEFAULT` and
-configures the verified custom sender above while retaining Cognito-managed
-delivery; AWS permits this custom-From path with an identity authorization policy,
-and it does **not** require SES production access. Dev/tst retain the default AWS
-sender. Do not switch the pool to `DEVELOPER` until SES reports
-`ProductionAccessEnabled=true`. The exact
-production-pool sending authorization is versioned in
+All stages keep Cognito `EmailSendingAccount=COGNITO_DEFAULT` without `From` or
+`SourceArn`, so signup and recovery continue through Cognito's managed sender.
+AWS rejected the production bootstrap on 2026-09-27 when those custom fields were
+combined with `COGNITO_DEFAULT`; the stack was corrected rather than switching a
+sandboxed account to `DEVELOPER`. Do not configure the custom sender until SES
+reports `ProductionAccessEnabled=true`. The exact future production-pool sending
+authorization is versioned in
 `infra/cognito/ses-cognito-sender-policy.json`. Its one-time administrator bootstrap
 (from that directory) is:
 
@@ -393,12 +393,12 @@ aws ses get-identity-policies --identity despensalista.lynxpardelle.com --policy
 aws cognito-idp describe-user-pool --user-pool-id us-east-1_BmNImLALI --query UserPool.EmailConfiguration
 ```
 
-The policy allows only the Cognito email service, account `765932874577`, the exact
-production pool, the DespensaLista SES identity, and the approved no-reply address.
-It does not modify the shared SES account or Moyra's identity. If the pool is ever
-replaced, update that explicit ARN before changing the sender. Verify a real
+The staged policy allows only the Cognito email service, account `765932874577`,
+the exact production pool, the DespensaLista SES identity, and the approved
+no-reply address. It does not modify the shared SES account or Moyra's identity,
+and it is not used while the pool remains on the managed sender. If the pool is
+ever replaced, update that explicit ARN before enabling SES. Verify a real
 signup/recovery message after deployment without logging its code or link.
-[AWS documents the managed-mail custom-sender exception](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-email.html).
 
 The managed-mail limit is approximately 50 messages/day for the AWS account and
 Region. DespensaLista's atomic guard admits at most 2 dev, 3 tst, and 30 prod
