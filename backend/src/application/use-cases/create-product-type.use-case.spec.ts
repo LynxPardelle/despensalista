@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import { makePantryMutationMock } from '../ports/pantry-mutation.mock';
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
 import { QuantityUnit } from '../../domain/enums';
@@ -75,6 +76,32 @@ describe('CreateProductTypeUseCase', () => {
     ).rejects.toThrow(
       'Depletion rule unit must match product type default unit',
     );
+  });
+
+  it('rejects an interval whose first occurrence cannot be represented', async () => {
+    const repository = makeRepository();
+    repository.findByBaseName.mockResolvedValue(null);
+    const useCase = new CreateProductTypeUseCase(
+      repository,
+      makePantryMutationMock({ types: repository }),
+    );
+
+    await expect(
+      useCase.execute({
+        userId: 'rule-user',
+        baseName: 'Detergente liquido',
+        category: 'cleaning',
+        defaultUnit: 'lt',
+        defaultDepletionRule: {
+          enabled: true,
+          consumeAmount: 1,
+          unit: QuantityUnit.LITER,
+          everyAmount: 1_000_000_000,
+          everyPeriod: 'day',
+          anchorDate: new Date('2026-04-28T00:00:00.000Z'),
+        },
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('persists shopping metadata when creating a LatAm product type', async () => {

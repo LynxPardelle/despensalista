@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { InventoryLotRepository } from '../../domain/repositories/inventory-lot.repository';
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
 import { UserId } from '../../domain/value-objects/user-id.vo';
+import { civilDayDifference } from '../../domain/utils/civil-date';
 import { INVENTORY_LOT_REPOSITORY, PRODUCT_TYPE_REPOSITORY } from '../tokens';
 import { ExpiringProductGroup } from '../read-models/pantry-overview.read-model';
 import { buildPantryOverview } from '../utils/pantry-overview.builder';
@@ -43,15 +44,9 @@ export class GetExpiringLotsUseCase {
             return false;
           }
 
-          const expirationDate = new Date(lot.expiresAt);
-          expirationDate.setHours(0, 0, 0, 0);
-
-          const daysUntilExpiration = Math.floor(
-            (expirationDate.getTime() - startOfDay(referenceDate).getTime()) /
-              (24 * 60 * 60 * 1000),
+          return (
+            civilDayDifference(referenceDate, new Date(lot.expiresAt)) <= days
           );
-
-          return daysUntilExpiration <= days;
         }),
       }))
       .filter((group) => group.lots.length > 0)
@@ -64,10 +59,4 @@ export class GetExpiringLotsUseCase {
         lotCount: group.lots.length,
       }));
   }
-}
-
-function startOfDay(value: Date): Date {
-  const normalizedDate = new Date(value);
-  normalizedDate.setHours(0, 0, 0, 0);
-  return normalizedDate;
 }

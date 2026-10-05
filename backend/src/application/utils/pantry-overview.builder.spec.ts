@@ -143,7 +143,7 @@ describe('buildPantryOverview depletion forecasts', () => {
         baseName: 'Jabon de manos',
         urgency: 'depleted',
         suggestedPurchaseQuantity: 1,
-        recommendedPurchaseAt: referenceDate,
+        recommendedPurchaseAt: new Date('2026-04-24T00:00:00.000Z'),
       }),
       expect.objectContaining({
         productTypeId: 'type-detergent',
@@ -375,7 +375,7 @@ describe('buildPantryOverview depletion forecasts', () => {
         promoOnlyCount: 0,
         missingPriceCount: 0,
         estimatedTotal: 18,
-        nextRecommendedPurchaseAt: referenceDate,
+        nextRecommendedPurchaseAt: new Date('2026-04-24T00:00:00.000Z'),
         items: [
           expect.objectContaining({
             productTypeId: 'type-soap-route',
@@ -482,6 +482,96 @@ describe('buildPantryOverview depletion forecasts', () => {
     });
   });
 
+  it('keeps the overview expiration status on the Mexico City date', () => {
+    const tuna = makeProductType({
+      id: 'type-mexico-expiration',
+      baseName: 'Atun',
+    });
+    const overview = buildPantryOverview(
+      userId,
+      [tuna],
+      [
+        makeInventoryLot({
+          id: 'lot-mexico-expiration',
+          productTypeId: 'type-mexico-expiration',
+          quantity: 2,
+          unit: QuantityUnit.PIECE,
+          expiresAt: new Date('2026-04-28T00:00:00.000Z'),
+        }),
+      ],
+      new Date('2026-04-29T00:00:00.000Z'),
+    );
+
+    expect(overview.items[0].lots[0].expirationStatus).toBe('critical');
+    expect(overview.expiringItems[0].totalExpiringQuantity).toBe(2);
+  });
+
+  it('bases the shopping plan on Mexico City today before UTC midnight catches up', () => {
+    const soap = makeProductType({
+      id: 'type-mexico-plan',
+      baseName: 'Jabon',
+      defaultDepletionRule: {
+        enabled: true,
+        consumeAmount: 1,
+        unit: QuantityUnit.PIECE,
+        everyAmount: 1,
+        everyPeriod: 'day',
+        anchorDate: new Date('2026-04-28T00:00:00.000Z'),
+      },
+    });
+    const overview = buildPantryOverview(
+      userId,
+      [soap],
+      [
+        makeInventoryLot({
+          id: 'lot-mexico-plan',
+          productTypeId: 'type-mexico-plan',
+          quantity: 1,
+          unit: QuantityUnit.PIECE,
+        }),
+      ],
+      new Date('2026-04-29T00:00:00.000Z'),
+    );
+
+    expect(overview.shoppingPlanItems[0]).toMatchObject({
+      estimatedCurrentQuantity: 1,
+      estimatedDepletionAt: new Date('2026-04-29T00:00:00.000Z'),
+      recommendedPurchaseAt: new Date('2026-04-28T00:00:00.000Z'),
+      urgency: 'critical',
+    });
+  });
+
+  it('omits an unrepresentable forecast from the shopping plan', () => {
+    const soap = makeProductType({
+      id: 'type-too-distant-plan',
+      baseName: 'Jabon',
+      defaultDepletionRule: {
+        enabled: true,
+        consumeAmount: 1,
+        unit: QuantityUnit.PIECE,
+        everyAmount: 20_000_000,
+        everyPeriod: 'day',
+        anchorDate: new Date('2026-04-28T00:00:00.000Z'),
+      },
+    });
+    const overview = buildPantryOverview(
+      userId,
+      [soap],
+      [
+        makeInventoryLot({
+          id: 'lot-too-distant-plan',
+          productTypeId: 'type-too-distant-plan',
+          quantity: 6,
+          unit: QuantityUnit.PIECE,
+        }),
+      ],
+      new Date('2026-04-28T12:00:00.000Z'),
+    );
+
+    expect(overview.items[0].hasDepletionRule).toBe(false);
+    expect(overview.shoppingPlanItems).toEqual([]);
+  });
+
   it('uses configured expiration warning days instead of the hardcoded seven-day window', () => {
     const apples = makeProductType({
       id: 'type-apples',
@@ -585,7 +675,7 @@ describe('buildPantryOverview depletion forecasts', () => {
 
     expect(overview.shoppingPlanItems[0]).toMatchObject({
       productTypeId: 'type-detergent-lead',
-      recommendedPurchaseAt: referenceDate,
+      recommendedPurchaseAt: new Date('2026-04-24T00:00:00.000Z'),
       estimatedDepletionAt: new Date('2026-05-01T00:00:00.000Z'),
     });
   });
@@ -655,7 +745,7 @@ describe('buildPantryOverview depletion forecasts', () => {
       expect.objectContaining({
         productTypeId: 'type-empty-soap',
         urgency: 'depleted',
-        recommendedPurchaseAt: referenceDate,
+        recommendedPurchaseAt: new Date('2026-04-24T00:00:00.000Z'),
       }),
     ]);
   });

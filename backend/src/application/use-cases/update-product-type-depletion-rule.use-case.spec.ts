@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import { makePantryMutationMock } from '../ports/pantry-mutation.mock';
 import { ProductType } from '../../domain/entities/product-type.entity';
 import { ProductCategory, QuantityUnit } from '../../domain/enums';
@@ -84,5 +85,30 @@ describe('UpdateProductTypeDepletionRuleUseCase', () => {
         },
       }),
     ).rejects.toThrow('Product type not found');
+  });
+
+  it('rejects an unrepresentable interval when updating a rule', async () => {
+    const repository = makeRepository();
+    const productType = makeProductType();
+    repository.findById.mockResolvedValue(productType);
+    const useCase = new UpdateProductTypeDepletionRuleUseCase(
+      repository,
+      makePantryMutationMock({ types: repository }),
+    );
+
+    await expect(
+      useCase.execute({
+        productTypeId: productType.id.toString(),
+        userId: 'owner-user',
+        defaultDepletionRule: {
+          enabled: true,
+          consumeAmount: 1,
+          unit: QuantityUnit.LITER,
+          everyAmount: 1_000_000_000,
+          everyPeriod: 'day',
+          anchorDate: new Date('2026-04-28T00:00:00.000Z'),
+        },
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 });

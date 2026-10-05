@@ -2,8 +2,7 @@ import { ExpirationStatus, QuantityUnit } from '../enums';
 import { InventoryLotId } from '../value-objects/inventory-lot-id.vo';
 import { ProductTypeId } from '../value-objects/product-type-id.vo';
 import { UserId } from '../value-objects/user-id.vo';
-
-const DAY_IN_MS = 24 * 60 * 60 * 1000;
+import { civilDayDifference } from '../utils/civil-date';
 
 export interface InventoryLotPrimitives {
   id: string;
@@ -189,7 +188,7 @@ export class InventoryLot {
       return ExpirationStatus.NONE;
     }
 
-    const daysUntilExpiration = getDayDifference(
+    const daysUntilExpiration = civilDayDifference(
       referenceDate,
       this._expiresAt,
     );
@@ -217,7 +216,7 @@ export class InventoryLot {
       return false;
     }
 
-    return getDayDifference(referenceDate, this._expiresAt) <= days;
+    return civilDayDifference(referenceDate, this._expiresAt) <= days;
   }
 
   toPrimitives(): InventoryLotPrimitives {
@@ -241,15 +240,4 @@ export class InventoryLot {
 function normalizeOptionalText(value?: string): string | undefined {
   const normalized = value?.trim();
   return normalized ? normalized : undefined;
-}
-
-function getDayDifference(referenceDate: Date, targetDate: Date): number {
-  return Math.floor(
-    (toUtcDateOnlyTime(targetDate) - toUtcDateOnlyTime(referenceDate)) /
-      DAY_IN_MS,
-  );
-}
-
-function toUtcDateOnlyTime(date: Date): number {
-  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
 }
