@@ -10,7 +10,30 @@ const {
   ownedCondition,
   minimalDeletionMarker,
   revocationKeys,
+  jsonHeaders,
+  activeEntityIds,
 } = require('./deployed-api-smoke.cjs');
+
+test('JSON content type is sent only when the request has a body', () => {
+  assert.deepEqual(jsonHeaders(undefined), {});
+  assert.deepEqual(jsonHeaders({}), { 'Content-Type': 'application/json' });
+  assert.deepEqual(jsonHeaders(null), { 'Content-Type': 'application/json' });
+});
+
+test('pagination comparison ignores other entity types in a shared table', () => {
+  assert.deepEqual(
+    activeEntityIds(
+      [
+        { id: 'lot-2', entityType: 'INVENTORY_LOT' },
+        { id: 'waste-1', entityType: 'WASTE_EVENT' },
+        { id: 'lot-1', entityType: 'INVENTORY_LOT' },
+        { id: 'lot-3', entityType: 'INVENTORY_LOT', archivedAt: 'now' },
+      ],
+      'INVENTORY_LOT',
+    ),
+    ['lot-1', 'lot-2'],
+  );
+});
 
 test('only minimal bounded deletion markers may remain after account deletion', () => {
   const now = Date.now();
@@ -34,7 +57,7 @@ test('only minimal bounded deletion markers may remain after account deletion', 
   ]) {
     assert.equal(minimalDeletionMarker(bad, 'own', now), false);
   }
-  assert.equal(new Set(revocationKeys('own')).size, 2);
+  assert.equal(new Set(revocationKeys('own')).size, 1);
   assert.ok(
     revocationKeys('own').every((key) =>
       /^ACCOUNT_REVOCATION#[a-f0-9]{64}$/.test(key),
