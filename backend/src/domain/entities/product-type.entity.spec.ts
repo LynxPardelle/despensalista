@@ -43,6 +43,25 @@ describe('ProductType planning settings and archive state', () => {
     });
   });
 
+  it('rejects fractional recurrence intervals that cannot advance a civil date', () => {
+    expect(() =>
+      ProductType.create(
+        UserId.fromString('user-1'),
+        'Detergente',
+        ProductCategory.CLEANING,
+        QuantityUnit.LITER,
+        {
+          enabled: true,
+          consumeAmount: 1,
+          unit: QuantityUnit.LITER,
+          everyAmount: 1.5,
+          everyPeriod: 'day',
+          anchorDate: new Date('2026-04-01T00:00:00.000Z'),
+        },
+      ),
+    ).toThrow('Depletion interval amount must be a positive integer');
+  });
+
   it('stores validated per-type planning overrides', () => {
     const productType = ProductType.fromPrimitives({
       id: 'type-1',

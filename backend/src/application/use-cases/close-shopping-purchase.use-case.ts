@@ -13,6 +13,7 @@ import {
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
 import { ProductTypeId } from '../../domain/value-objects/product-type-id.vo';
 import { UserId } from '../../domain/value-objects/user-id.vo';
+import { mexicoCityDateLabel } from '../../domain/utils/civil-date';
 import { MAX_SHOPPING_CHECKOUT_ITEMS } from '../constants/query-limits';
 import {
   IdempotencyPayloadConflictError,
@@ -113,7 +114,7 @@ export class CloseShoppingPurchaseUseCase {
       const preparedItems = command.items.map((item) =>
         this.prepareItem(item, productTypeById.get(item.productTypeId)),
       );
-      const purchaseDate = new Date();
+      const purchaseDate = mexicoCityDateLabel(new Date());
       const lots: InventoryLot[] = [];
 
       for (const [index, prepared] of preparedItems.entries()) {

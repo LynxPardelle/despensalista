@@ -468,7 +468,10 @@ export class PantryPageComponent implements OnInit {
   readonly depletionRuleForm = this.formBuilder.nonNullable.group({
     enabled: [true],
     consumeAmount: [1, [Validators.required, Validators.min(0.01)]],
-    everyAmount: [1, [Validators.required, Validators.min(1)]],
+    everyAmount: [
+      1,
+      [Validators.required, Validators.min(1), Validators.pattern(/^[1-9]\d*$/)],
+    ],
     everyPeriod: ['month' as DepletionPeriod, Validators.required],
     anchorDate: [toDateInputValue(new Date(), true), Validators.required],
   });
@@ -684,17 +687,14 @@ export class PantryPageComponent implements OnInit {
 
   applyStapleTemplate(template: StapleTemplate): void {
     this.setSelectionMode('new');
-    const now = new Date();
+    const today = toDateInputValue(new Date(), true);
     const suggestedExpirationDate =
       template.suggestedShelfLifeDays === undefined
         ? ''
         : toDateInputValue(
             new Date(
-              now.getFullYear(),
-              now.getMonth(),
-              now.getDate() + template.suggestedShelfLifeDays,
+              Date.parse(today) + template.suggestedShelfLifeDays * 86_400_000,
             ),
-            true,
           );
     this.lotForm.patchValue(
       {
@@ -710,11 +710,11 @@ export class PantryPageComponent implements OnInit {
         depletionConsumeAmount: template.depletionConsumeAmount,
         depletionEveryAmount: template.depletionEveryAmount,
         depletionEveryPeriod: template.depletionEveryPeriod,
-        depletionAnchorDate: toDateInputValue(now, true),
+        depletionAnchorDate: today,
         expiresAt: suggestedExpirationDate,
         purchaseDate: template.suggestedShelfLifeDays === undefined
           ? ''
-          : toDateInputValue(now, true),
+          : today,
       },
       { emitEvent: false },
     );
@@ -4275,9 +4275,10 @@ export class PantryPageComponent implements OnInit {
       return undefined;
     }
 
-    if (!Number.isFinite(everyAmount) || everyAmount <= 0) {
+    if (!Number.isInteger(everyAmount) || everyAmount <= 0) {
       this.submittingLot = false;
-      this.registerError = 'El intervalo de durabilidad debe ser mayor a cero.';
+      this.registerError =
+        'El intervalo de durabilidad debe ser un número entero mayor a cero.';
       return undefined;
     }
 
@@ -4583,9 +4584,21 @@ export class PantryPageComponent implements OnInit {
   }
 }
 
+const mexicoCityCivilDateFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/Mexico_City',
+  calendar: 'gregory',
+  numberingSystem: 'latn',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
 export function toDateInputValue(date: Date, localDate = false): string {
   if (localDate) {
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    const parts = mexicoCityCivilDateFormatter.formatToParts(date);
+    const value = (type: 'year' | 'month' | 'day') =>
+      parts.find((part) => part.type === type)?.value;
+    return `${value('year')}-${value('month')}-${value('day')}`;
   }
   return date.toISOString().slice(0, 10);
 }

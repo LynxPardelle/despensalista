@@ -54,6 +54,38 @@ describe('InventoryLot expiration status', () => {
     expect(lot.isExpiringWithinDays(5, referenceDate)).toBe(true);
   });
 
+  it('uses the Mexico City day when UTC crosses midnight at 18:00', () => {
+    const todayLot = InventoryLot.fromPrimitives({
+      ...baseLot,
+      expiresAt: new Date('2026-04-28T00:00:00.000Z'),
+    });
+    const tomorrowLot = InventoryLot.fromPrimitives({
+      ...baseLot,
+      id: 'lot-tomorrow',
+      expiresAt: new Date('2026-04-29T00:00:00.000Z'),
+    });
+    const dayAfterLot = InventoryLot.fromPrimitives({
+      ...baseLot,
+      id: 'lot-day-after',
+      expiresAt: new Date('2026-04-30T00:00:00.000Z'),
+    });
+    const eveningInMexico = new Date('2026-04-29T00:00:00.000Z');
+
+    expect(todayLot.getExpirationStatus(eveningInMexico, 1)).toBe(
+      ExpirationStatus.CRITICAL,
+    );
+    expect(tomorrowLot.getExpirationStatus(eveningInMexico, 1)).toBe(
+      ExpirationStatus.SOON,
+    );
+    expect(dayAfterLot.getExpirationStatus(eveningInMexico, 1)).toBe(
+      ExpirationStatus.STABLE,
+    );
+    expect(dayAfterLot.isExpiringWithinDays(1, eveningInMexico)).toBe(false);
+    expect(
+      todayLot.getExpirationStatus(new Date('2026-04-29T06:00:00.000Z')),
+    ).toBe(ExpirationStatus.EXPIRED);
+  });
+
   it('archives and restores inventory lots without changing quantity', () => {
     const lot = InventoryLot.fromPrimitives(baseLot);
 
