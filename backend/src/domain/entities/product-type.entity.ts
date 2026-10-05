@@ -308,8 +308,8 @@ function normalizeDefaultDepletionRule(
     throw new Error('Depletion consume amount must be greater than zero');
   }
 
-  if (rule.everyAmount <= 0) {
-    throw new Error('Depletion interval amount must be greater than zero');
+  if (!Number.isSafeInteger(rule.everyAmount) || rule.everyAmount <= 0) {
+    throw new Error('Depletion interval amount must be a positive integer');
   }
 
   if (rule.unit !== defaultUnit) {

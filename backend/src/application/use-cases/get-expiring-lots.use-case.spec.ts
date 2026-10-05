@@ -124,6 +124,59 @@ describe('GetExpiringLotsUseCase', () => {
     expect(groups[0]?.totalExpiringQuantity).toBe(2);
     expect(groups[0]?.lots[0]?.variantName).toBe('Marca proxima');
   });
+
+  it('keeps the expiring window on the Mexico City day after UTC midnight', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-04-29T00:00:00.000Z'));
+
+    try {
+      const productTypeRepository = makeProductTypeRepository();
+      const inventoryLotRepository = makeInventoryLotRepository();
+      const productType = makeProductType();
+      const todayLot = InventoryLot.create(
+        userId,
+        productType.id,
+        'Caduca hoy',
+        1,
+        QuantityUnit.PIECE,
+        new Date('2026-04-28T00:00:00.000Z'),
+      );
+      const tomorrowLot = InventoryLot.create(
+        userId,
+        productType.id,
+        'Caduca mañana',
+        1,
+        QuantityUnit.PIECE,
+        new Date('2026-04-29T00:00:00.000Z'),
+      );
+      const laterLot = InventoryLot.create(
+        userId,
+        productType.id,
+        'Caduca pasado mañana',
+        1,
+        QuantityUnit.PIECE,
+        new Date('2026-04-30T00:00:00.000Z'),
+      );
+      productTypeRepository.findByUserId.mockResolvedValue([productType]);
+      inventoryLotRepository.findByUserId.mockResolvedValue([
+        todayLot,
+        tomorrowLot,
+        laterLot,
+      ]);
+
+      const groups = await new GetExpiringLotsUseCase(
+        productTypeRepository,
+        inventoryLotRepository,
+      ).execute(userId.toString(), 1);
+
+      expect(groups[0]?.lots.map((lot) => lot.variantName)).toEqual([
+        'Caduca hoy',
+        'Caduca mañana',
+      ]);
+      expect(groups[0]?.totalExpiringQuantity).toBe(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
 
 function addDays(days: number): Date {

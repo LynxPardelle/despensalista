@@ -4,10 +4,12 @@ import {
   IsBoolean,
   IsDateString,
   IsEnum,
+  IsInt,
   IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   Min,
   ValidateNested,
@@ -33,7 +35,7 @@ export class ProductTypeDepletionRuleDto {
   unit: string;
 
   @ApiProperty({ example: 1 })
-  @IsNumber()
+  @IsInt()
   @Min(1)
   everyAmount: number;
 
@@ -43,7 +45,8 @@ export class ProductTypeDepletionRuleDto {
   everyPeriod: string;
 
   @ApiProperty({ example: '2026-04-24' })
-  @IsDateString()
+  @IsDateString({ strict: true })
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
   anchorDate: string;
 }
 

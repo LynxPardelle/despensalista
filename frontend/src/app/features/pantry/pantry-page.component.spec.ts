@@ -41,9 +41,18 @@ import {
 } from '../../store/pantry/pantry.selectors';
 
 describe('PantryPageComponent', () => {
-  it('keeps local today separate from stored UTC civil dates', () => {
-    expect((toDateInputValue as any)(new Date(2026, 8, 25, 23, 30), true)).toBe('2026-09-25');
-    expect(toDateInputValue(new Date('2026-09-25T00:00:00.000Z'))).toBe('2026-09-25');
+  it('keeps Mexico City today separate from stored UTC civil dates', () => {
+    const instant = new Date('2026-09-26T04:30:00.000Z');
+    expect(toDateInputValue(instant, true)).toBe('2026-09-25');
+    expect(toDateInputValue(instant)).toBe('2026-09-26');
+  });
+
+  it('uses the Mexico City date when UTC has already reached tomorrow', () => {
+    const instant = new Date('2026-10-05T00:30:00.000Z');
+    spyOn(instant, 'getDate').and.returnValue(5); // Simulate a browser east of Mexico City.
+
+    expect(toDateInputValue(instant, true)).toBe('2026-10-04');
+    expect(toDateInputValue(instant)).toBe('2026-10-05');
   });
   let fixture: ComponentFixture<PantryPageComponent>;
   let component: PantryPageComponent;
@@ -427,6 +436,42 @@ describe('PantryPageComponent', () => {
     );
   });
 
+  it('rejects a fractional depletion interval when registering a lot', () => {
+    component.setSelectionMode('new');
+    component.lotForm.patchValue({
+      newBaseName: 'Arroz',
+      category: 'food',
+      unit: 'kg',
+      quantity: 1,
+      enableDurability: true,
+      depletionEveryAmount: 1.5,
+      depletionAnchorDate: '2026-10-04',
+    });
+
+    component.submitLot();
+
+    expect(component.registerError).toBe(
+      'El intervalo de durabilidad debe ser un número entero mayor a cero.',
+    );
+    expect(pantryService.registerLot).not.toHaveBeenCalled();
+  });
+
+  it('ignores a hidden fractional interval when durability is off', () => {
+    component.setSelectionMode('new');
+    component.lotForm.patchValue({
+      newBaseName: 'Arroz',
+      category: 'food',
+      unit: 'kg',
+      quantity: 1,
+      enableDurability: false,
+      depletionEveryAmount: 1.5,
+    });
+
+    component.submitLot();
+
+    expect(pantryService.registerLot).toHaveBeenCalled();
+  });
+
   it('includes LatAm shopping metadata when registering a new product type', () => {
     component.setSelectionMode('new');
     component.lotForm.patchValue({
@@ -539,6 +584,17 @@ describe('PantryPageComponent', () => {
     );
     expect(component.editingDepletionProductTypeId).toBeNull();
     expect(store.dispatch).toHaveBeenCalled();
+  });
+
+  it('rejects a fractional interval when editing a depletion rule', () => {
+    const group = makePantryGroup({ defaultUnit: 'lt' });
+    component.startEditingDepletionRule(group);
+    component.depletionRuleForm.patchValue({ everyAmount: 1.5 });
+
+    component.saveDepletionRule(group);
+
+    expect(component.depletionRuleForm.invalid).toBeTrue();
+    expect(pantryService.updateProductTypeDepletionRule).not.toHaveBeenCalled();
   });
 
   it('shows and dismisses the expired entry alert for the current pantry visit', async () => {
@@ -1304,6 +1360,26 @@ describe('PantryPageComponent', () => {
     expect(rawValue.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(rawValue.purchaseDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(pantryService.registerLot).not.toHaveBeenCalled();
+  });
+
+  it('adds template shelf life to the Mexico City day, not the browser day', () => {
+    const today = toDateInputValue(new Date(), true);
+    const expectedExpiration = new Date(`${today}T00:00:00.000Z`);
+    expectedExpiration.setUTCDate(expectedExpiration.getUTCDate() + 3);
+    const mexicoDay = Number(today.slice(8));
+    spyOn(Date.prototype, 'getDate').and.returnValue(
+      mexicoDay < 28 ? mexicoDay + 1 : mexicoDay - 1,
+    );
+
+    const leftoversTemplate = component.stapleTemplates.find(
+      (template) => template.label === 'Sobras preparadas',
+    );
+    component.applyStapleTemplate(leftoversTemplate!);
+
+    expect(component.lotForm.controls.purchaseDate.value).toBe(today);
+    expect(component.lotForm.controls.expiresAt.value).toBe(
+      expectedExpiration.toISOString().slice(0, 10),
+    );
   });
 
   it('builds a use-first list with risk estimates and leftover lots', () => {

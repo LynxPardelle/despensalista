@@ -2,6 +2,13 @@ import {
   DepletionPeriod,
   DepletionRulePrimitives,
 } from '../../domain/entities/product-type.entity';
+import {
+  addCivilDays,
+  addCivilMonths,
+  isSupportedCivilDateLabel,
+  mexicoCityDateLabel,
+  utcDateLabel,
+} from '../../domain/utils/civil-date';
 
 export interface DepletionForecast {
   depletionRule: DepletionRulePrimitives;
@@ -17,12 +24,18 @@ export interface DepletionForecastInput {
   startDate?: Date;
 }
 
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+
 export function calculateDepletionForecast(
   depletionRule: DepletionRulePrimitives | undefined,
   recordedAvailableQuantity: number,
   referenceDate: Date = new Date(),
 ): DepletionForecast | undefined {
   if (!depletionRule?.enabled) {
+    return undefined;
+  }
+
+  if (!isForecastableRule(depletionRule)) {
     return undefined;
   }
 
@@ -39,9 +52,15 @@ export function calculateDepletionForecast(
     roundQuantity(recordedAvailableQuantity - estimatedConsumedQuantity),
     0,
   );
+  if (
+    !Number.isFinite(estimatedConsumedQuantity) ||
+    !Number.isFinite(estimatedCurrentQuantity)
+  ) {
+    return undefined;
+  }
   const estimatedDepletionAt =
     estimatedCurrentQuantity <= 0
-      ? new Date(referenceDate)
+      ? mexicoCityDateLabel(referenceDate)
       : addIntervals(
           depletionRule.anchorDate,
           depletionRule.everyAmount *
@@ -51,6 +70,9 @@ export function calculateDepletionForecast(
               )),
           depletionRule.everyPeriod,
         );
+  if (!isSupportedCivilDateLabel(estimatedDepletionAt)) {
+    return undefined;
+  }
 
   return {
     depletionRule: cloneDepletionRule(depletionRule),
@@ -67,7 +89,7 @@ export function calculateGroupedDepletionForecast(
   inputs: DepletionForecastInput[],
   referenceDate: Date = new Date(),
 ): DepletionForecast | undefined {
-  if (!depletionRule?.enabled) {
+  if (!depletionRule?.enabled || !isForecastableRule(depletionRule)) {
     return undefined;
   }
 
@@ -78,7 +100,7 @@ export function calculateGroupedDepletionForecast(
       completedIntervals: 0,
       estimatedConsumedQuantity: 0,
       estimatedCurrentQuantity: 0,
-      estimatedDepletionAt: new Date(referenceDate),
+      estimatedDepletionAt: mexicoCityDateLabel(referenceDate),
     };
   }
 
@@ -96,6 +118,9 @@ export function calculateGroupedDepletionForecast(
   const definedForecasts = forecasts.filter(
     (forecast): forecast is DepletionForecast => Boolean(forecast),
   );
+  if (definedForecasts.length !== forecasts.length) {
+    return undefined;
+  }
 
   const recordedAvailableQuantity = roundQuantity(
     definedForecasts.reduce(
@@ -117,7 +142,7 @@ export function calculateGroupedDepletionForecast(
   );
   const estimatedDepletionAt =
     estimatedCurrentQuantity <= 0
-      ? new Date(referenceDate)
+      ? mexicoCityDateLabel(referenceDate)
       : new Date(
           Math.max(
             ...definedForecasts
@@ -144,20 +169,35 @@ function countCompletedIntervals(
   everyAmount: number,
   everyPeriod: DepletionPeriod,
 ): number {
-  if (referenceDate < anchorDate) {
+  const referenceDay = mexicoCityDateLabel(referenceDate);
+  const anchorDay = utcDateLabel(anchorDate);
+  if (referenceDay < anchorDay) {
     return 0;
   }
 
-  let completedIntervals = 0;
-  let nextIntervalDate = addIntervals(anchorDate, everyAmount, everyPeriod);
-
-  while (nextIntervalDate <= referenceDate) {
-    completedIntervals += 1;
-    nextIntervalDate = addIntervals(
-      anchorDate,
-      everyAmount * (completedIntervals + 1),
-      everyPeriod,
+  if (everyPeriod !== 'month') {
+    const daysPerInterval = everyAmount * (everyPeriod === 'week' ? 7 : 1);
+    return Math.floor(
+      (referenceDay.getTime() - anchorDay.getTime()) /
+        DAY_IN_MS /
+        daysPerInterval,
     );
+  }
+
+  const monthGap =
+    (referenceDay.getUTCFullYear() - anchorDay.getUTCFullYear()) * 12 +
+    referenceDay.getUTCMonth() -
+    anchorDay.getUTCMonth();
+  let completedIntervals = 0;
+  let upperBound = Math.floor(monthGap / everyAmount) + 1;
+
+  while (completedIntervals + 1 < upperBound) {
+    const candidate = Math.floor((completedIntervals + upperBound) / 2);
+    if (addCivilMonths(anchorDay, candidate * everyAmount) <= referenceDay) {
+      completedIntervals = candidate;
+    } else {
+      upperBound = candidate;
+    }
   }
 
   return completedIntervals;
@@ -168,20 +208,28 @@ function addIntervals(
   amount: number,
   period: DepletionPeriod,
 ): Date {
-  const nextDate = new Date(anchorDate);
-
   if (period === 'day') {
-    nextDate.setDate(nextDate.getDate() + amount);
-    return nextDate;
+    return addCivilDays(anchorDate, amount);
   }
 
   if (period === 'week') {
-    nextDate.setDate(nextDate.getDate() + amount * 7);
-    return nextDate;
+    return addCivilDays(anchorDate, amount * 7);
   }
 
-  nextDate.setMonth(nextDate.getMonth() + amount);
-  return nextDate;
+  return addCivilMonths(anchorDate, amount);
+}
+
+function isForecastableRule(rule: DepletionRulePrimitives): boolean {
+  return (
+    Number.isSafeInteger(rule.everyAmount) &&
+    rule.everyAmount > 0 &&
+    Number.isFinite(rule.consumeAmount) &&
+    rule.consumeAmount > 0 &&
+    isSupportedCivilDateLabel(rule.anchorDate) &&
+    isSupportedCivilDateLabel(
+      addIntervals(rule.anchorDate, rule.everyAmount, rule.everyPeriod),
+    )
+  );
 }
 
 function roundQuantity(value: number): number {
