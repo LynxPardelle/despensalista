@@ -18,6 +18,7 @@ export class CognitoAuthUrlBuilderService implements CognitoAuthUrlBuilder {
     url.searchParams.set('client_id', this.getClientId());
     url.searchParams.set('redirect_uri', input.redirectUri);
     url.searchParams.set('scope', input.scopes.join(' '));
+    url.searchParams.set('lang', 'es');
     url.searchParams.set('state', input.state);
     url.searchParams.set('nonce', input.nonce);
     url.searchParams.set('code_challenge', input.codeChallenge);
