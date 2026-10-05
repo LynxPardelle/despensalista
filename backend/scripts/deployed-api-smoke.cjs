@@ -88,12 +88,20 @@ function minimalDeletionMarker(item, owner, now = Date.now()) {
 }
 
 function revocationKeys(subject) {
-  return ['user:', 'subject:'].map(
-    (prefix) =>
-      `ACCOUNT_REVOCATION#${createHash('sha256')
-        .update(prefix + subject)
-        .digest('hex')}`,
-  );
+  return [
+    `ACCOUNT_REVOCATION#${createHash('sha256').update(subject).digest('hex')}`,
+  ];
+}
+
+function jsonHeaders(body) {
+  return body === undefined ? {} : { 'Content-Type': 'application/json' };
+}
+
+function activeEntityIds(items, entityType) {
+  return items
+    .filter((item) => item.entityType === entityType && !item.archivedAt)
+    .map((item) => item.id)
+    .sort();
 }
 
 // CLI output and SDK payloads stay in memory: never log credentials or response bodies.
@@ -329,7 +337,7 @@ async function run(stage) {
       redirect: 'error',
       signal: AbortSignal.timeout(35_000),
       headers: {
-        'Content-Type': 'application/json',
+        ...jsonHeaders(body),
         ...(!anonymous && fixture.access
           ? {
               Cookie: `despensalista_access_token=${fixture.access}; XSRF-TOKEN=${fixture.xsrf}`,
@@ -545,7 +553,7 @@ async function run(stage) {
       remaining.every((row) => minimalDeletionMarker(row, fixture.sub)),
       'Fixture content remains beyond the minimal deletion marker',
     );
-    if (fixture.accountDeleted) assert.equal(remaining.length, 1);
+    if (fixture.accountDeleted) assert.equal(remaining.length, 0);
     for (const pk of revocationKeys(fixture.sub ?? '')) {
       if (!fixture.sub) break;
       const { Item: marker } = await db.send(
@@ -1045,8 +1053,12 @@ async function run(stage) {
         assert.ok(page < 19, 'Pagination must terminate');
       }
       const table = target.tables[route === 'product-types' ? 2 : 3];
-      const active = (await ownRows(table)).filter((item) => !item.archivedAt);
-      assert.deepEqual([...seen].sort(), active.map((item) => item.id).sort());
+      const entityType =
+        route === 'product-types' ? 'PRODUCT_TYPE' : 'INVENTORY_LOT';
+      assert.deepEqual(
+        [...seen].sort(),
+        activeEntityIds(await ownRows(table), entityType),
+      );
       await api(
         'GET',
         `/api/${route}/page?limit=101`,
@@ -1165,4 +1177,6 @@ module.exports = {
   ownedCondition,
   minimalDeletionMarker,
   revocationKeys,
+  jsonHeaders,
+  activeEntityIds,
 };
