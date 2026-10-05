@@ -331,10 +331,15 @@ test('delivery controls require a protected stage boundary and only unavoidable 
     'cloudwatch:GetMetricStatistics',
     'codedeploy:CreateCloudFormationDeployment',
     'codedeploy:StopDeployment',
+    'logs:CreateLogDelivery',
+    'logs:DeleteLogDelivery',
     'logs:DeleteResourcePolicy',
     'logs:DescribeLogGroups',
     'logs:DescribeResourcePolicies',
+    'logs:GetLogDelivery',
+    'logs:ListLogDeliveries',
     'logs:PutResourcePolicy',
+    'logs:UpdateLogDelivery',
     'secretsmanager:GetRandomPassword',
   ].sort());
 });
