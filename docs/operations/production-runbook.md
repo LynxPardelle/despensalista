@@ -331,10 +331,17 @@ substitute a paid WAF or paid CloudFront plan without a new cost approval.
 
 ## Cost envelope
 
-The approved threshold is an estimated recurring **USD 1/month per feature**, not
-a total account cap. AWS usage prices are variable; retention and throttling do
-not impose a hard spending cap. Recheck cost when traffic or release volume grows.
-The shared account already exceeded its free standard alarm allowance.
+The user set an estimated recurring **USD 1/month threshold for optional
+additions**. Whether this applies per feature or to their combined total still
+needs confirmation. As observed on 2026-10-05, the fixed net increase from
+the origin-secret migration and five alarms is about **USD 0.90/month**: the
+previous two secrets cost USD 0.80/month; three active stage secrets now cost
+USD 1.20/month, while the old nonproduction secret is pending deletion and no
+longer billed; the five new alarms add about USD 0.50/month. The current fixed
+project total for these resources is about **USD 1.70/month**, before variable
+usage. AWS usage prices are variable; retention and throttling do not impose a
+hard spending cap. Recheck cost when traffic or release volume grows. The
+shared account already exceeded its free standard alarm allowance.
 
 | Feature | Incremental estimate at current low traffic | Bound/control |
 | --- | ---: | --- |
@@ -342,7 +349,7 @@ The shared account already exceeded its free standard alarm allowance.
 | CloudFront pay-as-you-go for dev/tst | Expected below USD 1/month at present test traffic | No flat-rate subscription; stop/delete unused nonproduction stages if traffic changes |
 | CloudFront FREE + included WAF | Not deployed | AWS returned distribution-ineligible validation errors; no orphan subscription/WebACL remains |
 | Standalone WAF | Excluded; at least USD 6/month before requests for one ACL + one rule | Above the approved USD 1/month ceiling |
-| Origin secrets | USD 1.20/month + negligible API calls | Exactly three active stage secrets at USD 0.40 each; the retained legacy secret adds USD 0.40 until post-migration cleanup |
+| Origin secrets | USD 1.20/month current; USD 0.40/month net increase vs previous two secrets, plus API calls | Exactly three active stage secrets at USD 0.40 each; the old nonproduction secret is pending deletion and not billed during that period |
 | Five standard alarms | About USD 0.50/month | Prod only: four operational alarms plus the no-action managed-email guard alarm |
 | Cognito managed-email guard | At the 35 admitted messages/day ceiling: DynamoDB at most USD 0.0041/month and Lambda below USD 0.01/month if shared free tiers are exhausted | On-demand atomic counters; denied/attack traffic is usage-based and not a spending cap |
 | API/Lambda logs | Expected below USD 1/month | 7/30-day retention; standard ingestion about USD 0.50/GB beyond shared allowance; no bodies/queries |
