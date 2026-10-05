@@ -14,13 +14,11 @@
     "validate": "npm run build && npm test && npm run synth",
     "validate:serverless": "npm run build && npm test && npm run synth:dev && npm run synth:tst && npm run synth:prod"
   },
-  "dependencies": {
-    "aws-cdk-lib": "^2.267.0",
-    "constructs": "^10.4.2"
-  },
   "devDependencies": {
     "@types/node": "^22.10.7",
     "aws-cdk": "^2.1126.0",
+    "aws-cdk-lib": "^2.267.0",
+    "constructs": "^10.4.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.3"
   }

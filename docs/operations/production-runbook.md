@@ -41,9 +41,10 @@ to its stage bucket and explicitly cannot assume any role. It can pass only its
 own CF executor. Change-set creation must explicitly select that executor, so it
 cannot inherit a former administrator role saved on an existing stack.
 
-The CF executor can create/change only `despensalista-<stage>-runtime-*` IAM roles
-with the mandatory boundary. It cannot remove that boundary or alter deployment
-roles or the boundary policy. Application data and origin-verification secret
+The CF executor can create/change `despensalista-<stage>-runtime-*` IAM roles
+and, in non-production, CDK's `despensalista-<stage>-serverl-CustomS3AutoDeleteObjects-*`
+provider role, all with the mandatory boundary. It cannot remove that boundary
+or alter deployment roles or the boundary policy. Application data and origin-verification secret
 access are stage-scoped. DNS changes are restricted to stage record names/types
 in the existing zone.
 Global resource identifiers are allowlisted in `infra/cognito/delivery-resources.json`.
