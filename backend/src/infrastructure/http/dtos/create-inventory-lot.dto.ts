@@ -7,6 +7,7 @@ import {
   IsOptional,
   IsPositive,
   IsString,
+  Matches,
   MaxLength,
 } from 'class-validator';
 import { QuantityUnit } from '../../../domain/enums';
@@ -35,11 +36,13 @@ export class CreateInventoryLotDto {
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsDateString({ strict: true })
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
   expiresAt?: string;
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsDateString({ strict: true })
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
   purchaseDate?: string;
 }

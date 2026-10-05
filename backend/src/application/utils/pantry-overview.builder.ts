@@ -14,6 +14,11 @@ import {
 } from '../../domain/value-objects/user-preferences.vo';
 import { calculateGroupedDepletionForecast } from '../services/depletion-forecast.service';
 import {
+  addCivilDays,
+  mexicoCityDateLabel,
+  utcDateLabel,
+} from '../../domain/utils/civil-date';
+import {
   DepletingProductGroup,
   ExpiringProductGroup,
   PriceReferenceItem,
@@ -845,13 +850,13 @@ function resolveEffectivePlanningSettings(
 }
 
 function subtractDays(date: Date, days: number): Date {
-  const nextDate = new Date(date);
-  nextDate.setDate(nextDate.getDate() - days);
-  return nextDate;
+  return addCivilDays(date, -days);
 }
 
 function clampToReferenceDate(date: Date, referenceDate: Date): Date {
-  return date < referenceDate ? new Date(referenceDate) : date;
+  const today = mexicoCityDateLabel(referenceDate);
+  const target = utcDateLabel(date);
+  return target < today ? today : target;
 }
 
 function getShoppingPlanUrgency(
@@ -865,17 +870,11 @@ function getShoppingPlanUrgency(
   }
 
   if (
-    recommendedPurchaseAt <= referenceDate ||
-    estimatedDepletionAt <= addDays(referenceDate, 7)
+    recommendedPurchaseAt <= mexicoCityDateLabel(referenceDate) ||
+    estimatedDepletionAt <= addCivilDays(mexicoCityDateLabel(referenceDate), 7)
   ) {
     return 'critical';
   }
 
   return 'upcoming';
-}
-
-function addDays(date: Date, days: number): Date {
-  const nextDate = new Date(date);
-  nextDate.setDate(nextDate.getDate() + days);
-  return nextDate;
 }
