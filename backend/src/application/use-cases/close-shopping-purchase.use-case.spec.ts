@@ -58,6 +58,37 @@ describe('CloseShoppingPurchaseUseCase', () => {
     expect(repository.findById).toHaveBeenCalledTimes(1);
   });
 
+  it('stores the Mexico City purchase date as a UTC date-only label', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-04-29T00:00:00.000Z'));
+
+    try {
+      const mutationPort = makeMutationPort();
+      mutationPort.findReceipt.mockResolvedValue(null);
+      mutationPort.checkout.mockImplementation(async (input) => ({
+        value: input.lots.map((lot) => lot.toPrimitives()),
+        replayed: false,
+      }));
+      const useCase = new CloseShoppingPurchaseUseCase(
+        makeProductTypeRepository([makeProductType()]),
+        mutationPort,
+      );
+
+      const result = await useCase.execute({
+        userId: 'user-1',
+        idempotencyKey: '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
+        items: [
+          { productTypeId: 'type-1', quantity: 1, unit: QuantityUnit.KILOGRAM },
+        ],
+      });
+
+      expect(result.value[0].purchaseDate).toEqual(
+        new Date('2026-04-28T00:00:00.000Z'),
+      );
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('replays the stored lot array without loading product types', async () => {
     const mutationPort = makeMutationPort();
     mutationPort.findReceipt.mockImplementation(async (lookup) => ({
