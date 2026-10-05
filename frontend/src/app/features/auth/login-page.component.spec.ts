@@ -64,7 +64,7 @@ describe('LoginPageComponent', () => {
       '/pantry',
     );
     expect(fixture.nativeElement.textContent).toContain(
-      'Abriendo Google en el flujo seguro de Cognito.',
+      'Abriendo Google para iniciar sesión.',
     );
     expect(fixture.nativeElement.textContent).toContain('Abriendo Google...');
   });

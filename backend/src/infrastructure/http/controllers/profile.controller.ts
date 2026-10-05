@@ -3,12 +3,13 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   Patch,
   Req,
   Res,
   UseGuards,
 } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { FastifyReply, FastifyRequest } from 'fastify';
 import { DeleteAccountUseCase } from '../../../application/use-cases/delete-account.use-case';
 import { DeletePantryDataUseCase } from '../../../application/use-cases/delete-pantry-data.use-case';
@@ -88,9 +89,15 @@ export class ProfileController {
 
   @Delete('pantry-data')
   @ApiOperation({ summary: 'Eliminar datos locales de despensa del usuario' })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    description: 'UUID estable para reintentos del mismo borrado',
+    required: true,
+  })
   async deletePantryData(
     @CurrentUser() currentUser: AuthenticatedUser,
     @Body() dto: DeletePantryDataDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Req() request: FastifyRequest,
   ): Promise<DeletePantryDataResponseDto> {
     this.authCookieService.ensureXsrfForRequest(request);
@@ -105,6 +112,7 @@ export class ProfileController {
     return this.deletePantryDataUseCase.execute({
       userId: access.pantryOwnerUserId,
       confirmationText: dto.confirmationText,
+      idempotencyKey,
     });
   }
 

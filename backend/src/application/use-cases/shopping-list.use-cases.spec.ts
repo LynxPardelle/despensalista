@@ -1,4 +1,6 @@
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { makePantryMutationMock } from '../ports/pantry-mutation.mock';
+import { ConflictException, ForbiddenException } from '@nestjs/common';
+import { PantryQuotaExceededError } from '../ports/pantry-mutation.port';
 import { QuantityUnit } from '../../domain/enums';
 import { ShoppingList } from '../../domain/entities/shopping-list.entity';
 import { ShoppingListRepository } from '../../domain/repositories/shopping-list.repository';
@@ -11,7 +13,9 @@ import {
 describe('Shopping list use cases', () => {
   it('creates a server-backed list under the per-user limit', async () => {
     const repository = makeRepository();
-    const useCase = new CreateShoppingListUseCase(repository);
+    const useCase = new CreateShoppingListUseCase(
+      makePantryMutationMock({ lists: repository }),
+    );
 
     const list = await useCase.execute({
       ownerUserId: 'user-1',
@@ -48,7 +52,11 @@ describe('Shopping list use cases', () => {
         makeShoppingList({ id: `list-${index}` }),
       ),
     });
-    const useCase = new CreateShoppingListUseCase(repository);
+    const mutation = makePantryMutationMock({ lists: repository });
+    mutation.createShoppingList.mockRejectedValue(
+      new PantryQuotaExceededError('Saved shopping list quota exceeded'),
+    );
+    const useCase = new CreateShoppingListUseCase(mutation);
 
     await expect(
       useCase.execute({
@@ -63,7 +71,7 @@ describe('Shopping list use cases', () => {
           },
         ],
       }),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    ).rejects.toBeInstanceOf(ConflictException);
     expect(repository.save).not.toHaveBeenCalled();
   });
 
@@ -81,7 +89,10 @@ describe('Shopping list use cases', () => {
     const repository = makeRepository({
       listById: makeShoppingList({ ownerUserId: 'other-user' }),
     });
-    const useCase = new DeleteShoppingListUseCase(repository);
+    const useCase = new DeleteShoppingListUseCase(
+      repository,
+      makePantryMutationMock({ lists: repository }),
+    );
 
     await expect(
       useCase.execute({ ownerUserId: 'user-1', listId: 'list-1' }),

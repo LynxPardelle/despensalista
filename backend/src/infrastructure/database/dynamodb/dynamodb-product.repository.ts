@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   DeleteCommand,
-  PutCommand,
   QueryCommand,
   ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
@@ -42,19 +41,6 @@ export class DynamoDbProductRepository implements ProductRepository {
     );
   }
 
-  async save(product: Product): Promise<Product> {
-    const item = this.toItem(product.toPrimitives());
-
-    await this.dynamoDb.send(
-      new PutCommand({
-        TableName: this.tableName,
-        Item: item,
-      }),
-    );
-
-    return this.toDomain(item);
-  }
-
   async findById(id: ProductId): Promise<Product | null> {
     const result = await this.dynamoDb.send(
       new QueryCommand({
@@ -84,39 +70,45 @@ export class DynamoDbProductRepository implements ProductRepository {
     return this.findAll({ status });
   }
 
-  async reassignUserOwnership(
-    fromUserId: UserId,
-    toUserId: UserId,
-  ): Promise<number> {
-    const products = await this.findByUserId(fromUserId);
+  async deleteByUserId(userId: UserId): Promise<number> {
+    let deletedCount = 0;
+    let exclusiveStartKey: Record<string, unknown> | undefined;
 
-    await Promise.all(
-      products.map((product) =>
-        this.dynamoDb.send(
-          new PutCommand({
-            TableName: this.tableName,
-            Item: this.toItem({
-              ...product.toPrimitives(),
-              userId: toUserId.toString(),
-              updatedAt: new Date(),
+    do {
+      const result = await this.dynamoDb.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          IndexName: 'UserUpdatedAtIndex',
+          KeyConditionExpression: 'userId = :userId',
+          ExpressionAttributeValues: {
+            ':userId': userId.toString(),
+          },
+          ...(exclusiveStartKey
+            ? { ExclusiveStartKey: exclusiveStartKey }
+            : {}),
+        }),
+      );
+      const items = (result.Items ?? []) as Array<Pick<ProductItem, 'id'>>;
+
+      await Promise.all(
+        items.map((item) =>
+          this.dynamoDb.send(
+            new DeleteCommand({
+              TableName: this.tableName,
+              Key: {
+                id: item.id,
+              },
             }),
-          }),
+          ),
         ),
-      ),
-    );
+      );
+      deletedCount += items.length;
+      exclusiveStartKey = result.LastEvaluatedKey as
+        | Record<string, unknown>
+        | undefined;
+    } while (exclusiveStartKey);
 
-    return products.length;
-  }
-
-  async delete(id: ProductId): Promise<void> {
-    await this.dynamoDb.send(
-      new DeleteCommand({
-        TableName: this.tableName,
-        Key: {
-          id: id.toString(),
-        },
-      }),
-    );
+    return deletedCount;
   }
 
   async findAll(filter?: ProductFilter): Promise<Product[]> {
@@ -154,23 +146,6 @@ export class DynamoDbProductRepository implements ProductRepository {
     const items = (result.Items ?? []) as ProductItem[];
 
     return items.map((item) => this.toDomain(item));
-  }
-
-  private toItem(primitives: ProductPrimitives): ProductItem {
-    return {
-      entityType: 'PRODUCT',
-      id: primitives.id,
-      userId: primitives.userId,
-      title: primitives.title,
-      currentQuantity: primitives.currentQuantity,
-      unit: primitives.unit,
-      usageRate: primitives.usageRate,
-      category: primitives.category,
-      status: primitives.status,
-      nextPurchaseDate: primitives.nextPurchaseDate?.toISOString(),
-      createdAt: primitives.createdAt.toISOString(),
-      updatedAt: primitives.updatedAt.toISOString(),
-    };
   }
 
   private toDomain(item: ProductItem): Product {

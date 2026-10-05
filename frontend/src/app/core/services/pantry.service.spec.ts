@@ -23,6 +23,92 @@ describe('PantryService', () => {
     httpMock.verify();
   });
 
+  it('sends and exposes idempotency metadata when consuming inventory', () => {
+    const idempotencyKey = '9b29fb9a-ce30-473f-abaf-f8d987634f55';
+    let result: any;
+
+    (service.consumeInventoryLot as any)(
+      'lot-1',
+      { quantity: 1, wasteReason: 'expired' },
+      idempotencyKey,
+    ).subscribe((response: unknown) => {
+      result = response;
+    });
+
+    const request = httpMock.expectOne(
+      `${environment.apiUrl}/inventory-lots/lot-1/consume`,
+    );
+    expect(request.request.headers.get('Idempotency-Key')).toBe(idempotencyKey);
+    request.flush(makeApiInventoryLot(), {
+      headers: {
+        'Idempotency-Key': idempotencyKey,
+        'Idempotency-Replayed': 'true',
+      },
+    });
+
+    expect(result.value.id).toBe('lot-1');
+    expect(result.idempotencyKey).toBe(idempotencyKey);
+    expect(result.replayed).toBeTrue();
+  });
+
+  it('sends and exposes idempotency metadata when closing a purchase', () => {
+    const idempotencyKey = 'fb5b1163-9dc5-4db4-b181-9f036f31bd08';
+    let result: any;
+
+    (service.closeShoppingPurchase as any)(
+      {
+        items: [
+          {
+            productTypeId: 'type-1',
+            quantity: 1,
+            unit: 'piezas',
+          },
+        ],
+      },
+      idempotencyKey,
+    ).subscribe((response: unknown) => {
+      result = response;
+    });
+
+    const request = httpMock.expectOne(`${environment.apiUrl}/pantry/checkout`);
+    expect(request.request.headers.get('Idempotency-Key')).toBe(idempotencyKey);
+    request.flush([makeApiInventoryLot()], {
+      headers: { 'Idempotency-Key': idempotencyKey },
+    });
+
+    expect(result.value).toHaveSize(1);
+    expect(result.idempotencyKey).toBe(idempotencyKey);
+    expect(result.replayed).toBeFalse();
+  });
+
+  it('keeps product type search array-compatible while using cursor pagination', () => {
+    service.searchProductTypes('arroz').subscribe((productTypes) => {
+      expect(productTypes.map((productType) => productType.id)).toEqual(['type-1']);
+    });
+
+    const request = httpMock.expectOne((candidate) => {
+      return (
+        candidate.url === `${environment.apiUrl}/product-types/page` &&
+        candidate.params.get('search') === 'arroz' &&
+        candidate.params.get('limit') === '50'
+      );
+    });
+    request.flush({
+      items: [makeApiProductType()],
+      pagination: {},
+    });
+  });
+
+  it('follows all product search cursors instead of hiding later matches', () => {
+    let result: string[] = [];
+    service.searchProductTypes('arroz').subscribe(items => result = items.map(item => item.id));
+    httpMock.expectOne(request => request.url.endsWith('/product-types/page') && !request.params.has('cursor'))
+      .flush({ items: [makeApiProductType()], pagination: { nextCursor: 'next-page', hasMore: true } });
+    httpMock.expectOne(request => request.params.get('cursor') === 'next-page')
+      .flush({ items: [{ ...makeApiProductType(), id: 'type-2' }], pagination: { hasMore: false } });
+    expect(result).toEqual(['type-1', 'type-2']);
+  });
+
   it('normalizes shopping plan dates from pantry overview responses', () => {
     service.getPantryOverview().subscribe((overview) => {
       expect(overview.shoppingPlanItems).toHaveSize(1);
@@ -472,11 +558,11 @@ describe('PantryService', () => {
     });
 
     const request = httpMock.expectOne(
-      `${environment.apiUrl}/product-types?search=detergente`,
+      `${environment.apiUrl}/product-types/page?search=detergente&limit=50`,
     );
     expect(request.request.withCredentials).toBeTrue();
-    request.flush([
-      {
+    request.flush({
+      items: [{
         id: 'type-detergent',
         userId: 'tester',
         baseName: 'Detergente',
@@ -489,8 +575,9 @@ describe('PantryService', () => {
         archivedAt: '2026-04-24T00:00:00.000Z',
         createdAt: '2026-04-01T00:00:00.000Z',
         updatedAt: '2026-04-24T00:00:00.000Z',
-      },
-    ]);
+      }],
+      pagination: {},
+    });
   });
 
   it('calls archive, restore, delete, and archived item endpoints', () => {
@@ -822,6 +909,22 @@ function makeApiProductType() {
       planningEnabled: true,
     },
     archivedAt: '2026-04-24T00:00:00.000Z',
+    createdAt: '2026-04-01T00:00:00.000Z',
+    updatedAt: '2026-04-24T00:00:00.000Z',
+  };
+}
+
+function makeApiInventoryLot() {
+  return {
+    id: 'lot-1',
+    userId: 'tester',
+    productTypeId: 'type-1',
+    quantity: 1,
+    unit: 'piezas',
+    expiresAt: null,
+    purchaseDate: null,
+    archivedAt: null,
+    expirationStatus: 'none',
     createdAt: '2026-04-01T00:00:00.000Z',
     updatedAt: '2026-04-24T00:00:00.000Z',
   };

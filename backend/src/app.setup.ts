@@ -1,4 +1,5 @@
 import { Type, ValidationPipe } from '@nestjs/common';
+import { timingSafeEqual } from 'node:crypto';
 import fastifyCookie from '@fastify/cookie';
 import fastifyHelmet from '@fastify/helmet';
 import fastifyRateLimit from '@fastify/rate-limit';
@@ -31,6 +32,27 @@ export async function configureApp(
   const metricsAlertSink = getOptionalProvider(app, ApiMetricsAlertSinkService);
 
   app.setGlobalPrefix(apiPrefix);
+  const originHeader = configService.get<string>('ORIGIN_VERIFY_HEADER_NAME');
+  const originSecret = configService.get<string>('ORIGIN_VERIFY_HEADER_VALUE');
+  if (Boolean(originHeader) !== Boolean(originSecret)) {
+    throw new Error('Origin verification requires both header name and value');
+  }
+  if (originHeader && originSecret) {
+    const expected = Buffer.from(originSecret);
+    app
+      .getHttpAdapter()
+      .getInstance()
+      .addHook('onRequest', async (request, reply) => {
+        const header = request.headers[originHeader.toLowerCase()];
+        const actual = Buffer.from(typeof header === 'string' ? header : '');
+        if (
+          actual.length !== expected.length ||
+          !timingSafeEqual(actual, expected)
+        ) {
+          await reply.code(403).send({ statusCode: 403, message: 'Forbidden' });
+        }
+      });
+  }
   app.enableCors({ origin: corsOrigin, credentials: true });
   registerRequestIdHook(app.getHttpAdapter().getInstance());
   metricsService.configure({

@@ -9,7 +9,10 @@
 - Keep monetization research in `docs/research/monetization/`.
 - When closing any improvement batch, show the full remaining feature backlog with completed items removed, grouped by source/section, and include a short prioritized recommendation for the next batch.
 - Use `caveman` communication style by default for this project unless the user explicitly asks for normal mode.
-- After validating an improvement batch, push the feature branch, merge it to `main`, push `main`, and verify the automatic Dokploy/GitHub deploy path unless the user explicitly asks to stop before release.
+- After validating an improvement batch, use the protected serverless release path:
+  merge reviewed work to `main`, release the immutable commit through
+  `dev -> tst -> prod`, and verify the matching GitHub/AWS deployment receipts.
+  Dokploy/EC2 is historical for this app and must not be used as a fallback.
 
 ## Current Project Direction
 
@@ -20,7 +23,16 @@
 - The initial `LatAm Shopping Value + Trust Foundation` package has been implemented: local LatAm units and shopping metadata, budgeted shopping estimates, WhatsApp-friendly export, backend/API persistence, SSR/API hardening, dependency audit cleanup, and CI security checks. Real billing, AI, household sharing, price comparison, and delivery integrations remain out of scope.
 - The post-implementation audit pass hardened totals and rate limiting: shopping exports now distinguish full totals, partial totals, and missing prices; optional shopping metadata rejects `null`; SSR/backend rate-limit proxy trust is explicit through env/compose; backend CI uses `lint:check`.
 - The next `Household Basics + Visible Savings` package uses existing product-type shopping metadata and derived pantry overview fields instead of adding an event-history table. It adds household staples, staple attention/restock insights, value summaries, and shopping export grouping by store route. Detailed consumption history, collaboration, AI/receipt capture, payments, and retailer integrations remain deferred.
-- Dokploy owns the actual production auto deploy after `main` changes. The GitHub workflow uses a `production-smoke` job after merge to verify `https://despensalista.lynxpardelle.com/healthz`, `/api/healthz`, and no-cache HTML headers. Runtime Docker images intentionally remove global `npm/npx` because Trivy flagged the base image npm dependency tree; the apps run with `node` directly in production.
+- GitHub Actions owns serverless delivery through isolated `dev`, `tst`, and
+  `prod` environments and AWS OIDC roles. A release is built once in `dev` and
+  promoted unchanged; production smoke verifies
+  `https://despensalista.lynxpardelle.com/healthz`, `/api/healthz`, and no-cache
+  HTML headers. Runtime Docker images intentionally remove global `npm/npx`
+  because Trivy flagged the base image npm dependency tree; the apps run with
+  `node` directly when Docker is used outside the AWS serverless topology.
+- The former EC2 instance `i-061f471ff5edea8a9` no longer exists. Its
+  `EC2TraefikRoute53DNS01Role` role and instance profile were removed in the
+  2026-09 production hardening. Do not recreate or target that path.
 - Production authenticated audits should cover stale-session behavior, not only anonymous redirects. Protected frontend services now send credentials explicitly, and lot registration has a timeout so the UI cannot stay on `Registrando lote...` indefinitely when a protected request hangs.
 - The next approved improvement direction is a six-block package, in order: privacy controls/data lifecycle, pagination/query limits, observability baseline, shopping mode plus close-purchase flow, offline-capable PWA behavior for shopping, and household sharing lite. The shopping-mode block may include mobile checklist UX, keep-screen-awake support, real paid-price capture, closing purchases into lots, planned-vs-real budget comparison, and robust Web Share/WhatsApp/copy fallback.
 - The `Household Savings + PWA Reliability` batch uses derived overview data instead of new product tables: staple catalog groups, waste-at-risk and price coverage summaries, store-route category breakdowns, offline checkout queue, local pantry-data deletion with `ELIMINAR` confirmation, and checkout logs with request IDs. It still does not delete Cognito identities, implement real multi-member households, or add payments/AI/retailer integrations.
@@ -28,7 +40,7 @@
 - The active temporary-share management follow-up is implemented: authenticated users can list active shopping-share links, revoke by internal share id without storing the raw token, see created/expires timestamps in Central time, and DynamoDB writes `expiresAtEpochSeconds` for TTL cleanup. This does not implement full household workspaces, change notifications, Cognito identity deletion, or scan-free DynamoDB GSIs for high-volume share lookup.
 - P0 architecture backlog: migrate the current one-Lambda serverless backend toward AWS serverless microservices using Lambda, Step Functions where orchestration is needed, and supporting AWS services such as API Gateway, EventBridge/SQS, DynamoDB, CloudWatch, and CDK. The target platform must support three isolated environments: dev, test, and production. Treat this as a deliberate architecture migration, not a small feature batch.
 - The household workspace foundation is implemented: default authenticated household creation, owner/editor/viewer role model, email-scoped invite tokens, invite acceptance/revocation, member removal, safe household logs, Mongo/Dynamo persistence, and a profile UI panel. Follow-up household pantry authorization is also implemented: members read the owner's pantry data, owners/editors can mutate it, viewers are read-only, and full pantry deletion is owner-only. The follow-up technical trust batch added recent household activity notifications for household and shared-shopping-list mutations, Cognito-aware account deletion, runtime CI security scanning coverage, and DynamoDB GSI access patterns for household/share lookup. During the GSI transition, destructive cleanup paths must combine indexed records with legacy scan results and deduplicate by `pk` so account deletion does not leave old records behind. Real-time collaboration remains deferred.
-- The security lifecycle batch is implemented: profile exposes retention policy and step-up status, archived pantry records can receive Mongo/Dynamo TTL metadata when `ARCHIVED_RECORD_AUTO_DELETE_ENABLED=true`, auto-delete remains off by default, sensitive feature diffs require `docs/privacy/reviews/*.md` in CI, profile can request Cognito global sign-out, destructive profile actions can require fresh Cognito `auth_time` when `AUTH_STEP_UP_ENABLED=true`, and Cognito optional software-token MFA is available through CDK context `mfaConfiguration=OPTIONAL` or `ON`.
+- The security lifecycle batch is implemented: profile exposes retention policy and step-up status, archived pantry records can receive Mongo/Dynamo TTL metadata when `ARCHIVED_RECORD_AUTO_DELETE_ENABLED=true`, auto-delete remains off by default, sensitive feature diffs require `docs/privacy/reviews/*.md` in CI, profile can request Cognito global sign-out, and destructive profile actions can require fresh Cognito `auth_time` when `AUTH_STEP_UP_ENABLED=true`. The later production-hardening baseline supersedes optional MFA: every stage uses `mfaConfiguration=ON` for Cognito-local users; federated users rely on their identity provider.
 - The LatAm route-and-replenishment batch is implemented: shopping plan groups use a fixed LatAm route order, the pantry form offers starter staple templates, and product-type shopping metadata has `replenishWhenLow` so one-off items can stay visible in inventory without becoming missing/restock candidates after depletion.
 - The technical observability and pagination batch is implemented: backend exposes a protected in-memory `/api/metrics` snapshot when `METRICS_ACCESS_TOKEN` is configured, archived pantry reads support cursor pagination with a frontend "Cargar más archivados" flow, export/profile limit metadata includes the archived page size, backend/frontend Docker base images are digest-pinned to `node:22-alpine@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920`, and a weekly workflow checks whether the Node base-image digest drifted. Active/legacy cursor pagination remains deferred.
 - The productivity/session/waste/observability batch is implemented: profile records and shows hashed known devices from authenticated activity while Cognito global sign-out remains the revocation control, shopping plans can be saved locally as browser snapshots by title/occasion/store, quick capture supports browser speech recognition when available, metrics alerts can be sent to an optional aggregate-only webhook via `METRICS_ALERT_WEBHOOK_URL`, and lot consumption can record waste events with 30-day waste overview. Local saved shopping lists are per-browser, not cross-device sync. Known devices are "seen devices", not a complete Cognito active-session inventory.
@@ -38,10 +50,17 @@
 - The Capture And Portability Foundation batch is implemented as a frontend/local workflow: quick-capture preview, CSV import into editable drafts, active pantry CSV export for Excel, local product-photo preview, local best-effort barcode detection, manual barcode confirmation, and an AI capture credits Plus preview. It does not upload images/CSV/barcodes, add backend storage, add OCR/AI providers, add payments, add retailer/product catalog lookup, or register lots from scan results automatically.
 - Payment provider decision: use Stripe for future web/PWA monetization. Future real billing should use Stripe Billing with Checkout Sessions, Products/Prices, verified webhooks, and Customer Portal. Despensa Lista must not store raw card data. The Monetization Discovery With Stripe batch only adds profile UI and local interest events; it does not add Stripe SDK calls, backend billing state, Checkout Sessions, Customers, Subscriptions, Prices, or payment collection.
 
-## 2026-05-29 CT - Origin Verification Header Migrated To SSM
+## 2026-05-29 CT - Origin Verification Header Migrated To SSM (historical)
+
+This whole section describes the retired Dokploy path. The active serverless
+origin verification value is now held in stage-scoped Secrets Manager resources;
+do not recreate the old SSM parameter or EC2 integration.
 
 - Production CloudFront origin verification header now uses SSM SecureString `/despensalista/prod/cloudfront-origin-verify-header` as the operational source of truth.
-- CloudFront does not support SSM SecureString dynamic references for `DistributionConfig.Origins`, so legacy Dokploy/EC2 deploys must load the value into `DESPENSALISTA_ORIGIN_VERIFY_HEADER_VALUE` from SSM and clear it after deploy. Do not pass the value as CLI context.
+- CloudFront does not support SSM SecureString dynamic references for
+  `DistributionConfig.Origins`; the retired Dokploy/EC2 deploy used to load the
+  value into `DESPENSALISTA_ORIGIN_VERIFY_HEADER_VALUE`. This is historical
+  evidence, not an active deployment instruction.
 - `despensalista-prod-app` was redeployed with `OriginVerifyHeaderParameterName=/despensalista/prod/cloudfront-origin-verify-header`; EC2 role now has scoped `ssm:GetParameter` for that parameter.
 - Remote Traefik route was updated from the same SSM parameter. Public checks returned `200` for `/healthz`, `/api/healthz`, `/login/`, and `/api/auth/cognito/providers`; direct origin without the header returned `404`.
 - Old Secrets Manager secret `/despensalista/prod/cloudfront-origin-verify-header` was scheduled for deletion with a 7-day recovery window.
@@ -146,4 +165,7 @@
 - CloudFront distribution `EWXF7S0KL4WVN` has only API Gateway `aoltmu74g9.execute-api.us-east-1.amazonaws.com` and S3 `despensalista-prod-serverless-ba-webbucket12880f5b-wnf5pq5b9mhs.s3.us-east-1.amazonaws.com` as origins.
 - DynamoDB check returned only `despensalista-prod-*` tables for this app; no `pantrylist-*` tables were returned.
 - Read-only SSM inspection on EC2 `i-061f471ff5edea8a9` showed no matching running Docker containers and no active Traefik files for PantryList/Despensa Lista; only old logs and `_decommissioned/despensalista-20260709T183617Z` copies remain.
-- Decision: the Despensa Lista/PantryList migration can be treated as complete for EC2 decommission scope. Do not terminate the shared EC2 instance until other projects hosted there have also migrated or been retired.
+- Historical decision at that time: the Despensa Lista/PantryList migration was
+  complete, but the shared EC2 was retained for other projects. Superseded in
+  2026-09: AWS now reports that instance ID as nonexistent; do not target or
+  recreate it.

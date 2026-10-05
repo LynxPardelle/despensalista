@@ -1,19 +1,28 @@
-import { BadRequestException } from '@nestjs/common';
-import { CloseShoppingPurchaseUseCase } from './close-shopping-purchase.use-case';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { ProductType } from '../../domain/entities/product-type.entity';
-import { InventoryLot } from '../../domain/entities/inventory-lot.entity';
 import { ProductCategory, QuantityUnit } from '../../domain/enums';
-import { InventoryLotRepository } from '../../domain/repositories/inventory-lot.repository';
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
+import { ProductTypeId } from '../../domain/value-objects/product-type-id.vo';
+import {
+  IdempotencyPayloadConflictError,
+  PantryMutationPort,
+} from '../ports/pantry-mutation.port';
+import { CloseShoppingPurchaseUseCase } from './close-shopping-purchase.use-case';
 
 describe('CloseShoppingPurchaseUseCase', () => {
-  it('creates lots and records paid price metadata', async () => {
-    const productType = makeProductType();
-    const { useCase, inventoryLotRepository, productTypeRepository } =
-      makeUseCase(productType);
+  it('commits every lot and the grouped metadata updates in one transaction', async () => {
+    const mutationPort = makeMutationPort();
+    mutationPort.findReceipt.mockResolvedValue(null);
+    mutationPort.checkout.mockImplementation(async (input) => ({
+      value: input.lots.map((lot) => lot.toPrimitives()),
+      replayed: false,
+    }));
+    const repository = makeProductTypeRepository([makeProductType()]);
+    const useCase = new CloseShoppingPurchaseUseCase(repository, mutationPort);
 
-    const lots = await useCase.execute({
+    const result = await useCase.execute({
       userId: 'user-1',
+      idempotencyKey: '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
       items: [
         {
           productTypeId: 'type-1',
@@ -22,70 +31,119 @@ describe('CloseShoppingPurchaseUseCase', () => {
           paidUnitPrice: 35.5,
           shoppingLocation: 'Mercado',
         },
+        {
+          productTypeId: 'type-1',
+          quantity: 1,
+          unit: QuantityUnit.KILOGRAM,
+          paidUnitPrice: 34,
+          shoppingLocation: 'Central',
+        },
       ],
     });
 
-    expect(lots).toHaveLength(1);
-    expect(inventoryLotRepository.save).toHaveBeenCalledWith(
-      expect.any(InventoryLot),
-    );
-    expect(productTypeRepository.save).toHaveBeenCalledWith(
-      expect.any(ProductType),
-    );
+    expect(result.value).toHaveLength(2);
+    expect(mutationPort.checkout).toHaveBeenCalledTimes(1);
+    const transaction = mutationPort.checkout.mock.calls[0][0];
+    expect(transaction.lots).toHaveLength(2);
+    expect(transaction.productTypes).toHaveLength(1);
     expect(
-      productTypeRepository.save.mock.calls[0][0].shoppingMetadata
-        .estimatedUnitPrice,
-    ).toBe(35.5);
+      transaction.productTypes[0].updated.shoppingMetadata.estimatedUnitPrice,
+    ).toBe(34);
     expect(
-      productTypeRepository.save.mock.calls[0][0].shoppingMetadata
-        .shoppingLocation,
-    ).toBe('Mercado');
+      transaction.productTypes[0].updated.shoppingMetadata.shoppingLocation,
+    ).toBe('Central');
     expect(
-      productTypeRepository.save.mock.calls[0][0].shoppingMetadata.priceHistory,
-    ).toHaveLength(1);
+      transaction.productTypes[0].updated.shoppingMetadata.priceHistory,
+    ).toHaveLength(2);
+    expect(repository.findById).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects archived product types', async () => {
-    const productType = makeProductType();
-    productType.archive('Temporal');
-    const { useCase } = makeUseCase(productType);
+  it('replays the stored lot array without loading product types', async () => {
+    const mutationPort = makeMutationPort();
+    mutationPort.findReceipt.mockImplementation(async (lookup) => ({
+      operationId: lookup.operationId,
+      ownerUserId: 'user-1',
+      operation: 'close_shopping_purchase',
+      requestHash: lookup.requestHash,
+      response: [],
+      createdAt: new Date('2026-09-01T00:00:00.000Z'),
+      expiresAt: new Date('2026-09-08T00:00:00.000Z'),
+    }));
+    const repository = makeProductTypeRepository([makeProductType()]);
+    const useCase = new CloseShoppingPurchaseUseCase(repository, mutationPort);
+
+    const result = await useCase.execute({
+      userId: 'user-1',
+      idempotencyKey: '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
+      items: [
+        { productTypeId: 'type-1', quantity: 1, unit: QuantityUnit.KILOGRAM },
+      ],
+    });
+
+    expect(result).toEqual({ value: [], replayed: true });
+    expect(repository.findById).not.toHaveBeenCalled();
+    expect(mutationPort.checkout).not.toHaveBeenCalled();
+  });
+
+  it('rejects 50 items because 49 is the atomic transaction maximum', async () => {
+    const useCase = new CloseShoppingPurchaseUseCase(
+      makeProductTypeRepository([makeProductType()]),
+      makeMutationPort(),
+    );
 
     await expect(
       useCase.execute({
         userId: 'user-1',
-        items: [
-          {
-            productTypeId: 'type-1',
-            quantity: 1,
-            unit: QuantityUnit.KILOGRAM,
-          },
-        ],
+        idempotencyKey: '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
+        items: Array.from({ length: 50 }, () => ({
+          productTypeId: 'type-1',
+          quantity: 1,
+          unit: QuantityUnit.KILOGRAM,
+        })),
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
   });
+
+  it('maps key reuse with another payload to HTTP 409', async () => {
+    const mutationPort = makeMutationPort();
+    mutationPort.findReceipt.mockRejectedValue(
+      new IdempotencyPayloadConflictError(),
+    );
+    const useCase = new CloseShoppingPurchaseUseCase(
+      makeProductTypeRepository([makeProductType()]),
+      mutationPort,
+    );
+
+    await expect(
+      useCase.execute({
+        userId: 'user-1',
+        idempotencyKey: '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
+        items: [
+          { productTypeId: 'type-1', quantity: 1, unit: QuantityUnit.KILOGRAM },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
 });
 
-function makeUseCase(productType: ProductType): {
-  useCase: CloseShoppingPurchaseUseCase;
-  inventoryLotRepository: jest.Mocked<InventoryLotRepository>;
-  productTypeRepository: jest.Mocked<ProductTypeRepository>;
-} {
-  const inventoryLotRepository = {
-    save: jest.fn((lot: InventoryLot) => Promise.resolve(lot)),
-  } as unknown as jest.Mocked<InventoryLotRepository>;
-  const productTypeRepository = {
-    findById: jest.fn().mockResolvedValue(productType),
-    save: jest.fn((value: ProductType) => Promise.resolve(value)),
-  } as unknown as jest.Mocked<ProductTypeRepository>;
-
+function makeMutationPort(): jest.Mocked<PantryMutationPort> {
   return {
-    useCase: new CloseShoppingPurchaseUseCase(
-      inventoryLotRepository,
-      productTypeRepository,
+    findReceipt: jest.fn(),
+    consume: jest.fn(),
+    checkout: jest.fn(),
+  } as unknown as jest.Mocked<PantryMutationPort>;
+}
+
+function makeProductTypeRepository(
+  productTypes: ProductType[],
+): jest.Mocked<ProductTypeRepository> {
+  return {
+    findById: jest.fn(
+      async (id: ProductTypeId) =>
+        productTypes.find((item) => item.id.toString() === id.toString()) ??
+        null,
     ),
-    inventoryLotRepository,
-    productTypeRepository,
-  };
+  } as unknown as jest.Mocked<ProductTypeRepository>;
 }
 
 function makeProductType(): ProductType {

@@ -1,5 +1,10 @@
 # Dokploy CI/CD And CloudFront Origin HTTPS Plan
 
+> **ARCHIVO HISTORICO — NO EJECUTAR.** Describe la topologia PantryList del
+> 2026-04-29, ya retirada. La instancia EC2, el origen, los stacks y el rol IAM
+> citados dejaron de existir. No recrees esos recursos ni uses la seccion de
+> rollback; el runbook vigente es `docs/operations/production-runbook.md`.
+
 Date: 2026-04-29 Central Time
 
 ## Objective

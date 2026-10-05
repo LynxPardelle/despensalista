@@ -1,4 +1,4 @@
-import { FastifyRequest } from 'fastify';
+import { FastifyReply, FastifyRequest } from 'fastify';
 import { ArchiveInventoryLotUseCase } from '../../../application/use-cases/archive-inventory-lot.use-case';
 import { ConsumeInventoryLotUseCase } from '../../../application/use-cases/consume-inventory-lot.use-case';
 import { CreateInventoryLotUseCase } from '../../../application/use-cases/create-inventory-lot.use-case';
@@ -14,6 +14,41 @@ import { AuthenticatedUser } from '../auth/authenticated-user.interface';
 import { InventoryLotsController } from './inventory-lots.controller';
 
 describe('InventoryLotsController archive endpoints', () => {
+  it('forwards Idempotency-Key and emits replay metadata for consumption', async () => {
+    const { controller, consumeInventoryLotUseCase } = makeController();
+    const request = { method: 'POST' } as FastifyRequest;
+    const reply = {
+      header: jest.fn().mockReturnThis(),
+    } as unknown as FastifyReply;
+    consumeInventoryLotUseCase.execute.mockResolvedValueOnce({
+      value: null,
+      replayed: true,
+    });
+
+    await controller.consume(
+      'lot-1',
+      makeCurrentUser('user-1'),
+      { quantity: 1 },
+      request,
+      'd4973518-70a5-44b6-b497-51c4530950a4',
+      reply,
+    );
+
+    expect(consumeInventoryLotUseCase.execute).toHaveBeenCalledWith({
+      lotId: 'lot-1',
+      userId: 'user-1',
+      quantity: 1,
+      wasteReason: undefined,
+      wasteNote: undefined,
+      idempotencyKey: 'd4973518-70a5-44b6-b497-51c4530950a4',
+    });
+    expect(reply.header).toHaveBeenCalledWith(
+      'Idempotency-Key',
+      'd4973518-70a5-44b6-b497-51c4530950a4',
+    );
+    expect(reply.header).toHaveBeenCalledWith('Idempotency-Replayed', 'true');
+  });
+
   it('requires XSRF and archives a lot for the current user', async () => {
     const { controller, authCookieService, archiveInventoryLotUseCase } =
       makeController();
@@ -71,6 +106,7 @@ function makeController(): {
   authCookieService: jest.Mocked<AuthCookieService>;
   archiveInventoryLotUseCase: jest.Mocked<ArchiveInventoryLotUseCase>;
   resolveHouseholdPantryAccessUseCase: jest.Mocked<ResolveHouseholdPantryAccessUseCase>;
+  consumeInventoryLotUseCase: jest.Mocked<ConsumeInventoryLotUseCase>;
 } {
   const lot = InventoryLot.fromPrimitives({
     id: 'lot-1',
@@ -92,13 +128,16 @@ function makeController(): {
     executeWrite: jest.fn().mockResolvedValue(makeHouseholdAccess()),
     executeOwner: jest.fn().mockResolvedValue(makeHouseholdAccess()),
   } as unknown as jest.Mocked<ResolveHouseholdPantryAccessUseCase>;
+  const consumeInventoryLotUseCase = {
+    execute: jest.fn(),
+  } as unknown as jest.Mocked<ConsumeInventoryLotUseCase>;
 
   return {
     controller: new InventoryLotsController(
       {} as jest.Mocked<CreateInventoryLotUseCase>,
       {} as jest.Mocked<ListInventoryLotsUseCase>,
       {} as jest.Mocked<GetExpiringLotsUseCase>,
-      {} as jest.Mocked<ConsumeInventoryLotUseCase>,
+      consumeInventoryLotUseCase,
       archiveInventoryLotUseCase,
       {
         execute: jest.fn(),
@@ -112,6 +151,7 @@ function makeController(): {
     authCookieService,
     archiveInventoryLotUseCase,
     resolveHouseholdPantryAccessUseCase,
+    consumeInventoryLotUseCase,
   };
 }
 

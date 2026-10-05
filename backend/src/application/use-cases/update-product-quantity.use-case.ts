@@ -4,7 +4,12 @@ import { ProductRepository } from '../../domain/repositories/product.repository'
 import { SchedulingService } from '../../domain/services/scheduling.service';
 import { ProductId } from '../../domain/value-objects/product-id.vo';
 import { UserId } from '../../domain/value-objects/user-id.vo';
-import { PRODUCT_REPOSITORY, SCHEDULING_SERVICE } from '../tokens';
+import {
+  PANTRY_MUTATION_PORT,
+  PRODUCT_REPOSITORY,
+  SCHEDULING_SERVICE,
+} from '../tokens';
+import { PantryMutationPort } from '../ports/pantry-mutation.port';
 
 @Injectable()
 export class UpdateProductQuantityUseCase {
@@ -13,6 +18,8 @@ export class UpdateProductQuantityUseCase {
     private readonly productRepository: ProductRepository,
     @Inject(SCHEDULING_SERVICE)
     private readonly schedulingService: SchedulingService,
+    @Inject(PANTRY_MUTATION_PORT)
+    private readonly pantryMutationPort: PantryMutationPort,
   ) {}
 
   async execute(
@@ -27,11 +34,13 @@ export class UpdateProductQuantityUseCase {
       throw new NotFoundException('Product not found');
     }
 
+    const expected = Product.fromPrimitives(product.toPrimitives());
+
     // Aplicar lógica de dominio
     product.updateQuantity(newQuantity);
     product.calculateNextPurchaseDate(this.schedulingService);
 
     // Persistir cambios
-    return await this.productRepository.save(product);
+    return this.pantryMutationPort.updateProduct(expected, product);
   }
 }

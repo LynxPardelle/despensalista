@@ -11,11 +11,9 @@
     "deletionProtection": "false",
     "externallyManagedSocialProviders": "",
     "facebookApiVersion": "v17.0",
-    "includeProductionInfra": "false",
+    "includeServerlessBackend": "false",
     "appDomainName": "despensalista.lynxpardelle.com",
     "hostedZoneId": "Z05088763QG63CC5SE7PN",
-    "hostedZoneName": "lynxpardelle.com",
-    "originDomainName": "ec2-54-198-41-242.compute-1.amazonaws.com",
-    "ec2RoleName": "EC2TraefikRoute53DNS01Role"
+    "hostedZoneName": "lynxpardelle.com"
   }
 }

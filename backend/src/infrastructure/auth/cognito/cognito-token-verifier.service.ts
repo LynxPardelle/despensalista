@@ -55,8 +55,14 @@ export class CognitoTokenVerifierService implements CognitoTokenVerifier {
   }
 
   private toClaims(payload: Record<string, unknown>): CognitoVerifiedClaims {
+    const cognitoUsername =
+      this.optionalString(payload['cognito:username'])?.trim() ||
+      this.optionalString(payload.username)?.trim() ||
+      undefined;
+
     return {
       sub: this.requiredString(payload.sub),
+      cognitoUsername,
       email: this.optionalString(payload.email),
       emailVerified: this.optionalBoolean(payload.email_verified),
       preferredUsername: this.optionalString(payload.preferred_username),

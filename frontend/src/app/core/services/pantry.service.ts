@@ -1,10 +1,11 @@
 import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { Observable } from 'rxjs';
-import { map, switchMap } from 'rxjs/operators';
+import { EMPTY, Observable } from 'rxjs';
+import { expand, map, reduce, switchMap } from 'rxjs/operators';
 import { environment } from '../../../environments/environment';
 import {
   ApiInventoryLot,
+  ApiCursorPage,
   ApiArchivedPantryItems,
   ApiPantryExport,
   ApiWasteOverview,
@@ -35,6 +36,7 @@ import {
   DeletePantryItemRequest,
   DepletingProductGroup,
   InventoryLot,
+  IdempotentMutationResult,
   PantryLotSummary,
   PantryOverview,
   PantryOverviewItem,
@@ -90,16 +92,16 @@ export class PantryService {
   }
 
   searchProductTypes(search: string): Observable<ProductType[]> {
-    return this.http
-      .get<ApiProductType[]>(this.productTypesUrl, {
-        params: { search },
+    const getPage = (cursor?: string) => this.http
+      .get<ApiCursorPage<ApiProductType>>(`${this.productTypesUrl}/page`, {
+        params: { search, limit: 50, ...(cursor ? { cursor } : {}) },
         withCredentials: true,
-      })
-      .pipe(
-        map((productTypes) =>
-          productTypes.map((productType) => this.normalizeProductType(productType)),
-        ),
-      );
+      });
+    return getPage().pipe(
+      expand(page => page.pagination.nextCursor ? getPage(page.pagination.nextCursor) : EMPTY),
+      reduce((items, page) => [...items, ...page.items], [] as ApiProductType[]),
+      map(items => items.map(item => this.normalizeProductType(item))),
+    );
   }
 
   createProductType(request: CreateProductTypeRequest): Observable<ProductType> {
@@ -237,15 +239,25 @@ export class PantryService {
   consumeInventoryLot(
     lotId: string,
     request: ConsumeInventoryLotRequest,
-  ): Observable<InventoryLot | null> {
+    idempotencyKey: string,
+  ): Observable<IdempotentMutationResult<InventoryLot | null>> {
     return this.http
       .post<ApiInventoryLot | null>(`${this.inventoryLotsUrl}/${lotId}/consume`, request, {
+        headers: { 'Idempotency-Key': idempotencyKey },
+        observe: 'response',
         withCredentials: true,
       })
       .pipe(
-        map((inventoryLot) =>
-          inventoryLot ? this.normalizeInventoryLot(inventoryLot) : null,
-        ),
+        map((response) => ({
+          value: response.body
+            ? this.normalizeInventoryLot(response.body)
+            : null,
+          idempotencyKey:
+            response.headers.get('Idempotency-Key') ?? idempotencyKey,
+          replayed:
+            response.headers.get('Idempotency-Replayed')?.toLowerCase() ===
+            'true',
+        })),
       );
   }
 
@@ -305,17 +317,25 @@ export class PantryService {
 
   closeShoppingPurchase(
     request: CloseShoppingPurchaseRequest,
-  ): Observable<InventoryLot[]> {
+    idempotencyKey: string,
+  ): Observable<IdempotentMutationResult<InventoryLot[]>> {
     return this.http
       .post<ApiInventoryLot[]>(this.pantryCheckoutUrl, request, {
+        headers: { 'Idempotency-Key': idempotencyKey },
+        observe: 'response',
         withCredentials: true,
       })
       .pipe(
-        map((inventoryLots) =>
-          inventoryLots.map((inventoryLot) =>
+        map((response) => ({
+          value: (response.body ?? []).map((inventoryLot) =>
             this.normalizeInventoryLot(inventoryLot),
           ),
-        ),
+          idempotencyKey:
+            response.headers.get('Idempotency-Key') ?? idempotencyKey,
+          replayed:
+            response.headers.get('Idempotency-Replayed')?.toLowerCase() ===
+            'true',
+        })),
       );
   }
 

@@ -1,3 +1,4 @@
+import { makePantryMutationMock } from '../ports/pantry-mutation.mock';
 import { ProductType } from '../../domain/entities/product-type.entity';
 import { ProductCategory, QuantityUnit } from '../../domain/enums';
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
@@ -30,7 +31,10 @@ describe('UpdateProductTypeDepletionRuleUseCase', () => {
     const repository = makeRepository();
     const productType = makeProductType();
     repository.findById.mockResolvedValue(productType);
-    const useCase = new UpdateProductTypeDepletionRuleUseCase(repository);
+    const useCase = new UpdateProductTypeDepletionRuleUseCase(
+      repository,
+      makePantryMutationMock({ types: repository }),
+    );
 
     const updatedProductType = await useCase.execute({
       productTypeId: productType.id.toString(),
@@ -61,7 +65,10 @@ describe('UpdateProductTypeDepletionRuleUseCase', () => {
     const repository = makeRepository();
     const productType = makeProductType();
     repository.findById.mockResolvedValue(productType);
-    const useCase = new UpdateProductTypeDepletionRuleUseCase(repository);
+    const useCase = new UpdateProductTypeDepletionRuleUseCase(
+      repository,
+      makePantryMutationMock({ types: repository }),
+    );
 
     await expect(
       useCase.execute({

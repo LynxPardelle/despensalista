@@ -17,9 +17,9 @@ export function buildRetentionPolicy(
       'ARCHIVED_RECORD_RETENTION_DAYS',
       365,
     ),
-    archivedRecordAutoDeleteEnabled:
-      configService.get<string>('ARCHIVED_RECORD_AUTO_DELETE_ENABLED') ===
-      'true',
+    // Autonomous TTL deletion cannot update the atomic archive quota. Keep it
+    // disabled until cleanup runs through the mutation port in one transaction.
+    archivedRecordAutoDeleteEnabled: false,
     temporaryShoppingShareRetentionDays: readPositiveInteger(
       configService,
       'TEMPORARY_SHOPPING_SHARE_RETENTION_DAYS',

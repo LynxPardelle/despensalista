@@ -202,7 +202,9 @@ export class ProductType {
       this._planningSettings,
       this._defaultDepletionRule,
     );
-    this._updatedAt = new Date();
+    this._updatedAt = new Date(
+      Math.max(Date.now(), this._updatedAt.getTime() + 1),
+    );
   }
 
   updatePlanningSettings(input: ProductTypePlanningSettingsPatch): void {
@@ -213,12 +215,16 @@ export class ProductType {
       },
       this._defaultDepletionRule,
     );
-    this._updatedAt = new Date();
+    this._updatedAt = new Date(
+      Math.max(Date.now(), this._updatedAt.getTime() + 1),
+    );
   }
 
   updateShoppingMetadata(input: ProductTypeShoppingMetadataPatch): void {
     const previousShoppingMetadata = this._shoppingMetadata;
-    const nextUpdatedAt = new Date();
+    const nextUpdatedAt = new Date(
+      Math.max(Date.now(), this._updatedAt.getTime() + 1),
+    );
     const normalizedShoppingMetadata = normalizeShoppingMetadata(
       {
         ...this._shoppingMetadata,
@@ -243,13 +249,17 @@ export class ProductType {
   archive(reason?: string): void {
     this._archivedAt = new Date();
     this._archivedReason = normalizeOptionalText(reason);
-    this._updatedAt = new Date();
+    this._updatedAt = new Date(
+      Math.max(Date.now(), this._updatedAt.getTime() + 1),
+    );
   }
 
   restore(): void {
     this._archivedAt = undefined;
     this._archivedReason = undefined;
-    this._updatedAt = new Date();
+    this._updatedAt = new Date(
+      Math.max(Date.now(), this._updatedAt.getTime() + 1),
+    );
   }
 
   isArchived(): boolean {

@@ -1,0 +1,26 @@
+{
+  "dev": {
+    "webBucketName": "despensalista-dev-serverless-bac-webbucket12880f5b-vrbucntsqsty",
+    "apiId": "0r4nizo9p6",
+    "distributionId": "E3DRLHYEN8ZAPO",
+    "responseHeadersPolicyId": "a97ee5cb-1edc-4666-ab27-ec81ac5c9c08",
+    "originAccessControlId": "E36OFEKZHM7LEO",
+    "certificateArn": "arn:aws:acm:us-east-1:765932874577:certificate/c3477575-e93f-4eab-9f85-e9ed7fa1de5b"
+  },
+  "tst": {
+    "webBucketName": "despensalista-tst-serverless-bac-webbucket12880f5b-y1khjd2fvys4",
+    "apiId": "jfobhhq68l",
+    "distributionId": "E3M7OVL4J44B1L",
+    "responseHeadersPolicyId": "7a694fbc-3156-44b4-81d5-0859e9e41476",
+    "originAccessControlId": "EPLHXLYWBYMRK",
+    "certificateArn": "arn:aws:acm:us-east-1:765932874577:certificate/1228ae9b-8610-4881-aff2-5c1ee16bcaa8"
+  },
+  "prod": {
+    "webBucketName": "despensalista-prod-serverless-ba-webbucket12880f5b-wnf5pq5b9mhs",
+    "apiId": "aoltmu74g9",
+    "distributionId": "EWXF7S0KL4WVN",
+    "responseHeadersPolicyId": "94661a5f-67cd-4603-a7f5-830606a04143",
+    "originAccessControlId": "E3JE9DT45L7KF1",
+    "certificateArn": "arn:aws:acm:us-east-1:765932874577:certificate/fdb6afed-44ec-4c83-85be-cf110e7f5ad9"
+  }
+}

@@ -14,7 +14,8 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  validate:
+  validate-promotion:
+    name: Validate Promotion Chain
     runs-on: ubuntu-latest
     steps:
       - name: Validate branch promotion chain

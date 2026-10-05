@@ -3,6 +3,25 @@ import { UserId } from '../value-objects/user-id.vo';
 import { ProductType } from './product-type.entity';
 
 describe('ProductType planning settings and archive state', () => {
+  it('advances optimistic version timestamps even within the same millisecond', () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-25T00:00:00Z'));
+    try {
+      const type = ProductType.create(
+        UserId.fromString('user-1'),
+        'Arroz',
+        ProductCategory.FOOD,
+        QuantityUnit.PIECE,
+      );
+      const before = type.updatedAt.getTime();
+      type.updateShoppingMetadata({ estimatedUnitPrice: 10 });
+      expect(type.updatedAt.getTime()).toBeGreaterThan(before);
+      const after = type.updatedAt.getTime();
+      type.archive();
+      expect(type.updatedAt.getTime()).toBeGreaterThan(after);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
   it('defaults planning to enabled when a depletion rule is active', () => {
     const productType = ProductType.create(
       UserId.fromString('user-1'),

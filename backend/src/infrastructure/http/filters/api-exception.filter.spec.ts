@@ -1,7 +1,48 @@
-import { ArgumentsHost, BadRequestException } from '@nestjs/common';
+import { ArgumentsHost, BadRequestException, Logger } from '@nestjs/common';
 import { ApiExceptionFilter } from './api-exception.filter';
 
 describe('ApiExceptionFilter', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it.each([true, false])(
+    'omits OAuth queries, share tokens, cookies, and exception messages from logs (registered route: %s)',
+    (registered) => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      const error = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+      const reply = makeReply();
+      const request = {
+        method: 'GET',
+        url: '/api/shopping-shares/private-token?code=private-code&state=private-state',
+        headers: { cookie: 'session=private-cookie' },
+        routeOptions: registered ? { url: '/api/shopping-shares/:token' } : {},
+      };
+      const host = {
+        switchToHttp: () => ({
+          getRequest: () => request,
+          getResponse: () => reply,
+        }),
+      } as unknown as ArgumentsHost;
+      const filter = new ApiExceptionFilter();
+
+      filter.catch(new BadRequestException('Invalid request'), host);
+      filter.catch(
+        new Error('upstream URL ?code=private-code cookie=private-cookie'),
+        host,
+      );
+
+      expect(reply.send).toHaveBeenCalledWith(
+        expect.objectContaining({ path: '/api/shopping-shares/:token' }),
+      );
+      expect(
+        JSON.stringify([
+          warn.mock.calls,
+          error.mock.calls,
+          reply.send.mock.calls,
+        ]),
+      ).not.toMatch(/private-(token|code|state|cookie)/);
+    },
+  );
+
   it('preserves safe client errors and includes the request id', () => {
     const reply = makeReply();
     const filter = new ApiExceptionFilter();

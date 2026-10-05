@@ -1,6 +1,7 @@
 import { ShoppingShare } from '../../../domain/entities/shopping-share.entity';
 import { hashShoppingShareToken } from '../../../application/utils/shopping-share-token';
 import { MongoShoppingShareRepository } from './mongodb-shopping-share.repository';
+import { ShoppingShareSchema } from './schemas/shopping-share.schema';
 
 type QueryResult<T> = {
   sort: (sort: Record<string, number>) => QueryResult<T>;
@@ -11,6 +12,20 @@ type QueryResult<T> = {
 };
 
 describe('MongoShoppingShareRepository', () => {
+  it('physically expires temporary shares at their declared expiry', () => {
+    expect(ShoppingShareSchema.indexes()).toEqual(
+      expect.arrayContaining([
+        [
+          { expiresAt: 1 },
+          expect.objectContaining({
+            name: 'shopping_share_ttl',
+            expireAfterSeconds: 0,
+          }),
+        ],
+      ]),
+    );
+  });
+
   it('lists active owner shares without revoked or expired records', async () => {
     const share = makeShare().toPrimitives();
     const query = makeQuery([share]);
