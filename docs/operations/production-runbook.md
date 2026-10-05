@@ -61,10 +61,11 @@ New CloudFront OAC/response policies, ACM certificates, optional pricing-plan
 enrollments require this deliberate administrative path because AWS cannot
 adequately scope their creation/mutation for CI. CloudWatch Logs resource-policy
 APIs do not support resource ARNs, so the protected CloudFormation executor has
-two documented wildcard exceptions: `PutResourcePolicy`/`DeleteResourcePolicy`
-for API access logs, and `CreateCloudFormationDeployment`/`StopDeployment` for
-the Lambda alias cutover. Runtime and GitHub roles do not receive them. Do not
-add further wildcard writes to work around a failed release. Same-account
+documented wildcard exceptions: `PutResourcePolicy`/`DeleteResourcePolicy` and
+`CreateLogDelivery`/`UpdateLogDelivery`/`DeleteLogDelivery`/`GetLogDelivery`/
+`ListLogDeliveries` for API access logs, and `CreateCloudFormationDeployment`/
+`StopDeployment` for the Lambda alias cutover. Runtime and GitHub roles do not
+receive them. Do not add further wildcard writes to work around a failed release. Same-account
 controls are not an Organizations/SCP or separate-account isolation boundary;
 deployment changes remain trusted and reviewed.
 
