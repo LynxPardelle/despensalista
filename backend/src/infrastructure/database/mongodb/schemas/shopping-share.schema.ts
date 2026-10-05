@@ -25,7 +25,7 @@ export class ShoppingShareDocument {
   @Prop({ required: true })
   createdAt: Date;
 
-  @Prop({ required: true, index: true })
+  @Prop({ required: true })
   expiresAt: Date;
 
   @Prop({ required: false })
@@ -40,3 +40,7 @@ export const ShoppingShareSchema = SchemaFactory.createForClass(
 );
 
 ShoppingShareSchema.index({ ownerUserId: 1, createdAt: -1 });
+ShoppingShareSchema.index(
+  { expiresAt: 1 },
+  { expireAfterSeconds: 0, name: 'shopping_share_ttl' },
+);

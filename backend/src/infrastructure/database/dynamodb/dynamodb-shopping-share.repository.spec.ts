@@ -1,7 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import {
   DeleteCommand,
-  PutCommand,
   QueryCommand,
   ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
@@ -12,24 +11,6 @@ import { DynamoDbDocumentClientService } from './dynamodb-document-client.servic
 import { DynamoDbShoppingShareRepository } from './dynamodb-shopping-share.repository';
 
 describe('DynamoDbShoppingShareRepository', () => {
-  it('stores a DynamoDB TTL epoch value when saving shares', async () => {
-    let capturedItem: Record<string, unknown> | undefined;
-    const dynamoDb = {
-      send: jest.fn(async (command: PutCommand) => {
-        capturedItem = command.input.Item as Record<string, unknown>;
-        return {};
-      }),
-    } as unknown as DynamoDbDocumentClientService;
-    const repository = new DynamoDbShoppingShareRepository(
-      dynamoDb,
-      makeConfigService(),
-    );
-
-    await repository.save(makeShare());
-
-    expect(capturedItem?.['expiresAtEpochSeconds']).toBe(1779753600);
-  });
-
   it('lists active owner shares sorted newest first', async () => {
     const older = makeItem({
       id: 'share-old',
@@ -62,14 +43,50 @@ describe('DynamoDbShoppingShareRepository', () => {
     ]);
   });
 
-  it('deletes indexed and legacy owner shares without duplicates', async () => {
+  it('does not scan the shared table when an indexed share id is missing', async () => {
+    const dynamoDb = {
+      send: jest.fn(async (command: QueryCommand | ScanCommand) => {
+        if (command instanceof ScanCommand) {
+          throw new Error('request-time table scans are forbidden');
+        }
+
+        return { Items: [] };
+      }),
+    } as unknown as DynamoDbDocumentClientService;
+    const repository = new DynamoDbShoppingShareRepository(
+      dynamoDb,
+      makeConfigService(),
+    );
+
+    await expect(repository.findById('missing')).resolves.toBeNull();
+    expect(dynamoDb.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns an empty indexed active-share list without scanning', async () => {
+    const dynamoDb = {
+      send: jest.fn(async (command: QueryCommand | ScanCommand) => {
+        if (command instanceof ScanCommand) {
+          throw new Error('request-time table scans are forbidden');
+        }
+
+        return { Items: [] };
+      }),
+    } as unknown as DynamoDbDocumentClientService;
+    const repository = new DynamoDbShoppingShareRepository(
+      dynamoDb,
+      makeConfigService(),
+    );
+
+    await expect(
+      repository.listActiveByOwnerUserId('user-1', new Date()),
+    ).resolves.toEqual([]);
+    expect(dynamoDb.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes indexed owner shares without scanning the shared table', async () => {
     const indexed = makeItem({
       id: 'share-indexed',
       tokenHash: 'indexed-token-hash',
-    });
-    const legacy = makeItem({
-      id: 'share-legacy',
-      tokenHash: 'legacy-token-hash',
     });
     const deletedKeys: unknown[] = [];
     const dynamoDb = {
@@ -80,7 +97,7 @@ describe('DynamoDbShoppingShareRepository', () => {
           }
 
           if (command instanceof ScanCommand) {
-            return { Items: [indexed, legacy] };
+            throw new Error('request-time table scans are forbidden');
           }
 
           deletedKeys.push(command.input.Key);
@@ -95,12 +112,9 @@ describe('DynamoDbShoppingShareRepository', () => {
 
     await expect(
       repository.deleteByOwnerUserId(UserId.fromString('user-1')),
-    ).resolves.toBe(2);
+    ).resolves.toBe(1);
 
-    expect(deletedKeys).toEqual([
-      { pk: 'SHOPPING_SHARE#indexed-token-hash' },
-      { pk: 'SHOPPING_SHARE#legacy-token-hash' },
-    ]);
+    expect(deletedKeys).toEqual([{ pk: 'SHOPPING_SHARE#indexed-token-hash' }]);
   });
 });
 

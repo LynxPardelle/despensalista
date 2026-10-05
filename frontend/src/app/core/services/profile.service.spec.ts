@@ -110,7 +110,10 @@ describe('ProfileService', () => {
 
   it('deletes local pantry data with explicit confirmation', () => {
     service
-      .deletePantryData({ confirmationText: 'ELIMINAR' })
+      .deletePantryData(
+        { confirmationText: 'ELIMINAR' },
+        '9b29fb9a-ce30-473f-abaf-f8d987634f55',
+      )
       .subscribe((result) => {
         expect(result).toEqual({
           deletedInventoryLotCount: 5,
@@ -124,6 +127,9 @@ describe('ProfileService', () => {
     const request = http.expectOne('/api/profile/pantry-data');
     expect(request.request.method).toBe('DELETE');
     expect(request.request.withCredentials).toBeTrue();
+    expect(request.request.headers.get('Idempotency-Key')).toBe(
+      '9b29fb9a-ce30-473f-abaf-f8d987634f55',
+    );
     expect(request.request.body).toEqual({
       confirmationText: 'ELIMINAR',
     });

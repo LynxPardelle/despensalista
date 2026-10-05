@@ -1,12 +1,16 @@
 import {
-  BadRequestException,
+  ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { MAX_SAVED_SHOPPING_LISTS_PER_USER } from '../constants/query-limits';
-import { SHOPPING_LIST_REPOSITORY } from '../tokens';
+import { PANTRY_MUTATION_PORT, SHOPPING_LIST_REPOSITORY } from '../tokens';
+import {
+  PantryMutationConflictError,
+  PantryMutationPort,
+  PantryQuotaExceededError,
+} from '../ports/pantry-mutation.port';
 import {
   ShoppingList,
   ShoppingListItemPrimitives,
@@ -16,8 +20,8 @@ import { ShoppingListRepository } from '../../domain/repositories/shopping-list.
 @Injectable()
 export class CreateShoppingListUseCase {
   constructor(
-    @Inject(SHOPPING_LIST_REPOSITORY)
-    private readonly shoppingListRepository: ShoppingListRepository,
+    @Inject(PANTRY_MUTATION_PORT)
+    private readonly pantryMutationPort: PantryMutationPort,
   ) {}
 
   async execute(command: {
@@ -27,19 +31,19 @@ export class CreateShoppingListUseCase {
     shoppingLocation?: string;
     items: ShoppingListItemPrimitives[];
   }): Promise<ShoppingList> {
-    const existingLists = await this.shoppingListRepository.listByOwnerUserId(
-      command.ownerUserId,
-    );
-
-    if (existingLists.length >= MAX_SAVED_SHOPPING_LISTS_PER_USER) {
-      throw new BadRequestException(
-        `Saved shopping lists cannot exceed ${MAX_SAVED_SHOPPING_LISTS_PER_USER}`,
-      );
-    }
-
     const list = ShoppingList.create(command);
 
-    return this.shoppingListRepository.save(list);
+    try {
+      return await this.pantryMutationPort.createShoppingList(list);
+    } catch (error) {
+      if (
+        error instanceof PantryQuotaExceededError ||
+        error instanceof PantryMutationConflictError
+      ) {
+        throw new ConflictException(error.message);
+      }
+      throw error;
+    }
   }
 }
 
@@ -60,6 +64,8 @@ export class DeleteShoppingListUseCase {
   constructor(
     @Inject(SHOPPING_LIST_REPOSITORY)
     private readonly shoppingListRepository: ShoppingListRepository,
+    @Inject(PANTRY_MUTATION_PORT)
+    private readonly pantryMutationPort: PantryMutationPort,
   ) {}
 
   async execute(command: {
@@ -80,7 +86,14 @@ export class DeleteShoppingListUseCase {
       );
     }
 
-    await this.shoppingListRepository.delete(command.listId);
+    try {
+      await this.pantryMutationPort.deleteShoppingList(list);
+    } catch (error) {
+      if (error instanceof PantryMutationConflictError) {
+        throw new ConflictException(error.message);
+      }
+      throw error;
+    }
 
     return list;
   }

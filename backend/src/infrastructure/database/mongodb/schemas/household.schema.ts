@@ -34,6 +34,12 @@ export class HouseholdDocument {
   @Prop({ required: false, index: true })
   ownerUserId?: string;
 
+  @Prop({ required: false })
+  deleting?: string;
+
+  @Prop({ required: false })
+  mutationVersion?: number;
+
   @Prop({ required: false, index: true })
   householdId?: string;
 
@@ -85,6 +91,9 @@ export class HouseholdDocument {
   @Prop({ required: false })
   revokedAt?: Date;
 
+  @Prop({ required: false })
+  privacyRedacted?: boolean;
+
   @Prop({ required: true })
   createdAt: Date;
 
@@ -95,6 +104,22 @@ export class HouseholdDocument {
 export const HouseholdSchema = SchemaFactory.createForClass(HouseholdDocument);
 
 HouseholdSchema.index({ entityType: 1, userId: 1 });
+HouseholdSchema.index(
+  { userId: 1 },
+  {
+    name: 'unique_household_membership_user',
+    unique: true,
+    partialFilterExpression: { entityType: 'HOUSEHOLD_MEMBERSHIP' },
+  },
+);
 HouseholdSchema.index({ entityType: 1, householdId: 1 });
 HouseholdSchema.index({ entityType: 1, householdId: 1, createdAt: -1 });
 HouseholdSchema.index({ entityType: 1, tokenHash: 1 }, { sparse: true });
+HouseholdSchema.index(
+  { expiresAt: 1 },
+  {
+    name: 'household_invite_ttl',
+    expireAfterSeconds: 0,
+    partialFilterExpression: { entityType: 'HOUSEHOLD_INVITE' },
+  },
+);

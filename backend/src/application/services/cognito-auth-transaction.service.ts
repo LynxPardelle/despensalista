@@ -67,7 +67,8 @@ export class CognitoAuthTransactionService {
     if (
       !redirectTo ||
       !redirectTo.startsWith('/') ||
-      redirectTo.startsWith('//')
+      redirectTo.startsWith('//') ||
+      containsUnsafeRedirectCharacter(redirectTo)
     ) {
       return fallback;
     }
@@ -84,4 +85,20 @@ export class CognitoAuthTransactionService {
   private createOpaqueValue(byteLength: number): string {
     return randomBytes(byteLength).toString('base64url');
   }
+}
+
+function containsUnsafeRedirectCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+
+    if (
+      character === '\\' ||
+      codePoint < 0x20 ||
+      (codePoint >= 0x7f && codePoint <= 0x9f)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }

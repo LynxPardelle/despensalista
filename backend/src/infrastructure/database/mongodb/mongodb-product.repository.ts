@@ -25,19 +25,6 @@ export class MongoProductRepository implements ProductRepository {
     private readonly productModel: Model<ProductDocument>,
   ) {}
 
-  async save(product: Product): Promise<Product> {
-    const primitives = product.toPrimitives();
-    const savedProduct = await this.productModel
-      .findOneAndUpdate({ id: primitives.id }, primitives, {
-        new: true,
-        upsert: true,
-      })
-      .lean()
-      .exec();
-
-    return this.toDomain(savedProduct);
-  }
-
   async findById(id: ProductId): Promise<Product | null> {
     const product = await this.productModel
       .findOne({ id: id.toString() })
@@ -59,22 +46,12 @@ export class MongoProductRepository implements ProductRepository {
     return this.findAll({ status });
   }
 
-  async reassignUserOwnership(
-    fromUserId: UserId,
-    toUserId: UserId,
-  ): Promise<number> {
+  async deleteByUserId(userId: UserId): Promise<number> {
     const result = await this.productModel
-      .updateMany(
-        { userId: fromUserId.toString() },
-        { $set: { userId: toUserId.toString(), updatedAt: new Date() } },
-      )
+      .deleteMany({ userId: userId.toString() })
       .exec();
 
-    return result.modifiedCount;
-  }
-
-  async delete(id: ProductId): Promise<void> {
-    await this.productModel.deleteOne({ id: id.toString() }).exec();
+    return result.deletedCount;
   }
 
   async findAll(filter?: ProductFilter): Promise<Product[]> {

@@ -1,10 +1,21 @@
 
 === DIRECTORY TREE (max depth 3, source files only) ===
+.env.docker.example
+.env.production.example
 .github
 .github\workflows
 .github\workflows\ci-cd.yml
+.github\workflows\deploy-serverless-dev.yml
+.github\workflows\deploy-serverless-prod.yml
+.github\workflows\deploy-serverless-tst.yml
+.github\workflows\docker-base-image-cadence.yml
+.github\workflows\serverless-cdk-validate.yml
+.github\workflows\validate-promotion-source.yml
 .gitignore
+.gitleaksignore
+.impeccable.md
 backend
+backend\.dockerignore
 backend\.env.example
 backend\.prettierrc
 backend\Dockerfile
@@ -13,15 +24,25 @@ backend\nest-cli.json
 backend\package-lock.json
 backend\package.json
 backend\README.md
+backend\scripts
+backend\scripts\migrate-products-to-product-types-and-lots.ts
+backend\scripts\seed-legacy-account-claims.ts
 backend\src
 backend\src\app.controller.spec.ts
 backend\src\app.controller.ts
 backend\src\app.module.ts
 backend\src\app.service.ts
+backend\src\app.setup.spec.ts
+backend\src\app.setup.ts
 backend\src\application
+backend\src\application\constants
+backend\src\application\policies
 backend\src\application\ports
+backend\src\application\read-models
 backend\src\application\services
+backend\src\application\tokens.ts
 backend\src\application\use-cases
+backend\src\application\utils
 backend\src\domain
 backend\src\domain\entities
 backend\src\domain\enums
@@ -29,10 +50,11 @@ backend\src\domain\repositories
 backend\src\domain\services
 backend\src\domain\value-objects
 backend\src\infrastructure
-backend\src\infrastructure\config
+backend\src\infrastructure\auth
 backend\src\infrastructure\database
-backend\src\infrastructure\external
 backend\src\infrastructure\http
+backend\src\lambda.spec.ts
+backend\src\lambda.ts
 backend\src\main.ts
 backend\test
 backend\test\app.e2e-spec.ts
@@ -40,32 +62,99 @@ backend\test\jest-e2e.json
 backend\tsconfig.build.json
 backend\tsconfig.json
 changelog
+changelog\2026-06-09-capture-portability-foundation.md
+changelog\2026-06-09-monetization-discovery-stripe.md
+changelog\2026-06-09-production-smoke-timeouts.md
+changelog\2026-06-09-server-backed-shopping-savings-batch.md
+changelog\2026-06-09-shopping-mode-2-latam.md
+changelog\2026-06-09-use-first-waste-reduction.md
 changelog\ARCHITECTURE_CHANGES.md
 changelog\ARCHITECTURE_CHANGES_UPDATED.md
+changelog\README.md
 changelog\STEP1_PROGRESS.md
 changelog\STEP2_PROGRESS.md
+Codex.md
+docker
+docker\mongodb
+docker\mongodb\initdb
+docker\mongodb\initdb\01-create-app-user.js
+docker\mongodb\Repair-DockerMongoCredentials.ps1
+docker-compose.dokploy.prod.yml
+docker-compose.dokploy.yml
+docker-compose.prod.yml
 docker-compose.yml
 docs
 docs\codebase
 docs\codebase\.codebase-scan.txt
+docs\deployment
+docs\deployment\aws-production-report.md
+docs\deployment\cognito.md
+docs\deployment\dokploy-cicd-cloudfront-origin-hardening.md
+docs\deployment\dokploy.md
+docs\deployment\observability.md
+docs\deployment\serverless-migration.md
+docs\privacy
+docs\privacy\privacy-review-checklist.md
+docs\privacy\reviews
+docs\privacy\reviews\2026-06-08-security-lifecycle-batch.md
+docs\privacy\reviews\2026-06-09-capture-portability-foundation.md
+docs\privacy\reviews\2026-06-09-monetization-discovery-stripe.md
+docs\privacy\reviews\2026-06-09-productivity-session-waste-observability.md
+docs\privacy\reviews\2026-06-09-server-backed-shopping-savings-batch.md
+docs\privacy\reviews\2026-06-09-shopping-mode-2-latam.md
+docs\privacy\reviews\2026-06-09-use-first-waste-reduction.md
+docs\research
+docs\research\features
+docs\research\features\2026-05-15-latam-competitor-feature-ideas.md
+docs\research\features\2026-05-15-selected-feature-package.md
+docs\research\features\2026-05-15-technical-risk-feature-ideas.md
+docs\research\features\2026-05-19-production-audit-seed-and-next-batch-notes.md
+docs\research\features\2026-05-19-server-backed-share-tokens.md
+docs\research\features\2026-05-19-trust-sharing-batch.md
+docs\research\monetization
+docs\research\monetization\2026-05-15-monetization-ideas.md
+docs\research\monetization\2026-06-09-stripe-monetization-discovery.md
+docs\research\naming
+docs\research\naming\2026-05-15-spanish-name-research.md
+docs\research\security
+docs\research\security\2026-05-17-technical-security-batch.md
+docs\research\security\2026-05-19-privacy-review-checklist.md
+docs\reviews
+docs\reviews\2026-04-27-angular-21-migration-review.md
+docs\reviews\2026-04-27-cognito-auth-cleanup-review.md
+docs\reviews\2026-04-27-cognito-auth-comprehensive-review.md
+docs\reviews\2026-04-27-cognito-aws-infra-review.md
+docs\reviews\2026-04-27-cognito-social-smoke-audit.md
+docs\superpowers
+docs\superpowers\specs
+docs\superpowers\specs\2026-04-21-expiration-lot-model-design.md
+docs\superpowers\specs\2026-04-23-auth-dao-deployment-design.md
+docs\superpowers\specs\2026-04-24-durability-depletion-design.md
+docs\superpowers\specs\2026-04-27-cognito-auth-replacement-design.md
+docs\superpowers\specs\2026-04-28-profile-preferences-expired-alerts-design.md
+docs\superpowers\specs\2026-04-29-replenishment-intelligence-guided-ux-design.md
+docs\superpowers\specs\2026-05-18-privacy-query-observability-shopping-mode-design.md
 findings.md
 frontend
-frontend\.angular
-frontend\.angular\cache
-frontend\.angular\cache\19.2.15
+frontend\.dockerignore
 frontend\.editorconfig
 frontend\.gitignore
-frontend\.vscode
-frontend\.vscode\extensions.json
-frontend\.vscode\launch.json
-frontend\.vscode\tasks.json
 frontend\angular.json
 frontend\Dockerfile
+frontend\e2e
+frontend\e2e\auth-cognito-smoke.spec.ts
+frontend\e2e\profile-preferences-expired-alert.spec.ts
 frontend\package-lock.json
 frontend\package.json
+frontend\playwright.config.ts
+frontend\proxy.conf.cjs
 frontend\public
+frontend\public\despensalista-sw.js
 frontend\public\favicon.ico
+frontend\public\manifest.webmanifest
 frontend\README.md
+frontend\scripts
+frontend\scripts\ensure-static-index.mjs
 frontend\src
 frontend\src\app
 frontend\src\app\app-routing.module.ts
@@ -85,37 +174,32 @@ frontend\src\environments\environment.ts
 frontend\src\index.html
 frontend\src\main.server.ts
 frontend\src\main.ts
+frontend\src\server-auth-routes.spec.ts
+frontend\src\server-auth-routes.ts
+frontend\src\server-proxy.spec.ts
+frontend\src\server-proxy.ts
+frontend\src\server-rate-limit.spec.ts
+frontend\src\server-rate-limit.ts
+frontend\src\server-security.spec.ts
+frontend\src\server-security.ts
+frontend\src\server-static-cache.spec.ts
+frontend\src\server-static-cache.ts
 frontend\src\server.ts
 frontend\src\styles.scss
 frontend\tsconfig.app.json
 frontend\tsconfig.json
 frontend\tsconfig.spec.json
-instructions.md
-LICENSE
-planning
-planning\00-project-overview.md
-planning\01-setup-project-structure.md
-planning\02-core-architecture-patterns.md
-planning\03-database-models-mvp.md
-planning\04-frontend-mvp-components.md
-planning\05-testing-mvp.md
-planning\06-security-validation.md
-planning\07-advanced-features.md
-planning\08-docker-deployment.md
-planning\09-documentation-readme.md
-planning\10-final-polish-optimization.md
-progress.md
-README.md
-task_plan.md
-validation-step2-2025-06-17_20-51-43.log
-validations
-validations\validate-step1-auto.ps1
-validations\validate-step1-manual.md
-validations\validate-step2-auto.md
-validations\validate-step2-auto.ps1
-validations\validate-step2-manual.md
-validations\validate-step2-simple.ps1
-validations\VALIDATION_SUMMARY_STEP1.md
+infra
+infra\cognito
+infra\cognito\cdk.context.example.json
+infra\cognito\cdk.json
+infra\cognito\lib
+infra\cognito\lib\despensalista-cognito-stack.ts
+infra\cognito\lib\despensalista-production-stack.ts
+infra\cognito\lib\despensalista-serverless-backend-stack.ts
+infra\cognito\package-lock.json
+infra\cognito\package.json
+infra\cognito\README.md
 
 === STACK DETECTION (manifest files) ===
 No recognized manifest files found in project root.
@@ -130,79 +214,75 @@ No linting or formatting config files found in project root.
 No .env.example or .env.template found. Identify required environment variables by searching the code and config for environment variable reads.
 
 === TODO / FIXME / HACK (production code only, test dirs excluded) ===
-frontend\.angular\cache\19.2.15\frontend\vite\deps\@angular_router.js:2845: // TODO(atscott): investigate combining parameters and positionalParamSegments
-frontend\.angular\cache\19.2.15\frontend\vite\deps\@angular_router.js:4863: // TODO(atscott): Remove changes parameter in major version as a breaking change.
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-5FHY7Z5A.js:333: // TODO: vsavkin. Remove the boolean flag and always include hash once the deprecated router is
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-5FHY7Z5A.js:383: // TODO: rename this method to pushState
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-5FHY7Z5A.js:2122: // TODO(crisbeto): this should be `Type<T>`, but doing so broke a few
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-N66GPOAE.js:173: // TODO: remove (has some usage in G3)
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-WGQFXCG2.js:13417: * // TODO(devversion): Remove this.
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-WGQFXCG2.js:13456: * <!-- TODO: Add a link to a chapter on OnPush components -->
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-WGQFXCG2.js:13495: * <!-- TODO: Add a link to a chapter on detach/reattach/local digest -->
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-WGQFXCG2.js:13496: * <!-- TODO: Add a live demo once ref.detectChanges is merged into master -->
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-WGQFXCG2.js:13549: * <!-- TODO: Add a link to a chapter on detach/reattach/local digest -->
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-WGQFXCG2.js:13609: * <!-- TODO: Add a link to a chapter on detach/reattach/local digest -->
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-WGQFXCG2.js:13610: * <!-- TODO: Add a live demo once ref.detectChanges is merged into master -->
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-WGQFXCG2.js:19462: *    TODO(alxhub): figure out if this behavior is still needed for edge cases.
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-WGQFXCG2.js:26568: // TODO: replace null by undefined in the return type
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-WGQFXCG2.js:26603: // TODO: replace null by undefined in the return type
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-WGQFXCG2.js:26868: // TODO: confirm the usage of `collection` as it's unused, readonly and on a non public API.
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-4KJ25FNC.js:170: // TODO: remove (has some usage in G3)
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-PXXRCHXC.js:20857: * // TODO(devversion): Remove this.
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-PXXRCHXC.js:20896: * <!-- TODO: Add a link to a chapter on OnPush components -->
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-PXXRCHXC.js:20935: * <!-- TODO: Add a link to a chapter on detach/reattach/local digest -->
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-PXXRCHXC.js:20936: * <!-- TODO: Add a live demo once ref.detectChanges is merged into master -->
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-PXXRCHXC.js:20989: * <!-- TODO: Add a link to a chapter on detach/reattach/local digest -->
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-PXXRCHXC.js:21049: * <!-- TODO: Add a link to a chapter on detach/reattach/local digest -->
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-PXXRCHXC.js:21050: * <!-- TODO: Add a live demo once ref.detectChanges is merged into master -->
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-PXXRCHXC.js:26800: *    TODO(alxhub): figure out if this behavior is still needed for edge cases.
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-PXXRCHXC.js:33718: // TODO: replace null by undefined in the return type
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-PXXRCHXC.js:33753: // TODO: replace null by undefined in the return type
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-PXXRCHXC.js:34018: // TODO: confirm the usage of `collection` as it's unused, readonly and on a non public API.
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-SXS2WA45.js:7314: // TODO determine the actual root element
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-SXS2WA45.js:7357: // FIXME: `getText` call is potentially expensive.
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-SXS2WA45.js:9573: // TODO: verify if these are needed for css-select
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-Y5BGAT76.js:2821: // TODO(atscott): investigate combining parameters and positionalParamSegments
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-Y5BGAT76.js:4841: // TODO(atscott): Remove changes parameter in major version as a breaking change.
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-YT24NAFA.js:338: // TODO: vsavkin. Remove the boolean flag and always include hash once the deprecated router is
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-YT24NAFA.js:388: // TODO: rename this method to pushState
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-YT24NAFA.js:2127: // TODO(crisbeto): this should be `Type<T>`, but doing so broke a few
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\express.js:4274: // TODO: KDDI extension to Shift_JIS
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\express.js:4275: // TODO: IBM CCSID 942 = CP932, but F0-F9 custom chars and other char changes.
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\express.js:4276: // TODO: IBM CCSID 943 = Shift_JIS = CP932 with original Shift_JIS lower 128 chars.
+None found.
 
 === GIT RECENT COMMITS (last 20) ===
-03ed2f1 Implement hexagonal architecture and NgRx store
-d7d7175 feat: Initialize Angular frontend with basic structure and server-side rendering
-b6fd9f2 feat: Implement final polish and optimization for MVP
-d223ee4 Initial commit
+9916b31 Document EC2 decommission readiness
+075e769 Prioritize microservice migration after QA
+f3d5a79 Document serverless migration status
+22b94e9 Pause Facebook login
+8bdc41f Add public privacy policy page
+5a2cc44 Move social provider secrets to SSM
+9fa7fb0 Record PantryList EC2 decommission
+239da5e Record remaining PantryList EC2 cleanup scope
+96fe979 Record Despensa Lista repo rename
+7790176 Migrate Despensa Lista to serverless AWS
+0cead58 Clarify Dokploy recovery memory
+3520586 Verify deployed frontend asset marker
+2235b5b Harden production smoke timeouts
+969dcef Add Stripe monetization discovery
+bc3685c Add capture portability foundation
+9c8e23d feat: add use-first waste reduction workflow
+c267d40 feat: add shopping mode 2 latam workflow
+d11ab29 feat: add server-backed shopping savings batch
+55670ab fix: make metrics alert sink optional
+163e019 feat: add productivity and waste tracking batch
 
 === HIGH-CHURN FILES (last 90 days, top 20) ===
-None found.
+  21 Codex.md
+   8 frontend/src/app/features/pantry/pantry-page.component.html
+   8 frontend/src/app/features/pantry/pantry-page.component.spec.ts
+   8 frontend/src/app/features/pantry/pantry-page.component.ts
+   6 frontend/src/app/features/profile/profile-page.component.spec.ts
+   5 backend/src/app.module.ts
+   5 backend/src/infrastructure/http/controllers/pantry.controller.ts
+   5 frontend/src/app/features/profile/profile-page.component.ts
+   5 frontend/src/app/shared/models/pantry.model.ts
+   4 infra/cognito/package.json
+   4 .github/workflows/ci-cd.yml
+   4 backend/src/app.setup.ts
+   4 frontend/src/app/features/profile/profile-page.component.html
+   4 backend/src/infrastructure/http/controllers/pantry.controller.spec.ts
+   4 frontend/src/app/core/services/pantry.service.ts
+   3 docs/research/features/2026-05-15-technical-risk-feature-ideas.md
+   3 docs/research/features/2026-05-19-trust-sharing-batch.md
+   3 .github/workflows/deploy-serverless-prod.yml
+   3 infra/cognito/README.md
+   3 infra/cognito/cdk.context.example.json
 
 === MONOREPO SIGNALS ===
 No monorepo signals detected.
 
 === CODE METRICS ===
-Total files scanned: 150
-Total lines of code: 117728
+Total files scanned: 441
+Total lines of code: 73155
 
 Files by language:
-  Other: 82
-  TypeScript: 45
-  JavaScript: 23
+  TypeScript: 304
+  Other: 135
+  JavaScript: 2
 
 Top 10 largest files:
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-PXXRCHXC.js.map: 2771.0KB
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-WGQFXCG2.js.map: 2416.4KB
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\express.js.map: 1544.9KB
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-PXXRCHXC.js: 1275.9KB
-frontend\.angular\cache\19.2.15\frontend\vite\deps\chunk-WGQFXCG2.js: 1032.4KB
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\express.js: 944.5KB
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-SXS2WA45.js.map: 872.8KB
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-SSGKJJWO.js.map: 843.2KB
-frontend\package-lock.json: 517.1KB
-frontend\.angular\cache\19.2.15\frontend\vite\deps_ssr\chunk-SSGKJJWO.js: 500.9KB
+frontend\package-lock.json: 543.4KB
+backend\package-lock.json: 473.6KB
+frontend\src\app\features\pantry\pantry-page.component.ts: 123.3KB
+frontend\src\app\features\pantry\pantry-page.component.html: 109.9KB
+progress.md: 73.9KB
+frontend\src\app\features\pantry\pantry-page.component.spec.ts: 52.0KB
+findings.md: 33.9KB
+backend\src\application\utils\pantry-overview.builder.spec.ts: 31.9KB
+Codex.md: 27.2KB
+frontend\src\app\core\services\pantry.service.spec.ts: 27.2KB
 
 === CI/CD PIPELINES ===
 CI/CD: GitHub Actions

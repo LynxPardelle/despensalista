@@ -68,6 +68,7 @@ describe('ProfileController', () => {
       {
         confirmationText: 'ELIMINAR',
       },
+      '9b29fb9a-ce30-473f-abaf-f8d987634f55',
       request,
     );
 
@@ -78,6 +79,7 @@ describe('ProfileController', () => {
       {
         userId: 'user-1',
         confirmationText: 'ELIMINAR',
+        idempotencyKey: '9b29fb9a-ce30-473f-abaf-f8d987634f55',
       },
     ]);
     expect(result).toEqual({
@@ -109,6 +111,7 @@ describe('ProfileController', () => {
       {
         confirmationText: 'ELIMINAR',
       },
+      '9b29fb9a-ce30-473f-abaf-f8d987634f55',
       request,
     );
 
@@ -119,6 +122,7 @@ describe('ProfileController', () => {
       {
         userId: 'owner-user',
         confirmationText: 'ELIMINAR',
+        idempotencyKey: '9b29fb9a-ce30-473f-abaf-f8d987634f55',
       },
     ]);
   });

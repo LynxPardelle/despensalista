@@ -1,5 +1,11 @@
 # PantryList AWS Production Report
 
+> **REPORTE HISTORICO — NO USAR COMO INVENTARIO ACTUAL.** Esta evidencia
+> corresponde al despliegue PantryList/Dokploy del 2026-04-29. La instancia EC2
+> y los recursos `pantrylist-*` descritos aqui fueron retirados. No ejecutes sus
+> acciones pendientes ni los uses como rollback; consulta el informe final del
+> 2026-09-26 y `docs/operations/production-runbook.md`.
+
 Date: 2026-04-29 Central Time
 
 ## Scope

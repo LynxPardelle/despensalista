@@ -4,18 +4,28 @@ import * as integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as codedeploy from 'aws-cdk-lib/aws-codedeploy';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventTargets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as targets from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import { Construct } from 'constructs';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { applyRuntimeBoundary, deliveryInventory } from './stage-delivery';
 
 interface DespensaListaServerlessBackendStackProps extends cdk.StackProps {
   allowedProviders: string[];
@@ -31,6 +41,8 @@ interface DespensaListaTables {
   users: dynamodb.Table;
 }
 
+const BACKEND_DATA_CONTRACT_VERSION = '1';
+
 export class DespensaListaServerlessBackendStack extends cdk.Stack {
   constructor(
     scope: Construct,
@@ -41,6 +53,12 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
 
     const projectName = this.readContext('projectName', 'despensalista');
     const stage = this.readContext('stage', 'dev');
+    const releaseId = this.readContext('releaseId', 'local');
+    if (releaseId !== 'local' && !/^[0-9a-f]{12}$/.test(releaseId)) {
+      throw new Error('releaseId must be a 12-character hexadecimal release ID.');
+    }
+    applyRuntimeBoundary(this, projectName, stage);
+    const isProduction = stage.trim().toLowerCase() === 'prod';
     const frontendBaseUrl = this.readContext(
       'serverlessFrontendBaseUrl',
       this.readContext('localFrontendBaseUrl', 'http://localhost:48673'),
@@ -55,8 +73,40 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     );
     const hostedZoneName = this.readContext('hostedZoneName', 'lynxpardelle.com');
     const tables = this.createTables(projectName, stage);
+    const logRetention = isProduction
+      ? logs.RetentionDays.ONE_MONTH
+      : logs.RetentionDays.ONE_WEEK;
+    const resourceRemovalPolicy = this.resolveRemovalPolicy();
+    const originVerifyHeaderName = 'x-despensalista-origin-verify';
+    const originSecretName = `${projectName}/${stage}/cloudfront-origin-verification`;
+    const originVerifySecret = new secretsmanager.Secret(
+      this,
+      'OriginVerificationSecret',
+      {
+        secretName: originSecretName,
+        description:
+          'CloudFront-to-API origin verification value; never send from browsers.',
+        generateSecretString: {
+          excludePunctuation: true,
+          passwordLength: 48,
+        },
+      },
+    );
+    originVerifySecret.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
+    const backendFunctionName = `${projectName}-${stage}-backend-api`;
+    // The production group was auto-created by Lambda before CDK managed logs.
+    // LogRetention safely adopts retention without attempting to recreate it.
+    const backendLogGroup = logs.LogGroup.fromLogGroupName(
+      this, 'BackendLogGroup', `/aws/lambda/${backendFunctionName}`,
+    );
+    new logs.LogRetention(this, 'BackendLogRetention', {
+      logGroupName: backendLogGroup.logGroupName,
+      retention: logRetention,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    const backendArtifactPath = this.readContext('backendArtifactPath', '');
     const apiFunction = new lambda.Function(this, 'BackendFunction', {
-      functionName: `${projectName}-${stage}-backend-api`,
+      functionName: backendFunctionName,
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
       handler: 'dist/src/lambda.handler',
@@ -64,7 +114,8 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(
         this.readNumberContext('backendLambdaTimeoutSeconds', 15),
       ),
-      code: lambda.Code.fromAsset(
+      logGroup: backendLogGroup,
+      code: backendArtifactPath ? lambda.Code.fromAsset(path.resolve(backendArtifactPath)) : lambda.Code.fromAsset(
         path.join(__dirname, '..', '..', '..', 'backend'),
         {
           bundling: createBackendBundlingOptions(),
@@ -72,6 +123,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       ),
       environment: {
         NODE_ENV: 'production',
+        BACKEND_DATA_CONTRACT_VERSION,
         API_PREFIX: 'api',
         PERSISTENCE_PROVIDER: 'dynamodb',
         DYNAMODB_REGION: cdk.Aws.REGION,
@@ -91,8 +143,11 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         COGNITO_ALLOWED_PROVIDERS: props.allowedProviders.join(','),
         HELMET_ENABLED: 'true',
         RATE_LIMIT_ENABLED: 'true',
-        RATE_LIMIT_TRUST_PROXY: 'true',
+        RATE_LIMIT_TRUST_PROXY: 'false',
         SWAGGER_ENABLED: 'false',
+        ORIGIN_VERIFY_HEADER_NAME: originVerifyHeaderName,
+        ORIGIN_VERIFY_HEADER_VALUE:
+          originVerifySecret.secretValue.unsafeUnwrap(),
       },
     });
 
@@ -100,7 +155,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
-        resources: [tables.users.tableArn],
+        resources: Object.values(tables).map((table) => table.tableArn),
       }),
     );
     apiFunction.addToRolePolicy(
@@ -120,18 +175,81 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       }),
     );
 
+    const publishedVersion = apiFunction.currentVersion;
+    publishedVersion.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
+    const liveAlias = new lambda.Alias(this, 'BackendLiveAlias', {
+      aliasName: 'live',
+      description: 'Stable production traffic target and rollback pointer.',
+      version: publishedVersion,
+    });
+    if (isProduction) {
+      new events.Rule(this, 'AccountDeletionResumeRule', {
+        ruleName: `${projectName}-${stage}-account-deletion-resume`,
+        schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+        targets: [
+          new eventTargets.LambdaFunction(liveAlias, {
+            event: events.RuleTargetInput.fromObject({
+              source: 'despensalista.account-deletion-worker',
+              'detail-type': 'resume',
+            }),
+            maxEventAge: cdk.Duration.minutes(5),
+            retryAttempts: 0,
+          }),
+        ],
+      });
+    }
+
     const httpApi = new apigatewayv2.HttpApi(this, 'HttpApi', {
       apiName: `${projectName}-${stage}-backend-api`,
       corsPreflight: {
         allowCredentials: true,
-        allowHeaders: ['authorization', 'content-type', 'x-xsrf-token', 'x-metrics-token'],
+        allowHeaders: [
+          'authorization',
+          'content-type',
+          'idempotency-key',
+          'x-xsrf-token',
+          'x-metrics-token',
+        ],
         allowMethods: [apigatewayv2.CorsHttpMethod.ANY],
         allowOrigins: [frontendBaseUrl],
+        exposeHeaders: ['idempotency-key', 'idempotency-replayed'],
       },
     });
+    const apiAccessLogGroup = new logs.LogGroup(this, 'ApiAccessLogGroup', {
+      logGroupName: `/aws/apigateway/${projectName}-${stage}-backend-api`,
+      retention: logRetention,
+      removalPolicy: resourceRemovalPolicy,
+    });
+    apiAccessLogGroup.grantWrite(
+      new iam.ServicePrincipal('apigateway.amazonaws.com'),
+    );
+    const defaultStage = httpApi.defaultStage;
+    if (!defaultStage) {
+      throw new Error('HTTP API default stage is required for access logging.');
+    }
+    const cfnDefaultStage = defaultStage.node.defaultChild as apigatewayv2.CfnStage;
+    cfnDefaultStage.accessLogSettings = {
+      destinationArn: apiAccessLogGroup.logGroupArn,
+      format: JSON.stringify({
+        apiId: '$context.apiId',
+        integrationStatus: '$context.integrationStatus',
+        latencyMs: '$context.responseLatency',
+        method: '$context.httpMethod',
+        protocol: '$context.protocol',
+        requestId: '$context.requestId',
+        routeKey: '$context.routeKey',
+        sourceIp: '$context.identity.sourceIp',
+        status: '$context.status',
+      }),
+    };
+    cfnDefaultStage.defaultRouteSettings = {
+      throttlingBurstLimit: 30,
+      throttlingRateLimit: 10,
+      detailedMetricsEnabled: false,
+    };
     const integration = new integrations.HttpLambdaIntegration(
       'BackendIntegration',
-      apiFunction,
+      liveAlias,
     );
 
     httpApi.addRoutes({
@@ -157,14 +275,28 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
-      removalPolicy: this.resolveRemovalPolicy(),
+      versioned: true,
+      lifecycleRules: [{ noncurrentVersionExpiration: cdk.Duration.days(30) }],
+      removalPolicy: resourceRemovalPolicy,
       autoDeleteObjects:
-        this.resolveRemovalPolicy() === cdk.RemovalPolicy.DESTROY,
+        resourceRemovalPolicy === cdk.RemovalPolicy.DESTROY,
     });
     const responseHeadersPolicy = this.createResponseHeadersPolicy(
       projectName,
       stage,
     );
+    const enableFlatRateWaf = this.readBooleanContext(
+      'enableFlatRateWaf',
+      Boolean(deliveryInventory(stage).subscriptionArn) ||
+        this.readBooleanContext('controlPlaneBootstrap', false),
+    );
+    const webAcl = enableFlatRateWaf
+      ? this.createFlatRateWebAcl(
+          projectName,
+          stage,
+          originVerifyHeaderName,
+        )
+      : undefined;
     const distribution = new cloudfront.Distribution(this, 'WebDistribution', {
       comment: `${projectName}-${stage} serverless web`,
       defaultRootObject: 'index.html',
@@ -186,6 +318,10 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
           origin: new origins.HttpOrigin(apiDomainNameFromEndpoint(httpApi.apiEndpoint), {
             protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
             originSslProtocols: [cloudfront.OriginSslPolicy.TLS_V1_2],
+            customHeaders: {
+              [originVerifyHeaderName]:
+                originVerifySecret.secretValue.unsafeUnwrap(),
+            },
           }),
           allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
@@ -201,10 +337,56 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
+      webAclId: webAcl?.attrArn,
     });
+    if (webAcl) {
+      // Native CF registration fails/rolls back the WAF if FREE enrollment fails.
+      const subscription = new cdk.CfnResource(this, 'CloudFrontFreeSubscription', {
+        type: 'AWS::PricingPlanManager::Subscription',
+        properties: {
+          PlanFamily: 'CloudFront',
+          PlanTier: 'FREE',
+          UsageLevel: 'DEFAULT',
+          ResourceArns: [distribution.distributionArn, webAcl.attrArn],
+        },
+      });
+      new cdk.CfnOutput(this, 'CloudFrontFreeSubscriptionArn', { value: subscription.ref });
+    }
+
+    const alarmTopic = isProduction
+      ? new sns.Topic(this, 'OperationsAlarmTopic', {
+          topicName: `${projectName}-${stage}-operations-alarms`,
+          displayName: 'DespensaLista production alarms',
+        })
+      : undefined;
+    const deploymentAlarms = isProduction && alarmTopic
+      ? this.createProductionAlarms(
+          projectName,
+          stage,
+          liveAlias,
+          httpApi,
+          distribution,
+          alarmTopic,
+        )
+      : [];
+
+    if (isProduction) {
+      new codedeploy.LambdaDeploymentGroup(this, 'BackendDeploymentGroup', {
+        alias: liveAlias,
+        alarms: deploymentAlarms.slice(0, 1),
+        autoRollback: {
+          deploymentInAlarm: true,
+          failedDeployment: true,
+          stoppedDeployment: true,
+        },
+        deploymentConfig:
+          codedeploy.LambdaDeploymentConfig.ALL_AT_ONCE,
+        deploymentGroupName: `${projectName}-${stage}-backend-release`,
+      });
+    }
 
     new s3deploy.BucketDeployment(this, 'DeployWeb', {
-      sources: [s3deploy.Source.asset(frontendBrowserDistPath())],
+      sources: [s3deploy.Source.asset(this.readContext('frontendArtifactPath', '') || frontendBrowserDistPath())],
       destinationBucket: webBucket,
       distribution,
       distributionPaths: ['/*'],
@@ -233,6 +415,18 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ServerlessBackendFunctionName', {
       value: apiFunction.functionName,
     });
+    new cdk.CfnOutput(this, 'ServerlessBackendLiveAliasArn', {
+      value: liveAlias.functionArn,
+    });
+    new cdk.CfnOutput(this, 'ServerlessBackendAliasName', { value: liveAlias.aliasName });
+    new cdk.CfnOutput(this, 'ServerlessBackendVersion', {
+      value: publishedVersion.version,
+    });
+    new cdk.CfnOutput(this, 'DeploymentReleaseId', { value: releaseId });
+    new cdk.CfnOutput(this, 'PantryQuotaSchemaVersion', { value: '2' });
+    new cdk.CfnOutput(this, 'BackendDataContractVersion', {
+      value: BACKEND_DATA_CONTRACT_VERSION,
+    });
     new cdk.CfnOutput(this, 'DynamoDbUsersTable', {
       value: tables.users.tableName,
     });
@@ -253,6 +447,29 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       value: distribution.distributionDomainName,
     });
     new cdk.CfnOutput(this, 'WebBucketName', { value: webBucket.bucketName });
+    if (webAcl) {
+      new cdk.CfnOutput(this, 'FlatRateWebAclArn', {
+        value: webAcl.attrArn,
+      });
+      new cdk.CfnOutput(this, 'FlatRateWebAclId', {
+        value: webAcl.attrId,
+      });
+    }
+    if (alarmTopic) {
+      new cdk.CfnOutput(this, 'OperationsAlarmTopicArn', {
+        value: alarmTopic.topicArn,
+      });
+    }
+    // CDK's generated layer name omits the stack prefix. Give the deployment
+    // helper a stage namespace so its IAM permission cannot span environments.
+    for (const resource of this.node.findAll()) {
+      if (resource instanceof lambda.CfnLayerVersion) {
+        resource.layerName = `${projectName}-${stage}-web-deploy-cli`;
+      }
+      if (resource instanceof iam.CfnRole) {
+        resource.roleName = `${projectName}-${stage}-runtime-${this.getLogicalId(resource).slice(-35)}`;
+      }
+    }
   }
 
   private createTables(projectName: string, stage: string): DespensaListaTables {
@@ -287,6 +504,11 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       partitionKey: { name: 'userId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'normalizedBaseName', type: dynamodb.AttributeType.STRING },
     });
+    productTypes.addGlobalSecondaryIndex({
+      indexName: 'UserArchivedAtIndex',
+      partitionKey: { name: 'userId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'archivedAt', type: dynamodb.AttributeType.STRING },
+    });
     inventoryLots.addGlobalSecondaryIndex({
       indexName: 'UserUpdatedAtIndex',
       partitionKey: { name: 'userId', type: dynamodb.AttributeType.STRING },
@@ -297,11 +519,18 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       partitionKey: { name: 'productTypeId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'updatedAt', type: dynamodb.AttributeType.STRING },
     });
+    inventoryLots.addGlobalSecondaryIndex({
+      indexName: 'UserArchivedAtIndex',
+      partitionKey: { name: 'userId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'archivedAt', type: dynamodb.AttributeType.STRING },
+    });
 
     return { users, products, productTypes, inventoryLots };
   }
 
   private createTable(tableName: string, partitionKeyName: string): dynamodb.Table {
+    const stage = this.readContext('stage', 'dev').trim().toLowerCase();
+
     return new dynamodb.Table(this, toConstructId(tableName), {
       tableName,
       partitionKey: {
@@ -313,6 +542,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: true,
       },
+      deletionProtection: stage === 'prod',
       removalPolicy: this.resolveRemovalPolicy(),
       timeToLiveAttribute: 'expiresAtEpochSeconds',
     });
@@ -338,6 +568,21 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     }
 
     return value;
+  }
+
+  private readBooleanContext(key: string, fallback: boolean): boolean {
+    const normalizedValue = this.readContext(key, fallback.toString())
+      .trim()
+      .toLowerCase();
+
+    if (['1', 'true', 'yes', 'y'].includes(normalizedValue)) {
+      return true;
+    }
+    if (['0', 'false', 'no', 'n'].includes(normalizedValue)) {
+      return false;
+    }
+
+    throw new Error(`${key} must be a boolean value.`);
   }
 
   private resolveRemovalPolicy(): cdk.RemovalPolicy {
@@ -385,6 +630,200 @@ function handler(event) {
 }
 `),
     });
+  }
+
+  private createFlatRateWebAcl(
+    projectName: string,
+    stage: string,
+    originVerifyHeaderName: string,
+  ): wafv2.CfnWebACL {
+    const visibility = (metricName: string): wafv2.CfnWebACL.VisibilityConfigProperty => ({
+      cloudWatchMetricsEnabled: true,
+      metricName,
+      sampledRequestsEnabled: false,
+    });
+    const noTransformation: wafv2.CfnWebACL.TextTransformationProperty[] = [
+      { priority: 0, type: 'NONE' },
+    ];
+    const normalizedTransformations: wafv2.CfnWebACL.TextTransformationProperty[] = [
+      { priority: 0, type: 'URL_DECODE' },
+      { priority: 1, type: 'LOWERCASE' },
+    ];
+    const rules: wafv2.CfnWebACL.RuleProperty[] = [
+      {
+        name: 'PerIpRateLimit',
+        priority: 0,
+        action: { block: {} },
+        statement: {
+          rateBasedStatement: {
+            aggregateKeyType: 'IP',
+            evaluationWindowSec: 300,
+            limit: 500,
+          },
+        },
+        visibilityConfig: visibility(`${projectName}-${stage}-rate-limit`),
+      },
+      {
+        name: 'KnownScannerPaths',
+        priority: 1,
+        action: { block: {} },
+        statement: {
+          regexMatchStatement: {
+            fieldToMatch: { uriPath: {} },
+            regexString:
+              '^/(?:\\.env|\\.git(?:/|$)|wp-admin(?:/|$)|wp-login\\.php|phpmyadmin(?:/|$)|server-status(?:/|$))',
+            textTransformations: normalizedTransformations,
+          },
+        },
+        visibilityConfig: visibility(`${projectName}-${stage}-scanner-paths`),
+      },
+      {
+        name: 'ViewerOriginHeader',
+        priority: 2,
+        action: { block: {} },
+        statement: {
+          sizeConstraintStatement: {
+            comparisonOperator: 'GT',
+            fieldToMatch: { singleHeader: { Name: originVerifyHeaderName } },
+            size: 0,
+            textTransformations: noTransformation,
+          },
+        },
+        visibilityConfig: visibility(`${projectName}-${stage}-oversized-body`),
+      },
+      {
+        name: 'QueryInjection',
+        priority: 3,
+        action: { block: {} },
+        statement: {
+          orStatement: {
+            statements: [
+              {
+                sqliMatchStatement: {
+                  fieldToMatch: { allQueryArguments: {} },
+                  sensitivityLevel: 'LOW',
+                  textTransformations: normalizedTransformations,
+                },
+              },
+              {
+                xssMatchStatement: {
+                  fieldToMatch: { allQueryArguments: {} },
+                  textTransformations: normalizedTransformations,
+                },
+              },
+            ],
+          },
+        },
+        visibilityConfig: visibility(`${projectName}-${stage}-query-injection`),
+      },
+      {
+        name: 'AllowedHttpMethods',
+        priority: 4,
+        action: { block: {} },
+        statement: {
+          notStatement: {
+            statement: {
+              regexMatchStatement: {
+                fieldToMatch: { method: {} },
+                regexString: '^(?:GET|HEAD|OPTIONS|POST|PUT|PATCH|DELETE)$',
+                textTransformations: noTransformation,
+              },
+            },
+          },
+        },
+        visibilityConfig: visibility(`${projectName}-${stage}-http-methods`),
+      },
+    ];
+    const webAcl = new wafv2.CfnWebACL(this, 'FlatRateWebAcl', {
+      defaultAction: { allow: {} },
+      description:
+        'Five individual rules compatible with the CloudFront flat-rate Free plan.',
+      name: `${projectName}-${stage}-flat-rate`,
+      rules,
+      scope: 'CLOUDFRONT',
+      visibilityConfig: visibility(`${projectName}-${stage}-web-acl`),
+    });
+    // Do not retain an un-enrolled ACL on failed initial deployment: PAYG is $5+.
+    webAcl.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+
+    return webAcl;
+  }
+
+  private createProductionAlarms(
+    projectName: string,
+    stage: string,
+    liveAlias: lambda.Alias,
+    httpApi: apigatewayv2.HttpApi,
+    distribution: cloudfront.Distribution,
+    topic: sns.Topic,
+  ): cloudwatch.Alarm[] {
+    const commonProps = {
+      actionsEnabled: true,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    };
+    const alarms = [
+      new cloudwatch.Alarm(this, 'BackendErrorsAlarm', {
+        ...commonProps,
+        alarmDescription: 'The live backend alias returned an error.',
+        alarmName: `${projectName}-${stage}-backend-errors`,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        metric: liveAlias.metricErrors({
+          period: cdk.Duration.minutes(5),
+          statistic: 'Sum',
+        }),
+        threshold: 1,
+      }),
+      new cloudwatch.Alarm(this, 'ApiServerErrorsAlarm', {
+        ...commonProps,
+        alarmDescription: 'The public HTTP API returned a 5xx response.',
+        alarmName: `${projectName}-${stage}-api-5xx`,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/ApiGateway',
+          metricName: '5xx',
+          dimensionsMap: {
+            ApiId: httpApi.apiId,
+            Stage: '$default',
+          },
+          period: cdk.Duration.minutes(5),
+          statistic: 'Sum',
+        }),
+        threshold: 1,
+      }),
+      new cloudwatch.Alarm(this, 'BackendThrottlesAlarm', {
+        ...commonProps,
+        alarmDescription: 'The live backend alias was throttled.',
+        alarmName: `${projectName}-${stage}-backend-throttles`,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        metric: liveAlias.metricThrottles({
+          period: cdk.Duration.minutes(5),
+          statistic: 'Sum',
+        }),
+        threshold: 1,
+      }),
+      new cloudwatch.Alarm(this, 'CloudFrontServerErrorsAlarm', {
+        ...commonProps,
+        alarmDescription: 'CloudFront 5xx error rate exceeded five percent.',
+        alarmName: `${projectName}-${stage}-cloudfront-5xx-rate`,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        metric: distribution.metric5xxErrorRate({
+          period: cdk.Duration.minutes(5),
+          statistic: 'Average',
+        }),
+        threshold: 5,
+      }),
+    ];
+    const action = new cloudwatchActions.SnsAction(topic);
+
+    alarms.forEach((alarm) => alarm.addAlarmAction(action));
+
+    return alarms;
   }
 
   private createResponseHeadersPolicy(
@@ -459,9 +898,9 @@ function createBackendBundlingOptions(): cdk.BundlingOptions {
         'set -euo pipefail',
         'cp -R /asset-input/. /tmp/despensalista-backend',
         'cd /tmp/despensalista-backend',
-        'npm ci',
+        'MONGOMS_DISABLE_POSTINSTALL=1 npm ci',
         'npm run build',
-        'npm prune --omit=dev',
+        'MONGOMS_DISABLE_POSTINSTALL=1 npm ci --omit=dev',
         'cp -R dist node_modules package.json package-lock.json /asset-output/',
       ].join(' && '),
     ],
@@ -487,7 +926,7 @@ function tryBundleBackendLocally(outputDir: string): boolean {
 
     runNpm(['ci'], temporaryDir);
     runNpm(['run', 'build'], temporaryDir);
-    runNpm(['prune', '--omit=dev'], temporaryDir);
+    runNpm(['ci', '--omit=dev'], temporaryDir);
 
     for (const assetName of [
       'dist',
@@ -514,11 +953,11 @@ function tryBundleBackendLocally(outputDir: string): boolean {
 
 function runNpm(args: string[], cwd: string): void {
   if (process.platform === 'win32') {
-    execFileSync('cmd.exe', ['/c', 'npm', ...args], { cwd, stdio: 'inherit' });
+    execFileSync('cmd.exe', ['/c', 'npm', ...args], { cwd, stdio: 'inherit', env: { ...process.env, MONGOMS_DISABLE_POSTINSTALL: '1' } });
     return;
   }
 
-  execFileSync('npm', args, { cwd, stdio: 'inherit' });
+  execFileSync('npm', args, { cwd, stdio: 'inherit', env: { ...process.env, MONGOMS_DISABLE_POSTINSTALL: '1' } });
 }
 
 function shouldSkipBackendBundlePath(source: string, sourceDir: string): boolean {

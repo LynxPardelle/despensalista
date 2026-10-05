@@ -44,6 +44,10 @@ describe('household use cases', () => {
 
   beforeEach(() => {
     repository = {
+      createHouseholdWithOwner: jest.fn(
+        async (_household, membership) => membership,
+      ),
+      acceptInvite: jest.fn(async (_invite, membership) => membership),
       saveHousehold: jest.fn(),
       saveMembership: jest.fn(),
       saveInvite: jest.fn(),
@@ -57,7 +61,10 @@ describe('household use cases', () => {
       findInviteById: jest.fn(),
       findInviteByTokenHash: jest.fn(),
       findActivitiesByHouseholdId: jest.fn(),
+      deleteAccountHouseholdReferences: jest.fn(),
       deleteHouseholdCascade: jest.fn(),
+      beginHouseholdDeletion: jest.fn(),
+      cancelHouseholdDeletion: jest.fn(),
     };
     userDao = {
       save: jest.fn(),
@@ -65,6 +72,10 @@ describe('household use cases', () => {
       findByAuthSubject: jest.fn(),
       findByEmail: jest.fn(),
       findByUsername: jest.fn(),
+      beginAccountDeletion: jest.fn(),
+      findPendingAccountDeletions: jest.fn(),
+      claimPendingAccountDeletion: jest.fn(),
+      deferAccountDeletion: jest.fn(),
       delete: jest.fn(),
     };
   });
@@ -97,11 +108,9 @@ describe('household use cases', () => {
       userDao,
     ).execute('owner-user');
 
-    expect(repository.saveHousehold).toHaveBeenCalledTimes(1);
-    expect(
-      repository.saveActivity.mock.calls[0]?.[0]?.toPrimitives().type,
-    ).toBe('household_created');
-    expect(repository.saveMembership).toHaveBeenCalledTimes(1);
+    expect(repository.createHouseholdWithOwner).toHaveBeenCalledTimes(1);
+    expect(repository.saveHousehold).not.toHaveBeenCalled();
+    expect(repository.saveMembership).not.toHaveBeenCalled();
     expect(workspace.currentMember.role).toBe('owner');
     expect(workspace.household.name).toBe('Hogar de Alec');
     expect(workspace.activities[0].type).toBe('household_created');
@@ -194,13 +203,14 @@ describe('household use cases', () => {
       token: 'accept-token-safe',
     });
 
-    expect(repository.saveMembership).toHaveBeenCalledWith(
+    expect(repository.acceptInvite).toHaveBeenCalledWith(
+      expect.any(HouseholdInvite),
       expect.objectContaining({
         userId: 'invited-user',
         role: 'viewer',
       }),
     );
-    expect(repository.saveInvite).toHaveBeenCalled();
+    expect(repository.saveInvite).not.toHaveBeenCalled();
     expect(repository.saveActivity).toHaveBeenCalled();
     expect(workspace.currentMember.role).toBe('viewer');
   });

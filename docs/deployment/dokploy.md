@@ -1,5 +1,11 @@
 # Dokploy Deployment Notes
 
+> **ARCHIVO HISTORICO — NO EJECUTAR.** Esta ruta pertenecia al runtime
+> PantryList/Dokploy retirado. La instancia EC2 y sus recursos IAM ya no
+> existen; estos comandos no son un despliegue ni un rollback valido. Usa
+> `docs/operations/production-runbook.md` para la ruta serverless vigente. El
+> contenido restante se conserva solo como evidencia de la operacion anterior.
+
 This project can run as a production-like Compose stack with:
 
 ```bash

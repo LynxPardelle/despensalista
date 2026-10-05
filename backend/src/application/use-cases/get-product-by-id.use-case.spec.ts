@@ -13,13 +13,11 @@ import { GetProductByIdUseCase } from './get-product-by-id.use-case';
 
 describe('GetProductByIdUseCase', () => {
   const makeRepository = (): jest.Mocked<ProductRepository> => ({
-    save: jest.fn(),
     findById: jest.fn(),
     findByUserId: jest.fn(),
     findByCategory: jest.fn(),
     findByStatus: jest.fn(),
-    reassignUserOwnership: jest.fn(),
-    delete: jest.fn(),
+    deleteByUserId: jest.fn(),
     findAll: jest.fn(),
   });
 

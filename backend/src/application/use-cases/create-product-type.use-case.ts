@@ -5,7 +5,12 @@ import {
 } from '../../domain/entities/product-type.entity';
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
 import { UserId } from '../../domain/value-objects/user-id.vo';
-import { PRODUCT_TYPE_REPOSITORY } from '../tokens';
+import {
+  PantryMutationConflictError,
+  PantryMutationPort,
+  PantryQuotaExceededError,
+} from '../ports/pantry-mutation.port';
+import { PANTRY_MUTATION_PORT, PRODUCT_TYPE_REPOSITORY } from '../tokens';
 import {
   DepletionRuleInput,
   parseDefaultDepletionRule,
@@ -27,6 +32,8 @@ export class CreateProductTypeUseCase {
   constructor(
     @Inject(PRODUCT_TYPE_REPOSITORY)
     private readonly productTypeRepository: ProductTypeRepository,
+    @Inject(PANTRY_MUTATION_PORT)
+    private readonly pantryMutationPort: PantryMutationPort,
   ) {}
 
   async execute(command: CreateProductTypeCommand): Promise<ProductType> {
@@ -50,6 +57,16 @@ export class CreateProductTypeUseCase {
       command.shoppingMetadata,
     );
 
-    return this.productTypeRepository.save(productType);
+    try {
+      return await this.pantryMutationPort.createProductType(productType);
+    } catch (error) {
+      if (
+        error instanceof PantryQuotaExceededError ||
+        error instanceof PantryMutationConflictError
+      ) {
+        throw new ConflictException(error.message);
+      }
+      throw error;
+    }
   }
 }

@@ -6,10 +6,8 @@ import {
   InventoryLotPrimitives,
 } from '../../../domain/entities/inventory-lot.entity';
 import {
-  MAX_ACTIVE_INVENTORY_LOTS_PER_USER,
   MAX_ARCHIVED_PANTRY_PAGE_SIZE,
   MAX_ARCHIVED_INVENTORY_LOTS_PER_USER,
-  MAX_INVENTORY_LOTS_PER_PRODUCT_TYPE,
 } from '../../../application/constants/query-limits';
 import { getArchivedRecordRetentionExpiresAt } from '../../../application/policies/retention-policy';
 import {
@@ -20,6 +18,7 @@ import { InventoryLotRepository } from '../../../domain/repositories/inventory-l
 import { InventoryLotId } from '../../../domain/value-objects/inventory-lot-id.vo';
 import { ProductTypeId } from '../../../domain/value-objects/product-type-id.vo';
 import { UserId } from '../../../domain/value-objects/user-id.vo';
+import { decodeArchiveCursor } from '../archive-cursor';
 import { DynamoDbDocumentClientService } from './dynamodb-document-client.service';
 
 type InventoryLotItem = Omit<
@@ -79,10 +78,7 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
   }
 
   async findByUserId(userId: UserId): Promise<InventoryLot[]> {
-    const lots = await this.findAllByUserId(
-      userId,
-      MAX_ACTIVE_INVENTORY_LOTS_PER_USER,
-    );
+    const lots = await this.findAllByUserId(userId);
 
     return lots
       .filter((lot) => !lot.archivedAt)
@@ -95,12 +91,12 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
 
     do {
       const page = await this.findArchivedPageByUserId(userId, {
-        limit: MAX_ARCHIVED_INVENTORY_LOTS_PER_USER - lots.length,
+        limit: MAX_ARCHIVED_PANTRY_PAGE_SIZE,
         cursor,
       });
       lots.push(...page.items);
       cursor = page.nextCursor;
-    } while (cursor && lots.length < MAX_ARCHIVED_INVENTORY_LOTS_PER_USER);
+    } while (cursor);
 
     return lots;
   }
@@ -110,46 +106,33 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
     options: CursorPageOptions,
   ): Promise<CursorPage<InventoryLot>> {
     const limit = clampArchivedLimit(options.limit);
-    const items: InventoryLotItem[] = [];
-    let exclusiveStartKey = decodeDynamoCursor(options.cursor);
-
-    do {
-      const result = await this.dynamoDb.send(
-        new QueryCommand({
-          TableName: this.tableName,
-          IndexName: 'UserUpdatedAtIndex',
-          KeyConditionExpression: 'userId = :userId',
-          ExpressionAttributeValues: {
-            ':userId': userId.toString(),
-          },
-          ScanIndexForward: false,
-          Limit: limit - items.length,
-          ...(exclusiveStartKey
-            ? { ExclusiveStartKey: exclusiveStartKey }
-            : {}),
-        }),
-      );
-      items.push(
-        ...((result.Items ?? []) as InventoryLotItem[])
-          .filter((item) => item.entityType === 'INVENTORY_LOT')
-          .filter((item) => Boolean(item.archivedAt)),
-      );
-      exclusiveStartKey = result.LastEvaluatedKey as
-        | Record<string, unknown>
-        | undefined;
-    } while (exclusiveStartKey && items.length < limit);
-
-    const pageItems = items.slice(0, limit);
+    const result = await this.dynamoDb.send(
+      new QueryCommand({
+        TableName: this.tableName,
+        IndexName: 'UserArchivedAtIndex',
+        KeyConditionExpression: 'userId = :userId',
+        ExpressionAttributeValues: {
+          ':userId': userId.toString(),
+        },
+        ScanIndexForward: false,
+        Limit: limit,
+        ...(options.cursor
+          ? {
+              ExclusiveStartKey: decodeDynamoCursor(
+                options.cursor,
+                userId.toString(),
+              ),
+            }
+          : {}),
+      }),
+    );
 
     return {
-      items: pageItems
-        .map((item) => this.toDomain(item))
-        .sort(
-          (a, b) =>
-            (b.archivedAt?.getTime() ?? 0) - (a.archivedAt?.getTime() ?? 0),
-        ),
-      nextCursor: exclusiveStartKey
-        ? encodeDynamoCursor(exclusiveStartKey)
+      items: ((result.Items ?? []) as InventoryLotItem[]).map((item) =>
+        this.toDomain(item),
+      ),
+      nextCursor: result.LastEvaluatedKey
+        ? encodeDynamoCursor(result.LastEvaluatedKey)
         : undefined,
     };
   }
@@ -157,10 +140,7 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
   async findByProductTypeId(
     productTypeId: ProductTypeId,
   ): Promise<InventoryLot[]> {
-    const lots = await this.findAllByProductTypeId(
-      productTypeId,
-      MAX_INVENTORY_LOTS_PER_PRODUCT_TYPE,
-    );
+    const lots = await this.findAllByProductTypeId(productTypeId);
 
     return lots.filter((lot) => !lot.archivedAt);
   }
@@ -200,12 +180,6 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
     );
   }
 
-  async deleteByProductTypeId(productTypeId: ProductTypeId): Promise<void> {
-    const lots = await this.findAllByProductTypeId(productTypeId);
-
-    await Promise.all(lots.map((lot) => this.delete(lot.id)));
-  }
-
   async deleteByUserId(userId: UserId): Promise<number> {
     const lots = await this.findAllByUserId(userId);
 
@@ -214,9 +188,8 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
     return lots.length;
   }
 
-  private async findAllByProductTypeId(
+  async findAllByProductTypeId(
     productTypeId: ProductTypeId,
-    limit?: number,
   ): Promise<InventoryLot[]> {
     const items: InventoryLotItem[] = [];
     let exclusiveStartKey: Record<string, unknown> | undefined;
@@ -230,8 +203,6 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
           ExpressionAttributeValues: {
             ':productTypeId': productTypeId.toString(),
           },
-          ScanIndexForward: false,
-          ...(limit ? { Limit: limit } : {}),
           ...(exclusiveStartKey
             ? { ExclusiveStartKey: exclusiveStartKey }
             : {}),
@@ -240,12 +211,14 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
 
       items.push(
         ...((result.Items ?? []) as InventoryLotItem[]).filter(
-          (item) => item.entityType === 'INVENTORY_LOT',
+          (item) =>
+            item.entityType === 'INVENTORY_LOT' &&
+            item.productTypeId === productTypeId.toString(),
         ),
       );
-      exclusiveStartKey = limit
-        ? undefined
-        : (result.LastEvaluatedKey as Record<string, unknown> | undefined);
+      exclusiveStartKey = result.LastEvaluatedKey as
+        | Record<string, unknown>
+        | undefined;
     } while (exclusiveStartKey);
 
     return items
@@ -253,10 +226,7 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
       .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
   }
 
-  private async findAllByUserId(
-    userId: UserId,
-    limit?: number,
-  ): Promise<InventoryLot[]> {
+  private async findAllByUserId(userId: UserId): Promise<InventoryLot[]> {
     const items: InventoryLotItem[] = [];
     let exclusiveStartKey: Record<string, unknown> | undefined;
 
@@ -270,7 +240,6 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
             ':userId': userId.toString(),
           },
           ScanIndexForward: false,
-          ...(limit ? { Limit: limit } : {}),
           ...(exclusiveStartKey
             ? { ExclusiveStartKey: exclusiveStartKey }
             : {}),
@@ -282,9 +251,9 @@ export class DynamoDbInventoryLotRepository implements InventoryLotRepository {
           (item) => item.entityType === 'INVENTORY_LOT',
         ),
       );
-      exclusiveStartKey = limit
-        ? undefined
-        : (result.LastEvaluatedKey as Record<string, unknown> | undefined);
+      exclusiveStartKey = result.LastEvaluatedKey as
+        | Record<string, unknown>
+        | undefined;
     } while (exclusiveStartKey);
 
     return items.map((item) => this.toDomain(item));
@@ -351,16 +320,11 @@ function encodeDynamoCursor(
 
 function decodeDynamoCursor(
   cursor: string | undefined,
+  expectedUserId: string,
 ): Record<string, unknown> | undefined {
-  if (!cursor) {
-    return undefined;
-  }
-
-  try {
-    return JSON.parse(
-      Buffer.from(cursor, 'base64url').toString('utf8'),
-    ) as Record<string, unknown>;
-  } catch {
-    throw new Error('Invalid archived inventory lot cursor');
-  }
+  return decodeArchiveCursor(
+    cursor,
+    expectedUserId,
+    'Invalid archived inventory lot cursor',
+  );
 }

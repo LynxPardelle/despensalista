@@ -36,6 +36,7 @@ import { ProductTypeResponseDto } from '../dtos/product-type-response.dto';
 import { UpdateProductTypePlanningSettingsDto } from '../dtos/update-product-type-planning-settings.dto';
 import { UpdateProductTypeShoppingMetadataDto } from '../dtos/update-product-type-shopping-metadata.dto';
 import { ProductTypeMapper } from '../mappers/product-type.mapper';
+import { CollectionPageQueryDto } from '../dtos/collection-page-query.dto';
 
 @Controller('product-types')
 @ApiTags('product-types')
@@ -96,6 +97,25 @@ export class ProductTypesController {
     return productTypes.map((productType) =>
       ProductTypeMapper.toResponse(productType),
     );
+  }
+
+  @Get('page')
+  async page(
+    @CurrentUser() currentUser: AuthenticatedUser,
+    @Query() query: CollectionPageQueryDto,
+  ) {
+    const access = await this.resolveHouseholdPantryAccessUseCase.executeRead(
+      currentUser.userId,
+    );
+    const result = await this.searchProductTypesUseCase.page(
+      access.pantryOwnerUserId,
+      query,
+      query.search,
+    );
+    return {
+      ...result,
+      items: result.items.map((item) => ProductTypeMapper.toResponse(item)),
+    };
   }
 
   @Get(':id')

@@ -27,10 +27,13 @@ describe('SignOutAllSessionsUseCase', () => {
         confirmationText: 'CERRAR SESIONES',
       }),
     ).resolves.toEqual({ revokedCognitoSessionCount: 2 });
-    expect(cognitoUserAdmin.signOutUsersBySubjectIds).toHaveBeenCalledWith([
-      'auth-subject-1',
-      'auth-subject-2',
-    ]);
+    expect(cognitoUserAdmin.signOutUsersBySubjectIds).toHaveBeenCalledWith(
+      ['auth-subject-1', 'auth-subject-2'],
+      {
+        'auth-subject-1': 'native-user',
+        'auth-subject-2': 'Google_federated-user',
+      },
+    );
   });
 });
 
@@ -42,6 +45,10 @@ function makeUseCase() {
         email: 'chef@example.com',
         username: 'chef',
         authSubjectIds: ['auth-subject-1', 'auth-subject-2'],
+        authUsernamesBySubject: {
+          'auth-subject-1': 'native-user',
+          'auth-subject-2': 'Google_federated-user',
+        },
         status: UserAccountStatus.ACTIVE,
         createdAt: new Date('2026-06-01T00:00:00.000Z'),
         updatedAt: new Date('2026-06-01T00:00:00.000Z'),

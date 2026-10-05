@@ -8,7 +8,8 @@ import { InventoryLot } from '../../domain/entities/inventory-lot.entity';
 import { InventoryLotRepository } from '../../domain/repositories/inventory-lot.repository';
 import { InventoryLotId } from '../../domain/value-objects/inventory-lot-id.vo';
 import { UserId } from '../../domain/value-objects/user-id.vo';
-import { INVENTORY_LOT_REPOSITORY } from '../tokens';
+import { INVENTORY_LOT_REPOSITORY, PANTRY_MUTATION_PORT } from '../tokens';
+import { PantryMutationPort } from '../ports/pantry-mutation.port';
 
 export interface DeleteInventoryLotCommand {
   lotId: string;
@@ -21,6 +22,8 @@ export class DeleteInventoryLotUseCase {
   constructor(
     @Inject(INVENTORY_LOT_REPOSITORY)
     private readonly inventoryLotRepository: InventoryLotRepository,
+    @Inject(PANTRY_MUTATION_PORT)
+    private readonly pantryMutationPort: PantryMutationPort,
   ) {}
 
   async execute(command: DeleteInventoryLotCommand): Promise<void> {
@@ -38,7 +41,7 @@ export class DeleteInventoryLotUseCase {
       throw new BadRequestException((error as Error).message);
     }
 
-    await this.inventoryLotRepository.delete(lot.id);
+    await this.pantryMutationPort.deleteInventoryLot(lot);
   }
 
   private async findOwnedLot(

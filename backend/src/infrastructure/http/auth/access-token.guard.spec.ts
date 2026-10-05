@@ -14,6 +14,10 @@ describe('AccessTokenGuard', () => {
     findByAuthSubject: jest.fn(),
     findByEmail: jest.fn(),
     findByUsername: jest.fn(),
+    beginAccountDeletion: jest.fn(),
+    findPendingAccountDeletions: jest.fn(),
+    claimPendingAccountDeletion: jest.fn(),
+    deferAccountDeletion: jest.fn(),
     delete: jest.fn(),
   });
 
@@ -43,7 +47,7 @@ describe('AccessTokenGuard', () => {
       }),
     }) as unknown as ExecutionContext;
 
-  const makeActiveUser = (id = 'test-subject') =>
+  const makeActiveUser = (id = 'test-subject', deletionFenceExpiresAt?: Date) =>
     User.fromPrimitives({
       id,
       email: 'chef@example.com',
@@ -51,6 +55,7 @@ describe('AccessTokenGuard', () => {
       status: UserAccountStatus.ACTIVE,
       createdAt: new Date('2026-01-01T00:00:00.000Z'),
       updatedAt: new Date('2026-01-02T00:00:00.000Z'),
+      deletionFenceExpiresAt,
     });
 
   it('rejects requests without a Cognito access token cookie', async () => {
@@ -129,5 +134,26 @@ describe('AccessTokenGuard', () => {
     ).rejects.toBeInstanceOf(UnauthorizedException);
     expect(userDao.findByAuthSubject.mock.calls).toHaveLength(0);
     expect(userDao.findById.mock.calls).toHaveLength(0);
+  });
+
+  it('rejects an existing session as soon as account deletion is fenced', async () => {
+    const tokenVerifier = makeTokenVerifier();
+    const userDao = makeUserDao();
+    const authCookieService = makeAuthCookieService();
+    authCookieService.getAccessTokenFromRequest.mockReturnValue('access-token');
+    tokenVerifier.verifyAccessToken.mockResolvedValue({ sub: 'test-subject' });
+    userDao.findByAuthSubject.mockResolvedValue(
+      makeActiveUser('app-user-123', new Date('9999-12-31T23:59:59.999Z')),
+    );
+    const guard = new AccessTokenGuard(
+      tokenVerifier,
+      userDao,
+      authCookieService,
+    );
+
+    await expect(
+      guard.canActivate(makeExecutionContext({} as FastifyRequest)),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(authCookieService.ensureXsrfForRequest).not.toHaveBeenCalled();
   });
 });

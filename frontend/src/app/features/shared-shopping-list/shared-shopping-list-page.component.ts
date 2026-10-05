@@ -11,14 +11,6 @@ import { ActivatedRoute, RouterLink } from '@angular/router';
 import { take } from 'rxjs';
 import { PantryService } from '../../core/services/pantry.service';
 
-interface ShoppingSharePayload {
-  version: 1;
-  type: 'shopping-list';
-  createdAt: string;
-  expiresAt: string;
-  text: string;
-}
-
 @Component({
   selector: 'app-shared-shopping-list-page',
   standalone: true,
@@ -39,6 +31,15 @@ interface ShoppingSharePayload {
       @if (errorMessage) {
         <section class="error-banner" role="alert">
           <strong>{{ errorMessage }}</strong>
+          @if (retryable) {
+            <button
+              class="ghost-button retry-button"
+              type="button"
+              (click)="retry()"
+            >
+              Reintentar
+            </button>
+          }
           <a class="ghost-button" routerLink="/pantry">Ir a Despensa Lista</a>
         </section>
       } @else if (loading) {
@@ -120,6 +121,9 @@ export class SharedShoppingListPageComponent implements OnInit {
   expiresAt: Date | null = null;
   errorMessage: string | null = null;
   loading = false;
+  retryable = false;
+
+  private token: string | null = null;
 
   ngOnInit(): void {
     this.route.queryParamMap.pipe(take(1)).subscribe((params) => {
@@ -130,9 +134,25 @@ export class SharedShoppingListPageComponent implements OnInit {
         return;
       }
 
-      this.loading = true;
-      this.pantryService
-        .resolveShoppingShare(token)
+      this.token = token;
+      this.loadShare(token);
+    });
+  }
+
+  retry(): void {
+    if (this.token) {
+      this.loadShare(this.token);
+    }
+  }
+
+  private loadShare(token: string): void {
+    this.loading = true;
+    this.retryable = false;
+    this.errorMessage = null;
+    this.sharedText = null;
+    this.expiresAt = null;
+    this.pantryService
+      .resolveShoppingShare(token)
         .pipe(take(1))
         .subscribe({
           next: (share) => {
@@ -143,46 +163,15 @@ export class SharedShoppingListPageComponent implements OnInit {
           },
           error: (error) => {
             this.loading = false;
-
-            if (this.tryLoadLegacyToken(token)) {
-              this.changeDetector.markForCheck();
-              return;
-            }
-
             this.errorMessage = this.getShareErrorMessage(error);
+            this.retryable = this.isRetryableError(error);
             this.changeDetector.markForCheck();
           },
         });
-    });
   }
 
   getWhatsAppShoppingUrl(exportText: string): string {
     return `https://wa.me/?text=${encodeURIComponent(exportText)}`;
-  }
-
-  private tryLoadLegacyToken(token: string): boolean {
-    const payload = this.decodeToken(token);
-
-    if (!payload) {
-      return false;
-    }
-
-    const expiresAt = new Date(payload.expiresAt);
-
-    if (Number.isNaN(expiresAt.getTime())) {
-      this.errorMessage = 'Enlace inválido.';
-      return true;
-    }
-
-    if (expiresAt.getTime() <= Date.now()) {
-      this.errorMessage = 'Este enlace ya caducó.';
-      return true;
-    }
-
-    this.sharedText = payload.text;
-    this.expiresAt = expiresAt;
-
-    return true;
   }
 
   private getShareErrorMessage(error: unknown): string {
@@ -190,36 +179,17 @@ export class SharedShoppingListPageComponent implements OnInit {
       return 'Este enlace ya caducó o fue revocado.';
     }
 
+    if (this.isRetryableError(error)) {
+      return 'No pudimos cargar la lista. Revisa tu conexión e intenta de nuevo.';
+    }
+
     return 'Enlace inválido.';
   }
 
-  private decodeToken(token: string): ShoppingSharePayload | null {
-    try {
-      const normalizedToken = token.replace(/-/g, '+').replace(/_/g, '/');
-      const paddedToken = normalizedToken.padEnd(
-        Math.ceil(normalizedToken.length / 4) * 4,
-        '=',
-      );
-      const binary = atob(paddedToken);
-      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-      const parsed = JSON.parse(
-        new TextDecoder().decode(bytes),
-      ) as Partial<ShoppingSharePayload>;
-
-      if (
-        parsed.version !== 1 ||
-        parsed.type !== 'shopping-list' ||
-        typeof parsed.createdAt !== 'string' ||
-        typeof parsed.expiresAt !== 'string' ||
-        typeof parsed.text !== 'string' ||
-        parsed.text.trim().length === 0
-      ) {
-        return null;
-      }
-
-      return parsed as ShoppingSharePayload;
-    } catch {
-      return null;
-    }
+  private isRetryableError(error: unknown): boolean {
+    return (
+      error instanceof HttpErrorResponse &&
+      (error.status === 0 || error.status >= 500)
+    );
   }
 }

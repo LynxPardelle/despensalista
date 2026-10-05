@@ -18,64 +18,76 @@ export class CognitoUserAdminService implements CognitoUserAdmin {
     });
   }
 
-  async deleteUsersBySubjectIds(subjectIds: string[]): Promise<number> {
+  async deleteUsersBySubjectIds(
+    subjectIds: string[],
+    authUsernamesBySubject: Readonly<Record<string, string>> = {},
+  ): Promise<number> {
     if (this.configService.get<string>('COGNITO_ENABLED') !== 'true') {
       return 0;
     }
 
     const userPoolId = this.getUserPoolId();
+    const knownUsernames = this.normalizeUsernames(authUsernamesBySubject);
     let deletedCount = 0;
 
-    for (const subjectId of [...new Set(subjectIds.map((id) => id.trim()))]) {
-      if (!subjectId) {
-        continue;
-      }
-
-      const username = await this.findUsernameBySubjectId(
-        userPoolId,
-        subjectId,
-      );
+    for (const subjectId of this.normalizeSubjectIds(subjectIds)) {
+      const username =
+        knownUsernames[subjectId] ??
+        (await this.findUsernameBySubjectId(userPoolId, subjectId));
 
       if (!username) {
         continue;
       }
 
-      await this.client.send(
-        new AdminDeleteUserCommand({
-          UserPoolId: userPoolId,
-          Username: username,
-        }),
-      );
+      try {
+        await this.client.send(
+          new AdminDeleteUserCommand({
+            UserPoolId: userPoolId,
+            Username: username,
+          }),
+        );
+      } catch (error) {
+        if ((error as Error).name === 'UserNotFoundException') continue;
+        throw error;
+      }
       deletedCount += 1;
     }
 
     return deletedCount;
   }
 
-  async signOutUsersBySubjectIds(subjectIds: string[]): Promise<number> {
+  async signOutUsersBySubjectIds(
+    subjectIds: string[],
+    authUsernamesBySubject: Readonly<Record<string, string>> = {},
+  ): Promise<number> {
     if (this.configService.get<string>('COGNITO_ENABLED') !== 'true') {
       return 0;
     }
 
     const userPoolId = this.getUserPoolId();
+    const knownUsernames = this.normalizeUsernames(authUsernamesBySubject);
     let signedOutCount = 0;
 
     for (const subjectId of this.normalizeSubjectIds(subjectIds)) {
-      const username = await this.findUsernameBySubjectId(
-        userPoolId,
-        subjectId,
-      );
+      const username =
+        knownUsernames[subjectId] ??
+        (await this.findUsernameBySubjectId(userPoolId, subjectId));
 
       if (!username) {
         continue;
       }
 
-      await this.client.send(
-        new AdminUserGlobalSignOutCommand({
-          UserPoolId: userPoolId,
-          Username: username,
-        }),
-      );
+      try {
+        await this.client.send(
+          new AdminUserGlobalSignOutCommand({
+            UserPoolId: userPoolId,
+            Username: username,
+          }),
+        );
+      } catch (error) {
+        if ((error as Error).name === 'UserNotFoundException') continue;
+        throw error;
+      }
       signedOutCount += 1;
     }
 
@@ -136,6 +148,22 @@ export class CognitoUserAdminService implements CognitoUserAdmin {
 
   private normalizeSubjectIds(subjectIds: string[]): string[] {
     return [...new Set(subjectIds.map((id) => id.trim()))].filter(Boolean);
+  }
+
+  private normalizeUsernames(
+    authUsernamesBySubject: Readonly<Record<string, string>>,
+  ): Record<string, string> {
+    const normalized: [string, string][] = [];
+    for (const [subjectId, username] of Object.entries(
+      authUsernamesBySubject,
+    )) {
+      const normalizedSubjectId = subjectId.trim();
+      const normalizedUsername = username.trim();
+      if (normalizedSubjectId && normalizedUsername) {
+        normalized.push([normalizedSubjectId, normalizedUsername]);
+      }
+    }
+    return Object.fromEntries(normalized);
   }
 }
 

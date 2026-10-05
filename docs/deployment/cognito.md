@@ -1,5 +1,10 @@
 # Cognito Setup For PantryList
 
+> **GUIA HISTORICA — NO EJECUTAR CONTRA AWS.** Conserva el procedimiento inicial
+> PantryList/Dokploy. Sus pools, secretos, callback y host EC2 fueron retirados.
+> La fuente operativa actual es `infra/cognito/README.md` junto con
+> `docs/operations/production-runbook.md`; no recrees nombres `/pantrylist/*`.
+
 PantryList now uses Cognito as the authentication authority. The application
 code is ready; this document covers the AWS setup that makes real Google,
 Facebook, and Cognito-hosted email sign-in work.

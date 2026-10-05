@@ -29,8 +29,14 @@ export class UserDocument {
   @Prop({ required: true, default: [] })
   authSubjectIds: string[];
 
+  @Prop({ required: true, type: Object, default: {} })
+  authUsernamesBySubject: Record<string, string>;
+
   @Prop({ required: true, enum: Object.values(UserAccountStatus), index: true })
   status: UserAccountStatus;
+
+  @Prop({ required: false })
+  deletionFenceExpiresAt?: Date;
 
   @Prop({ required: false, type: Object })
   preferences?: Partial<UserPreferencesPrimitives>;
