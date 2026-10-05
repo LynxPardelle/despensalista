@@ -16,6 +16,7 @@ import {
   TimeoutError,
 } from 'rxjs';
 import { HttpErrorResponse } from '@angular/common/http';
+import { DATE_PIPE_DEFAULT_OPTIONS } from '@angular/common';
 import { Store } from '@ngrx/store';
 import { AuthFacade } from '../../core/services/auth.facade';
 import { PantryPageComponent, toDateInputValue } from './pantry-page.component';
@@ -37,6 +38,8 @@ import {
 import {
   selectExpiredEntryAlert,
   selectPantryInitialLoading,
+  selectPantryGroupsSorted,
+  selectPriceReferenceItems,
   selectShoppingPlanItems,
 } from '../../store/pantry/pantry.selectors';
 
@@ -207,6 +210,10 @@ describe('PantryPageComponent', () => {
         RouterTestingModule,
       ],
       providers: [
+        {
+          provide: DATE_PIPE_DEFAULT_OPTIONS,
+          useValue: { timezone: '-0600' },
+        },
         {
           provide: PantryService,
           useValue: pantryService,
@@ -1546,6 +1553,83 @@ describe('PantryPageComponent', () => {
     expect(timeline[0].detail).toContain('Precio 24.00 moneda local');
     expect(timeline[2].amount).toBe(48);
     expect(component.getTimelineKindLabel('purchase')).toBe('Compra');
+  });
+
+  it('renders civil purchases on their stored day without a fabricated hour in Mexico', () => {
+    fixture.destroy();
+    store.select.and.callFake((selector) => {
+      if (selector === selectPantryGroupsSorted) {
+        return of([
+          makePantryGroup({
+            baseName: 'Leche',
+            lots: [makePantryLotSummary({
+              purchaseDate: new Date('2026-10-04T00:00:00.000Z'),
+            })],
+          }),
+        ]);
+      }
+      if (selector === selectPriceReferenceItems) {
+        return of([]);
+      }
+      return of(null);
+    });
+    fixture = TestBed.createComponent(PantryPageComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+
+    const row = (fixture.nativeElement as HTMLElement)
+      .querySelector('.timeline-panel .lot-row[data-kind="purchase"] small');
+    const label = row?.textContent?.replace(/\s+/g, ' ').trim();
+
+    expect(label).toContain('Compra · 1 pieza comprado · 04 Oct');
+    expect(label).not.toContain('18:00');
+    expect(label).not.toContain('03 Oct');
+  });
+
+  it('keeps real waste and price timestamps with their Mexico-local hour', () => {
+    const recordedAt = new Date('2026-10-04T15:30:00.000Z');
+    pantryService.getWasteOverview.and.returnValue(of({
+      ...component.wasteOverview!,
+      recentEvents: [{
+        id: 'waste-1',
+        productName: 'Pan',
+        quantity: 1,
+        unit: 'piezas',
+        reason: 'expired',
+        estimatedLoss: 18,
+        occurredAt: recordedAt,
+      }],
+    }));
+    fixture.destroy();
+    store.select.and.callFake((selector) => {
+      if (selector === selectPantryGroupsSorted) {
+        return of([]);
+      }
+      if (selector === selectPriceReferenceItems) {
+        return of([{
+          productTypeId: 'type-milk',
+          baseName: 'Leche',
+          category: 'food',
+          defaultUnit: 'lt',
+          shoppingLocation: 'Supermercado',
+          estimatedUnitPrice: 24,
+          buyOnlyOnPromo: false,
+          updatedAt: recordedAt,
+          priceHistory: [{ estimatedUnitPrice: 24, unit: 'lt', recordedAt }],
+        }]);
+      }
+      return of(null);
+    });
+    fixture = TestBed.createComponent(PantryPageComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+
+    const compiled = fixture.nativeElement as HTMLElement;
+    for (const kind of ['waste', 'price']) {
+      const label = compiled.querySelector(`.timeline-panel .lot-row[data-kind="${kind}"] small`)
+        ?.textContent?.replace(/\s+/g, ' ').trim();
+      expect(label).toContain('04 Oct, 09:30');
+    }
   });
 
   it('loads active shopping shares and formats expiry in Central time', () => {
