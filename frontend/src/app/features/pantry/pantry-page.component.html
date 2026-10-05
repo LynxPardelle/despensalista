@@ -767,7 +767,11 @@
                         <small>
                           {{ getTimelineKindLabel(event.kind) }} ·
                           {{ event.detail }} ·
-                          {{ event.happenedAt | date:'dd MMM, HH:mm' }}
+                          @if (event.kind === 'purchase') {
+                            {{ event.happenedAt | date:'dd MMM y':'UTC' }}
+                          } @else {
+                            {{ event.happenedAt | date:'dd MMM, HH:mm' }}
+                          }
                         </small>
                       </div>
                       @if (event.amount !== undefined) {
