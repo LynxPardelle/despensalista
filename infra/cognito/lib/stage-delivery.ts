@@ -151,6 +151,15 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
     'codedeploy:StopDeployment',
     'secretsmanager:GetRandomPassword',
   ], ['*']));
+  execution.attachInlinePolicy(new iam.Policy(stack, 'ApiLogDeliveryPolicy', {
+    statements: [scoped([
+      'logs:CreateLogDelivery',
+      'logs:UpdateLogDelivery',
+      'logs:DeleteLogDelivery',
+      'logs:GetLogDelivery',
+      'logs:ListLogDeliveries',
+    ], ['*'])],
+  }));
   execution.addToPolicy(scoped(['cloudwatch:*'], [`arn:${stack.partition}:cloudwatch:${stack.region}:${stack.account}:alarm:${prefix}-*`]));
   execution.addToPolicy(scoped(['sns:*'], [`arn:${stack.partition}:sns:${stack.region}:${stack.account}:${prefix}-*`]));
   execution.addToPolicy(scoped(['codedeploy:*'], [arn('codedeploy', 'application', `${prefix}-*`).replace(':application/', ':application:'), arn('codedeploy', 'deploymentgroup', `${prefix}-*/*`).replace(':deploymentgroup/', ':deploymentgroup:'), arn('codedeploy', 'deploymentconfig', 'CodeDeployDefault.LambdaAllAtOnce').replace(':deploymentconfig/', ':deploymentconfig:')]));
