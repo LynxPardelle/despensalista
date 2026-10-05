@@ -11,6 +11,7 @@ import {
   IsOptional,
   IsPositive,
   IsString,
+  Matches,
   Max,
   MaxLength,
   ValidateNested,
@@ -55,7 +56,8 @@ export class CheckoutPantryItemDto {
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsDateString({ strict: true })
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
   expiresAt?: string;
 }
 

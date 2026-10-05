@@ -72,6 +72,12 @@ El codigo versionado vive en `infra/cognito`.
     del tipo base
   - se construye desde tipos activos, no solo lotes activos, para que un tipo
     durable con cero stock siga apareciendo como compra sugerida
+- Caducidad, compra y ancla de durabilidad son fechas de calendario de
+  `America/Mexico_City`, guardadas como etiquetas `YYYY-MM-DD` a las `00:00Z`;
+  no representan la hora real del evento. La API solo acepta fechas reales
+  `YYYY-MM-DD` para esos campos. Los intervalos de durabilidad son enteros
+  positivos y una recurrencia mensual del dia 31 se ajusta al ultimo dia de
+  febrero, pero vuelve al 31 en marzo.
 - El flujo legacy `/api/products` sigue presente solo como compatibilidad de
   transicion; la ruta principal nueva vive en `/api/product-types`,
   `/api/inventory-lots` y `/api/pantry/overview`
