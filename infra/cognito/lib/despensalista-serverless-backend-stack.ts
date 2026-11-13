@@ -25,7 +25,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { applyRuntimeBoundary, deliveryInventory, googleMfaEnabled, requireGoogleMfaOrigin } from './stage-delivery';
+import { applyRuntimeBoundary, deliveryInventory, googleMfaEnabled, requireGoogleMfaOrigin, stripeBillingParameter } from './stage-delivery';
 
 interface DespensaListaServerlessBackendStackProps extends cdk.StackProps {
   allowedProviders: string[];
@@ -81,6 +81,11 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       this.readContext('productionFrontendBaseUrl', frontendBaseUrl) !== googleMfaOrigin)) {
       throw new Error('Google MFA requires the same frontend origin for Cognito, WebAuthn and the app domain.');
     }
+    const stripeParameter = stripeBillingParameter(this, projectName, stage);
+    const stripeBillingOrigin = 'https://dev.despensalista.lynxpardelle.com';
+    if (stripeParameter && (frontendBaseUrl !== stripeBillingOrigin || `https://${domainName}` !== stripeBillingOrigin)) {
+      throw new Error('Sandbox Stripe Billing requires the dev frontend origin.');
+    }
     const tables = this.createTables(projectName, stage);
     const logRetention = isProduction
       ? logs.RetentionDays.ONE_MONTH
@@ -92,6 +97,13 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       timeToLiveAttribute: 'expiresAt',
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: resourceRemovalPolicy,
+    }) : undefined;
+    const stripeBillingTable = stripeParameter ? new dynamodb.Table(this, 'StripeBillingTable', {
+      tableName: `${projectName}-${stage}-billing`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expiresAt',
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
     }) : undefined;
     const originVerifyHeaderName = 'x-despensalista-origin-verify';
     const originSecretName = `${projectName}/${stage}/cloudfront-origin-verification`;
@@ -162,6 +174,11 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
           GOOGLE_MFA_ORIGIN: googleMfaOrigin,
           GOOGLE_MFA_PROOF_VERSION: '2',
         }),
+        ...(stripeBillingTable && stripeParameter && {
+          STRIPE_BILLING_TABLE: stripeBillingTable.tableName,
+          STRIPE_BILLING_ORIGIN: stripeBillingOrigin,
+          STRIPE_BILLING_CONFIG_PARAMETER: stripeParameter.name,
+        }),
         HELMET_ENABLED: 'true',
         RATE_LIMIT_ENABLED: 'true',
         RATE_LIMIT_TRUST_PROXY: 'false',
@@ -177,6 +194,16 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       apiFunction.addToRolePolicy(new iam.PolicyStatement({
         actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem'],
         resources: [googleMfaTable.tableArn],
+      }));
+    }
+    if (stripeBillingTable && stripeParameter) {
+      apiFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+        resources: [stripeBillingTable.tableArn],
+      }));
+      apiFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['ssm:GetParameter'],
+        resources: [stripeParameter.arn],
       }));
     }
     apiFunction.addToRolePolicy(

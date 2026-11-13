@@ -396,6 +396,25 @@ test('runtime boundary permits CodeDeploy to inspect and move only stage aliases
   assert.doesNotMatch(JSON.stringify(statement.Resource), /function:\*/);
 });
 
+test('the protected runtime boundary permits reading only the explicit dev Stripe configuration', () => {
+  function synthesizeBoundary(stage: string, enableStripeBilling = 'false') {
+    const app = new cdk.App({ context: { stage, enableStripeBilling } });
+    const template = Template.fromStack(new DespensaListaCognitoStack(app, `Billing-boundary-${stage}`));
+    return Object.values(template.findResources('AWS::IAM::ManagedPolicy'))
+      .find((resource) => resource.Properties.ManagedPolicyName === `despensalista-${stage}-runtime-boundary`)
+      ?.Properties.PolicyDocument.Statement;
+  }
+
+  for (const stage of ['dev', 'tst', 'prod']) {
+    assert.doesNotMatch(JSON.stringify(synthesizeBoundary(stage)), /ssm:GetParameter|billing\/stripe/);
+  }
+  const statements = synthesizeBoundary('dev', 'true').filter((statement: { Action: string }) => statement.Action === 'ssm:GetParameter');
+  assert.equal(statements.length, 1);
+  assert.equal(statements[0].Effect, 'Allow');
+  assert.match(JSON.stringify(statements[0].Resource), /:parameter\/despensalista\/dev\/billing\/stripe"/);
+  assert.doesNotMatch(JSON.stringify(statements[0].Resource), /\*/);
+});
+
 test('CloudFormation execution may read only the exact protected delivery roles', () => {
   const app = new cdk.App({ context: { stage: 'dev' } });
   const template = Template.fromStack(new DespensaListaCognitoStack(app, 'Cognito-execution-role-read')).toJSON();

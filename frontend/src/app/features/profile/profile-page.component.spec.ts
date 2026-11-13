@@ -1,5 +1,10 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { HttpErrorResponse } from '@angular/common/http';
+import {
+  HttpErrorResponse,
+  provideHttpClient,
+  withXsrfConfiguration,
+} from '@angular/common/http';
+import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { ReactiveFormsModule } from '@angular/forms';
 import { RouterTestingModule } from '@angular/router/testing';
 import { ActivatedRoute, convertToParamMap } from '@angular/router';
@@ -11,12 +16,21 @@ import { ProfileService } from '../../core/services/profile.service';
 import { ProfilePageComponent } from './profile-page.component';
 
 describe('ProfilePageComponent', () => {
+  const subscription = {
+    available: true,
+    canManage: true,
+    canCheckout: true,
+    canOpenPortal: false,
+    plan: { label: 'Plus hogar', amountMinor: 5900, currency: 'mxn', interval: 'month' },
+    status: 'none',
+  };
   let fixture: ComponentFixture<ProfilePageComponent>;
   let component: ProfilePageComponent;
   let authFacade: jasmine.SpyObj<AuthFacade>;
   let authApi: jasmine.SpyObj<AuthApiService>;
   let profileService: jasmine.SpyObj<ProfileService>;
   let pantryService: jasmine.SpyObj<PantryService>;
+  let http: HttpTestingController;
 
   beforeEach(async () => {
     window.localStorage.removeItem(
@@ -244,6 +258,8 @@ describe('ProfilePageComponent', () => {
     await TestBed.configureTestingModule({
       imports: [ProfilePageComponent, ReactiveFormsModule, RouterTestingModule],
       providers: [
+        provideHttpClient(withXsrfConfiguration({ cookieName: 'XSRF-TOKEN', headerName: 'x-xsrf-token' })),
+        provideHttpClientTesting(),
         {
           provide: AuthFacade,
           useValue: authFacade,
@@ -260,9 +276,18 @@ describe('ProfilePageComponent', () => {
       ],
     }).compileComponents();
 
+    http = TestBed.inject(HttpTestingController);
     fixture = TestBed.createComponent(ProfilePageComponent);
     component = fixture.componentInstance;
     fixture.detectChanges();
+  });
+
+  afterEach(() => {
+    http.match('/api/billing/status').forEach((request) => {
+      if (!request.cancelled) request.flush({ available: false });
+    });
+    http.verify();
+    document.cookie = 'XSRF-TOKEN=; Max-Age=0; Path=/';
   });
 
   it('renders account summary and loaded preferences', () => {
@@ -341,6 +366,8 @@ describe('ProfilePageComponent', () => {
   });
 
   it('renders Stripe monetization discovery without real checkout', () => {
+    http.expectOne({ method: 'GET', url: '/api/billing/status' }).flush({ available: false });
+    fixture.detectChanges();
     const compiled = fixture.nativeElement as HTMLElement;
 
     expect(compiled.textContent).toContain('Plan y Stripe');
@@ -349,6 +376,84 @@ describe('ProfilePageComponent', () => {
     expect(compiled.textContent).toContain('Billing + Prices');
     expect(compiled.textContent).toContain('Customer Portal');
     expect(compiled.textContent).toContain('Sin checkout real en esta tanda');
+  });
+
+  it('offers sandbox checkout to the household owner and prevents duplicate submissions', () => {
+    const status = http.expectOne({ method: 'GET', url: '/api/billing/status' });
+    expect(status.request.withCredentials).toBeTrue();
+    status.flush(subscription);
+    fixture.detectChanges();
+
+    const panel = (fixture.nativeElement as HTMLElement).querySelector('section[aria-labelledby="subscription-title"]')!;
+    const checkout = panel.querySelector('button')!;
+    expect(panel.textContent).toContain('Plus hogar');
+    expect(panel.textContent).toContain('59.00');
+    expect(panel.textContent).toContain('MXN');
+    expect(checkout.textContent).toContain('Iniciar pago de prueba');
+
+    document.cookie = 'XSRF-TOKEN=xsrf-test; Path=/';
+    checkout.click();
+    checkout.click();
+    const request = http.expectOne({ method: 'POST', url: '/api/billing/checkout' });
+    expect(request.request.withCredentials).toBeTrue();
+    expect(request.request.headers.get('x-xsrf-token')).toBe('xsrf-test');
+    request.flush({ url: 'https://example.com/' });
+    fixture.detectChanges();
+
+    expect(panel.querySelector('[role="alert"]')?.textContent).toContain('No pudimos abrir el pago de prueba');
+    expect(checkout.disabled).toBeFalse();
+  });
+
+  it('keeps subscription status readable and payment actions unavailable to household members', () => {
+    http.expectOne('/api/billing/status').flush({
+      ...subscription,
+      canManage: false,
+      canCheckout: false,
+      canOpenPortal: false,
+      status: 'active',
+    });
+    fixture.detectChanges();
+
+    const panel = (fixture.nativeElement as HTMLElement).querySelector('section[aria-labelledby="subscription-title"]')!;
+    expect(panel.textContent).toContain('Activa');
+    expect(panel.textContent).toContain('persona propietaria del hogar');
+    expect(panel.textContent).not.toContain('Iniciar pago de prueba');
+    expect(panel.textContent).not.toContain('Abrir portal de Stripe');
+  });
+
+  it('waits for server confirmation after checkout and then allows the owner to open the portal', () => {
+    http.expectOne('/api/billing/status').flush({ available: false });
+    fixture.destroy();
+    const route = TestBed.inject(ActivatedRoute);
+    spyOnProperty(route.snapshot, 'queryParamMap', 'get').and.returnValue(
+      convertToParamMap({ billing: 'success' }),
+    );
+    fixture = TestBed.createComponent(ProfilePageComponent);
+    fixture.detectChanges();
+    http.expectOne('/api/billing/status').flush({ ...subscription, canCheckout: false, status: 'pending' });
+    fixture.detectChanges();
+
+    const panel = (fixture.nativeElement as HTMLElement).querySelector('section[aria-labelledby="subscription-title"]')!;
+    const refresh = Array.from(panel.querySelectorAll('button')).find((button) => button.textContent.includes('Actualizar estado'))!;
+    expect(panel.textContent).toContain('Estamos confirmando el pago de prueba');
+    expect(panel.textContent).not.toContain('Activa');
+
+    refresh.click();
+    http.expectOne('/api/billing/status').flush({
+      ...subscription,
+      canCheckout: false,
+      canOpenPortal: true,
+      status: 'active',
+    });
+    fixture.detectChanges();
+
+    expect(panel.textContent).toContain('Activa');
+    expect(panel.textContent).not.toContain('Estamos confirmando el pago de prueba');
+    const portal = Array.from(panel.querySelectorAll('button')).find((button) => button.textContent.includes('Abrir portal de Stripe'))!;
+    portal.click();
+    http.expectOne({ method: 'POST', url: '/api/billing/portal' }).flush(null, { status: 503, statusText: 'Unavailable' });
+    fixture.detectChanges();
+    expect(panel.querySelector('[role="alert"]')?.textContent).toContain('No pudimos abrir el portal de Stripe');
   });
 
   it('records local monetization interest without profile or payment data', () => {

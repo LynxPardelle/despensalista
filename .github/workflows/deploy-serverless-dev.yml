@@ -129,6 +129,8 @@ jobs:
       actions: read
       contents: read
       id-token: write
+    env:
+      STRIPE_BILLING_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING || 'false' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -166,6 +168,10 @@ jobs:
           test -n "$APP_DOMAIN_NAME"
           test -n "$AWS_REGION"
           test -n "$COGNITO_DOMAIN_PREFIX"
+          case "$STRIPE_BILLING_ENABLED" in
+            true|false) ;;
+            *) echo "ENABLE_STRIPE_BILLING must be true or false" >&2; exit 1 ;;
+          esac
 
       - uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
         with:
@@ -207,6 +213,7 @@ jobs:
             --context productionFrontendBaseUrl="$FRONTEND_BASE_URL" \
             --context serverlessFrontendBaseUrl="$FRONTEND_BASE_URL" \
             --context enableGoogleMfa=true \
+            --context enableStripeBilling="$STRIPE_BILLING_ENABLED" \
             --context externallyManagedSocialProviders=Google
 
       - name: Activate exact published release
