@@ -42,14 +42,14 @@ export class GoogleMfaStore {
     if (!item || typeof item.expiresAt === 'number') return undefined;
 
     if (typeof item.revision === 'string') {
+      const recoveryCodeHash: unknown = item.recoveryCodeHash;
       if (
         typeof item.generation !== 'string' ||
         !Array.isArray(item.credentials) ||
         item.credentials.length < 1 ||
         item.credentials.length > 2 ||
         !item.credentials.every(isStoredCredential) ||
-        (item.recoveryCodeHash !== undefined &&
-          typeof item.recoveryCodeHash !== 'string')
+        (recoveryCodeHash !== undefined && typeof recoveryCodeHash !== 'string')
       ) {
         throw new Error('Invalid WebAuthn account');
       }
@@ -57,7 +57,7 @@ export class GoogleMfaStore {
         credentials: item.credentials,
         generation: item.generation,
         revision: item.revision,
-        recoveryCodeHash: item.recoveryCodeHash,
+        recoveryCodeHash,
       };
     }
 
