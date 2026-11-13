@@ -16,9 +16,7 @@ import { configureApp } from '../src/app.setup';
 // The Fastify plugin loads an ESM dependency through Node 22's require(esm).
 // Use the native loader because Jest 29's CommonJS runtime lacks that support.
 jest.mock('@fastify/static', () => {
-  const { createRequire } = jest.requireActual<typeof import('node:module')>(
-    'node:module',
-  );
+  const { createRequire } = process.getBuiltinModule('node:module');
   return createRequire(__filename)('@fastify/static') as unknown;
 });
 
