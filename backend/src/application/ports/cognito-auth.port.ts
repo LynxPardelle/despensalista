@@ -48,7 +48,7 @@ export interface CognitoVerifiedClaims {
 
 export interface CognitoAuthUrlBuilder {
   buildAuthorizeUrl(input: CognitoAuthorizeUrlInput): CognitoAuthorizeUrlOutput;
-  buildLogoutUrl(): string;
+  buildLogoutUrl(logoutUri?: string): string;
 }
 
 export interface CognitoTokenClient {

@@ -8,6 +8,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as ses from 'aws-cdk-lib/aws-ses';
 import { createStageDeliveryControls, googleMfaEnabled, requireGoogleMfaOrigin } from './stage-delivery';
+import { publicProductionDomain } from './public-production-domain';
 import { Construct } from 'constructs';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -43,15 +44,21 @@ export class DespensaListaCognitoStack extends cdk.Stack {
       this.readOptionalContext('domainPrefix') ||
       `${projectName}-${stage}-${cdk.Aws.ACCOUNT_ID}`;
 
+    const publicDomain = publicProductionDomain(this, projectName, stage);
+    if (publicDomain && productionFrontendBaseUrl !== `https://${publicDomain.legacyHost}`) {
+      throw new Error('The original production frontend origin must be retained.');
+    }
     const callbackUrls = this.buildCallbackUrls(
       stage,
       localFrontendBaseUrl,
       productionFrontendBaseUrl,
+      publicDomain?.origin,
     );
     const logoutUrls = this.buildLogoutUrls(
       stage,
       localFrontendBaseUrl,
       productionFrontendBaseUrl,
+      publicDomain?.origin,
     );
     const mfaConfiguration = this.readMfaConfiguration(stage);
     const enableGoogleMfa = googleMfaEnabled(this, stage);
@@ -255,11 +262,15 @@ export class DespensaListaCognitoStack extends cdk.Stack {
     stage: string,
     localFrontendBaseUrl: string,
     productionFrontendBaseUrl: ContextValue,
+    publicProductionOrigin?: string,
   ): string[] {
     return this.allowedAuthUrls(stage, [
       `${localFrontendBaseUrl}/api/auth/cognito/callback`,
       productionFrontendBaseUrl
         ? `${productionFrontendBaseUrl}/api/auth/cognito/callback`
+        : undefined,
+      publicProductionOrigin
+        ? `${publicProductionOrigin}/api/auth/cognito/callback`
         : undefined,
       ...this.readCsvContext('extraCallbackUrls'),
     ]);
@@ -269,10 +280,12 @@ export class DespensaListaCognitoStack extends cdk.Stack {
     stage: string,
     localFrontendBaseUrl: string,
     productionFrontendBaseUrl: ContextValue,
+    publicProductionOrigin?: string,
   ): string[] {
     return this.allowedAuthUrls(stage, [
       `${localFrontendBaseUrl}/login`,
       productionFrontendBaseUrl ? `${productionFrontendBaseUrl}/login` : undefined,
+      publicProductionOrigin ? `${publicProductionOrigin}/login` : undefined,
       ...this.readCsvContext('extraLogoutUrls'),
     ]);
   }
