@@ -81,7 +81,7 @@ export class AuthController {
       nonce: transaction.nonce,
       codeChallenge: transaction.codeChallenge,
       codeChallengeMethod: transaction.codeChallengeMethod,
-      redirectUri: this.getRedirectUri(),
+      redirectUri: this.getRedirectUri(reply.request),
       scopes: this.getScopes(),
       provider:
         normalizedProvider === 'COGNITO' ? undefined : normalizedProvider,
@@ -129,7 +129,7 @@ export class AuthController {
     const tokenSet = await this.tokenClient.exchangeCode({
       code,
       codeVerifier: transaction.codeVerifier,
-      redirectUri: this.getRedirectUri(),
+      redirectUri: this.getRedirectUri(request),
     });
     const idClaims = await this.tokenVerifier.verifyIdToken(tokenSet.idToken);
 
@@ -228,7 +228,7 @@ export class AuthController {
     this.authCookieService.clearSessionCookies(reply);
     await this.googleMfa.revokeProof(request);
 
-    return { logoutUrl: this.authUrlBuilder.buildLogoutUrl() };
+    return { logoutUrl: this.getLogoutUrl(request) };
   }
 
   @Post('logout/browser')
@@ -242,7 +242,7 @@ export class AuthController {
     await this.revokeRefreshTokenIfPresent(request);
     this.authCookieService.clearSessionCookies(reply);
     await this.googleMfa.revokeProof(request);
-    reply.redirect(this.authUrlBuilder.buildLogoutUrl(), 302);
+    reply.redirect(this.getLogoutUrl(request), 302);
   }
 
   private async revokeRefreshTokenIfPresent(
@@ -270,11 +270,41 @@ export class AuthController {
     }
   }
 
-  private getRedirectUri(): string {
+  private getRedirectUri(request: FastifyRequest): string {
+    const secondaryOrigin = this.getSecondaryOrigin(request);
+    if (secondaryOrigin) {
+      return `${secondaryOrigin}/api/auth/cognito/callback`;
+    }
+
     return (
       this.configService.get<string>('COGNITO_REDIRECT_URI') ??
       'http://localhost:48673/api/auth/cognito/callback'
     );
+  }
+
+  private getLogoutUrl(request: FastifyRequest): string {
+    const secondaryOrigin = this.getSecondaryOrigin(request);
+    return this.authUrlBuilder.buildLogoutUrl(
+      secondaryOrigin && `${secondaryOrigin}/login`,
+    );
+  }
+
+  private getSecondaryOrigin(request: FastifyRequest): string | undefined {
+    const secondaryOrigin = this.configService.get<string>(
+      'COGNITO_SECONDARY_WEB_ORIGIN',
+    );
+    const viewerHost = request.headers?.['x-despensalista-viewer-host'];
+    // CloudFront overwrites this header and the origin guard verifies its request.
+    if (
+      typeof viewerHost === 'string' &&
+      `https://${viewerHost}` === secondaryOrigin &&
+      this.configService.get<string>('ORIGIN_VERIFY_HEADER_NAME') &&
+      this.configService.get<string>('ORIGIN_VERIFY_HEADER_VALUE')
+    ) {
+      return secondaryOrigin;
+    }
+
+    return undefined;
   }
 
   private getScopes(): string[] {

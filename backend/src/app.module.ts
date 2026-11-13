@@ -430,6 +430,15 @@ const wasteEventRepositoryProvider = useDynamoDb
             .allow('')
             .optional(),
         }),
+        COGNITO_SECONDARY_WEB_ORIGIN: Joi.string()
+          .uri({ scheme: ['https'] })
+          .custom((value: string, helpers) => {
+            const url = new URL(value);
+            return value === url.origin && !url.hostname.includes('*')
+              ? value
+              : helpers.error('string.uri');
+          })
+          .optional(),
         COGNITO_SCOPES: Joi.string().default('openid email profile'),
         COGNITO_ALLOWED_PROVIDERS: Joi.string().default(
           'Google,Facebook,COGNITO',

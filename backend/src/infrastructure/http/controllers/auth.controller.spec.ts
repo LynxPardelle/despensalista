@@ -29,6 +29,7 @@ describe('AuthController Cognito flow', () => {
 
   const makeController = (
     googleMfa = new GoogleMfaService(new ConfigService()),
+    configOverrides: Record<string, string> = {},
   ) => {
     const getCurrentUserUseCase = {
       execute: jest.fn().mockResolvedValue(makeUser()),
@@ -107,6 +108,7 @@ describe('AuthController Cognito flow', () => {
             'http://localhost:48673/api/auth/cognito/callback',
           COGNITO_SCOPES: 'openid email profile',
           COGNITO_ALLOWED_PROVIDERS: 'Google,Facebook,COGNITO',
+          ...configOverrides,
         };
 
         return values[key];
@@ -135,12 +137,90 @@ describe('AuthController Cognito flow', () => {
     };
   };
 
-  const makeReply = () =>
+  const makeReply = (request = {} as FastifyRequest) =>
     ({
+      request,
       redirect: jest.fn(),
       setCookie: jest.fn(),
       clearCookie: jest.fn(),
     }) as unknown as jest.Mocked<FastifyReply>;
+
+  const secondaryOrigin = 'https://despensalista.com';
+  const verifiedProxyConfig = {
+    COGNITO_SECONDARY_WEB_ORIGIN: secondaryOrigin,
+    ORIGIN_VERIFY_HEADER_NAME: 'x-despensalista-origin-verify',
+    ORIGIN_VERIFY_HEADER_VALUE: 'test-origin-secret',
+  };
+  const viewerRequest = (host: string) =>
+    ({
+      headers: { 'x-despensalista-viewer-host': host },
+    }) as unknown as FastifyRequest;
+
+  it('uses the trusted viewer hostname for login, code exchange, and both logout paths', async () => {
+    const { controller, authUrlBuilder, tokenClient } = makeController(
+      undefined,
+      verifiedProxyConfig,
+    );
+    const request = viewerRequest('despensalista.com');
+    const reply = makeReply(request);
+    const redirectUri = `${secondaryOrigin}/api/auth/cognito/callback`;
+
+    controller.startCognitoLogin('Google', '/pantry', reply);
+    expect(authUrlBuilder.buildAuthorizeUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ redirectUri }),
+    );
+    await controller.completeCognitoLogin(
+      'authorization-code',
+      'state-value',
+      request,
+      reply,
+    );
+    expect(tokenClient.exchangeCode).toHaveBeenCalledWith(
+      expect.objectContaining({ redirectUri }),
+    );
+    await controller.logout(request, reply);
+    await controller.logoutFromBrowser(request, reply);
+    expect(authUrlBuilder.buildLogoutUrl.mock.calls).toEqual([
+      [`${secondaryOrigin}/login`],
+      [`${secondaryOrigin}/login`],
+    ]);
+  });
+
+  it.each([
+    [
+      'the primary hostname',
+      'despensalista.lynxpardelle.com',
+      verifiedProxyConfig,
+    ],
+    [
+      'an unrelated hostname',
+      'despensalista.com.example.org',
+      verifiedProxyConfig,
+    ],
+    [
+      'an unverified proxy',
+      'despensalista.com',
+      {
+        COGNITO_SECONDARY_WEB_ORIGIN: secondaryOrigin,
+        ORIGIN_VERIFY_HEADER_NAME:
+          verifiedProxyConfig.ORIGIN_VERIFY_HEADER_NAME,
+      },
+    ],
+  ])('uses the configured primary callback for %s', (_, host, config) => {
+    const { controller, authUrlBuilder } = makeController(undefined, config);
+
+    controller.startCognitoLogin(
+      'Google',
+      '/pantry',
+      makeReply(viewerRequest(host)),
+    );
+
+    expect(authUrlBuilder.buildAuthorizeUrl).toHaveBeenCalledWith(
+      expect.objectContaining({
+        redirectUri: 'http://localhost:48673/api/auth/cognito/callback',
+      }),
+    );
+  });
 
   it('renews Cognito cookies without exposing a profile before Google WebAuthn', async () => {
     const mfaRequired = new GoogleMfaRequiredException();

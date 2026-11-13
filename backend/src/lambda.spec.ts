@@ -6,6 +6,10 @@ import { CognitoTokenVerifierService } from './infrastructure/auth/cognito/cogni
 describe('lambda handler', () => {
   let lambda: LambdaModule;
   const origin = 'https://dev.despensalista.lynxpardelle.com';
+  const secondaryOrigin = 'https://despensalista.com';
+  const originHeaders = {
+    'x-despensalista-origin-verify': 'test-origin-verification-token',
+  };
   const previousEnv = process.env;
 
   beforeAll(async () => {
@@ -25,7 +29,11 @@ describe('lambda handler', () => {
       COGNITO_CLIENT_ID: 'test-client',
       COGNITO_REDIRECT_URI: `${origin}/api/auth/cognito/callback`,
       COGNITO_LOGOUT_REDIRECT_URI: `${origin}/login`,
+      COGNITO_SECONDARY_WEB_ORIGIN: secondaryOrigin,
       COGNITO_ALLOWED_PROVIDERS: 'COGNITO,Google',
+      ORIGIN_VERIFY_HEADER_NAME: 'x-despensalista-origin-verify',
+      ORIGIN_VERIFY_HEADER_VALUE:
+        originHeaders['x-despensalista-origin-verify'],
       AUTH_COOKIE_SECURE: 'true',
       GOOGLE_MFA_TABLE: 'despensalista-dev-google-mfa',
       GOOGLE_MFA_ORIGIN: origin,
@@ -41,7 +49,7 @@ describe('lambda handler', () => {
   it('serves the existing API through API Gateway events', async () => {
     const response = await lambda.handler({
       rawPath: '/api/healthz',
-      headers: { host: 'api.despensalista.test' },
+      headers: { ...originHeaders, host: 'api.despensalista.test' },
       requestContext: {
         http: {
           method: 'GET',
@@ -56,6 +64,34 @@ describe('lambda handler', () => {
       status: 'ok',
       service: 'despensalista-backend',
     });
+  });
+
+  it('uses the secondary Cognito callback only through the verified API origin', async () => {
+    const event = {
+      rawPath: '/api/auth/cognito/login',
+      rawQueryString: 'provider=Google',
+      headers: { 'x-despensalista-viewer-host': 'despensalista.com' },
+      requestContext: { http: { method: 'GET' } },
+    };
+
+    const directResponse = await lambda.handler(event);
+    expect(directResponse.statusCode).toBe(403);
+
+    const proxyResponse = await lambda.handler({
+      ...event,
+      headers: { ...event.headers, ...originHeaders },
+    });
+    expect(proxyResponse.statusCode).toBe(302);
+    expect(
+      new URL(proxyResponse.headers.location).searchParams.get('redirect_uri'),
+    ).toBe(`${secondaryOrigin}/api/auth/cognito/callback`);
+    expect(proxyResponse.cookies).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /^despensalista_cognito_code_verifier=.+HttpOnly/,
+        ),
+      ]),
+    );
   });
 
   it('routes only the private scheduled event to the deletion worker', async () => {
@@ -96,7 +132,7 @@ describe('lambda handler', () => {
           'despensalista_refresh_token=test-refresh',
           'XSRF-TOKEN=test-xsrf',
         ],
-        headers: { origin, 'x-xsrf-token': 'test-xsrf' },
+        headers: { ...originHeaders, origin, 'x-xsrf-token': 'test-xsrf' },
         requestContext: { http: { method: 'POST' } },
       });
       expect(response.statusCode).toBe(403);

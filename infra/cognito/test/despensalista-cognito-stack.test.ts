@@ -54,6 +54,22 @@ test('production Cognito client excludes every localhost callback and logout URL
   assert.ok(client.LogoutURLs.includes('https://despensalista.example/login'));
 });
 
+test('production custom domain extends the existing Cognito client URLs', () => {
+  const client = synthesizeUserPoolClient('prod', {
+    productionFrontendBaseUrl: 'https://despensalista.lynxpardelle.com',
+    enablePublicProductionDomain: 'true',
+    publicProductionCertificateArn: 'arn:aws:acm:us-east-1:123456789012:certificate/01234567-89ab-cdef-0123-456789abcdef',
+  });
+  assert.deepEqual(client.CallbackURLs, [
+    'https://despensalista.lynxpardelle.com/api/auth/cognito/callback',
+    'https://despensalista.com/api/auth/cognito/callback',
+  ]);
+  assert.deepEqual(client.LogoutURLs, [
+    'https://despensalista.lynxpardelle.com/login',
+    'https://despensalista.com/login',
+  ]);
+});
+
 test('production Cognito template omits the localhost callback output', () => {
   const app = new cdk.App({
     context: {
