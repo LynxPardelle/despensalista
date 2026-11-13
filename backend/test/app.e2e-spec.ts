@@ -13,6 +13,15 @@ import { AppController } from '../src/app.controller';
 import { AppService } from '../src/app.service';
 import { configureApp } from '../src/app.setup';
 
+// The Fastify plugin loads an ESM dependency through Node 22's require(esm).
+// Use the native loader because Jest 29's CommonJS runtime lacks that support.
+jest.mock('@fastify/static', () => {
+  const { createRequire } = jest.requireActual<typeof import('node:module')>(
+    'node:module',
+  );
+  return createRequire(__filename)('@fastify/static') as unknown;
+});
+
 describe('AppController (e2e)', () => {
   let app: NestFastifyApplication;
 
