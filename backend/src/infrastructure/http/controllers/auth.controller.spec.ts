@@ -12,6 +12,8 @@ import { GetCurrentUserUseCase } from '../../../application/use-cases/get-curren
 import { User } from '../../../domain/entities/user.entity';
 import { UserAccountStatus } from '../../../domain/enums';
 import { AuthCookieService } from '../auth/auth-cookie.service';
+import { GoogleMfaRequiredException } from '../auth/google-mfa.constants';
+import { GoogleMfaService } from '../auth/google-mfa.service';
 import { AuthController } from './auth.controller';
 
 describe('AuthController Cognito flow', () => {
@@ -25,7 +27,9 @@ describe('AuthController Cognito flow', () => {
       updatedAt: new Date('2026-01-02T00:00:00.000Z'),
     });
 
-  const makeController = () => {
+  const makeController = (
+    googleMfa = new GoogleMfaService(new ConfigService()),
+  ) => {
     const getCurrentUserUseCase = {
       execute: jest.fn().mockResolvedValue(makeUser()),
       executeByAuthSubject: jest.fn().mockResolvedValue(makeUser()),
@@ -91,6 +95,7 @@ describe('AuthController Cognito flow', () => {
       setSessionCookies: jest.fn(),
       getRefreshTokenFromRequest: jest.fn().mockReturnValue('refresh-token'),
       clearSessionCookies: jest.fn(),
+      clearGoogleMfaCookie: jest.fn(),
       createXsrfToken: jest.fn().mockReturnValue('xsrf-token'),
       ensureXsrfForRequest: jest.fn(),
     } as unknown as jest.Mocked<AuthCookieService>;
@@ -118,6 +123,7 @@ describe('AuthController Cognito flow', () => {
         tokenVerifier,
         authCookieService,
         configService,
+        googleMfa,
       ),
       getCurrentUserUseCase,
       transactionService,
@@ -135,6 +141,26 @@ describe('AuthController Cognito flow', () => {
       setCookie: jest.fn(),
       clearCookie: jest.fn(),
     }) as unknown as jest.Mocked<FastifyReply>;
+
+  it('renews Cognito cookies without exposing a profile before Google WebAuthn', async () => {
+    const mfaRequired = new GoogleMfaRequiredException();
+    const googleMfa = {
+      assertVerified: jest.fn().mockRejectedValue(mfaRequired),
+    } as unknown as GoogleMfaService;
+    const { controller, authCookieService, getCurrentUserUseCase } =
+      makeController(googleMfa);
+    const reply = makeReply();
+
+    await expect(controller.refresh({} as FastifyRequest, reply)).rejects.toBe(
+      mfaRequired,
+    );
+    expect(authCookieService.setSessionCookies).toHaveBeenCalledWith(reply, {
+      accessToken: 'new-access-token',
+      refreshToken: 'refresh-token',
+      xsrfToken: 'xsrf-token',
+    });
+    expect(getCurrentUserUseCase.executeByAuthSubject).not.toHaveBeenCalled();
+  });
 
   it('starts Cognito login by storing transaction cookies and redirecting to Hosted UI', () => {
     const { controller, authCookieService, authUrlBuilder } = makeController();

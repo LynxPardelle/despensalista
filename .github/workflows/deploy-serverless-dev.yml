@@ -50,7 +50,7 @@ jobs:
 
   build-release:
     needs: package-backend
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # The locked Playwright version publishes FFmpeg for this image.
     permissions:
       contents: read
 
@@ -205,7 +205,9 @@ jobs:
             --context domainPrefix="$COGNITO_DOMAIN_PREFIX" \
             --context appDomainName="$APP_DOMAIN_NAME" \
             --context productionFrontendBaseUrl="$FRONTEND_BASE_URL" \
-            --context serverlessFrontendBaseUrl="$FRONTEND_BASE_URL"
+            --context serverlessFrontendBaseUrl="$FRONTEND_BASE_URL" \
+            --context enableGoogleMfa=true \
+            --context externallyManagedSocialProviders=Google
 
       - name: Activate exact published release
         id: activate

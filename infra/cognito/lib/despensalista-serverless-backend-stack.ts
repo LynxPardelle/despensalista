@@ -25,7 +25,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { applyRuntimeBoundary, deliveryInventory } from './stage-delivery';
+import { applyRuntimeBoundary, deliveryInventory, googleMfaEnabled, requireGoogleMfaOrigin } from './stage-delivery';
 
 interface DespensaListaServerlessBackendStackProps extends cdk.StackProps {
   allowedProviders: string[];
@@ -72,11 +72,27 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       'Z05088763QG63CC5SE7PN',
     );
     const hostedZoneName = this.readContext('hostedZoneName', 'lynxpardelle.com');
+    const enableGoogleMfa = googleMfaEnabled(this, stage);
+    if (enableGoogleMfa && !props.allowedProviders.includes('Google')) {
+      throw new Error('Google MFA requires Google in the Cognito app client.');
+    }
+    const googleMfaOrigin = enableGoogleMfa ? requireGoogleMfaOrigin(frontendBaseUrl) : undefined;
+    if (googleMfaOrigin && (googleMfaOrigin !== `https://${domainName}` ||
+      this.readContext('productionFrontendBaseUrl', frontendBaseUrl) !== googleMfaOrigin)) {
+      throw new Error('Google MFA requires the same frontend origin for Cognito, WebAuthn and the app domain.');
+    }
     const tables = this.createTables(projectName, stage);
     const logRetention = isProduction
       ? logs.RetentionDays.ONE_MONTH
       : logs.RetentionDays.ONE_WEEK;
     const resourceRemovalPolicy = this.resolveRemovalPolicy();
+    const googleMfaTable = googleMfaOrigin ? new dynamodb.Table(this, 'GoogleMfaTable', {
+      tableName: `${projectName}-${stage}-google-mfa`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expiresAt',
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: resourceRemovalPolicy,
+    }) : undefined;
     const originVerifyHeaderName = 'x-despensalista-origin-verify';
     const originSecretName = `${projectName}/${stage}/cloudfront-origin-verification`;
     const originVerifySecret = new secretsmanager.Secret(
@@ -141,6 +157,10 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         COGNITO_REDIRECT_URI: `${frontendBaseUrl}/api/auth/cognito/callback`,
         COGNITO_LOGOUT_REDIRECT_URI: `${frontendBaseUrl}/login`,
         COGNITO_ALLOWED_PROVIDERS: props.allowedProviders.join(','),
+        ...(googleMfaTable && googleMfaOrigin && {
+          GOOGLE_MFA_TABLE: googleMfaTable.tableName,
+          GOOGLE_MFA_ORIGIN: googleMfaOrigin,
+        }),
         HELMET_ENABLED: 'true',
         RATE_LIMIT_ENABLED: 'true',
         RATE_LIMIT_TRUST_PROXY: 'false',
@@ -152,6 +172,12 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     });
 
     Object.values(tables).forEach((table) => table.grantReadWriteData(apiFunction));
+    if (googleMfaTable) {
+      apiFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem'],
+        resources: [googleMfaTable.tableArn],
+      }));
+    }
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],

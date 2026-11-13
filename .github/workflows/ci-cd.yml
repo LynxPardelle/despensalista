@@ -97,7 +97,7 @@ jobs:
       uses: github/codeql-action/analyze@fddeee1a7ece751b577e409a89057319e3172939 # v4
 
   test-frontend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # The locked Playwright version publishes FFmpeg for this image.
     permissions:
       contents: read
     defaults:

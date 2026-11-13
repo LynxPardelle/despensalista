@@ -79,6 +79,36 @@ test('development Cognito client includes localhost callback and logout URLs', (
   assert.ok(client.LogoutURLs.includes('http://localhost:48673/login'));
 });
 
+test('Google MFA uses a separate dev web client with its own login branding', () => {
+  const context = {
+    stage: 'dev',
+    productionFrontendBaseUrl: 'https://dev.despensalista.example',
+  };
+  const synth = (extraContext: Record<string, string>) => {
+    const app = new cdk.App({ context: { ...context, ...extraContext } });
+    return Template.fromStack(new DespensaListaCognitoStack(app, 'Cognito-dev'));
+  };
+  const baseline = synth({});
+  const enabled = synth({ enableGoogleMfa: 'true', externallyManagedSocialProviders: 'Google' });
+  const type = 'AWS::Cognito::UserPoolClient';
+  const clients = enabled.findResources(type);
+
+  enabled.resourceCountIs(type, 2);
+  assert.deepEqual(clients.WebUserPoolClient, baseline.findResources(type).WebUserPoolClient);
+  assert.deepEqual(enabled.toJSON().Outputs.UserPoolClientId, baseline.toJSON().Outputs.UserPoolClientId);
+  assert.deepEqual(enabled.toJSON().Outputs.GoogleMfaUserPoolClientId.Value, { Ref: 'GoogleMfaWebUserPoolClient' });
+  enabled.hasResourceProperties(type, {
+    ClientName: 'despensalista-dev-google-mfa-web',
+    SupportedIdentityProviders: ['COGNITO', 'Google'],
+    CallbackURLs: ['https://dev.despensalista.example/api/auth/cognito/callback'],
+    LogoutURLs: ['https://dev.despensalista.example/login'],
+  });
+  enabled.hasResourceProperties('AWS::Cognito::ManagedLoginBranding', {
+    ClientId: { Ref: 'GoogleMfaWebUserPoolClient' },
+    UseCognitoProvidedValues: true,
+  });
+});
+
 test('production requires software-token MFA and protects the user pool', () => {
   const app = new cdk.App({
     context: {

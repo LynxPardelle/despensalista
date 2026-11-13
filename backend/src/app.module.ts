@@ -148,6 +148,8 @@ import {
 import { AuthCookieService } from './infrastructure/http/auth/auth-cookie.service';
 import { AuthStepUpService } from './infrastructure/http/auth/auth-step-up.service';
 import { AccessTokenGuard } from './infrastructure/http/auth/access-token.guard';
+import { GoogleMfaService } from './infrastructure/http/auth/google-mfa.service';
+import { GoogleMfaController } from './infrastructure/http/controllers/google-mfa.controller';
 import { AuthController } from './infrastructure/http/controllers/auth.controller';
 import { HouseholdController } from './infrastructure/http/controllers/household.controller';
 import { InventoryLotsController } from './infrastructure/http/controllers/inventory-lots.controller';
@@ -428,6 +430,10 @@ const wasteEventRepositoryProvider = useDynamoDb
         COGNITO_ALLOWED_PROVIDERS: Joi.string().default(
           'Google,Facebook,COGNITO',
         ),
+        GOOGLE_MFA_TABLE: Joi.string().optional(),
+        GOOGLE_MFA_ORIGIN: Joi.string()
+          .uri({ scheme: ['https'] })
+          .optional(),
         COGNITO_AUTH_TRANSACTION_TTL_SECONDS: Joi.number()
           .integer()
           .positive()
@@ -450,6 +456,7 @@ const wasteEventRepositoryProvider = useDynamoDb
   controllers: [
     AppController,
     AuthController,
+    GoogleMfaController,
     HouseholdController,
     ProductsController,
     ProductTypesController,
@@ -465,6 +472,7 @@ const wasteEventRepositoryProvider = useDynamoDb
     AuthCookieService,
     AuthStepUpService,
     AccessTokenGuard,
+    GoogleMfaService,
     CognitoAuthTransactionService,
     CognitoProfileSyncService,
     CognitoAuthUrlBuilderService,

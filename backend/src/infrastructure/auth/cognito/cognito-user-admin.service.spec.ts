@@ -6,6 +6,7 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import { ConfigService } from '@nestjs/config';
 import { CognitoUserAdminService } from './cognito-user-admin.service';
+import { GoogleMfaService } from '../../http/auth/google-mfa.service';
 
 function createService(): CognitoUserAdminService {
   return new CognitoUserAdminService(
@@ -14,6 +15,7 @@ function createService(): CognitoUserAdminService {
       COGNITO_USER_POOL_ID: 'pool',
       COGNITO_REGION: 'us-east-1',
     }),
+    new GoogleMfaService(new ConfigService()),
   );
 }
 

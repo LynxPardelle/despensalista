@@ -180,6 +180,15 @@ Then deploy CDK with:
 This keeps the Cognito app client and backend Lambda environment aligned with
 the externally managed IdPs without storing provider secrets in CloudFormation.
 
+The `dev` deployment also passes `--context enableGoogleMfa=true`. The Google
+provider must already exist in the dev pool. This flag creates a separate app
+client and branding for the deployed dev HTTPS origin and an on-demand DynamoDB
+table for WebAuthn. The original app client stays available for local native
+login and the preceding Lambda release. Dev users sign in again when the active
+release switches clients, including if a rollback restores the previous release.
+The active dev client ID is in `GoogleMfaUserPoolClientId`. The localhost pilot
+continues to use its independently configured client.
+
 ## Install And Validate
 
 ```powershell

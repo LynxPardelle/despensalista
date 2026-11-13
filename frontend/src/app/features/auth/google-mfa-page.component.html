@@ -1,0 +1,50 @@
+<main class="auth-page">
+  <section class="auth-card" aria-labelledby="google-mfa-title">
+    <div class="brand-block">
+      <p class="eyebrow">DespensaLista</p>
+      <h1 id="google-mfa-title">Verifica tu acceso</h1>
+      <p class="lead">Usa una llave de acceso para completar el inicio de sesión con Google.</p>
+    </div>
+
+    <div class="auth-form">
+      @if (checking()) {
+        <p class="status-copy" role="status">Cargando verificación…</p>
+      }
+      @if (busy()) {
+        <p class="status-copy" role="status">Sigue las indicaciones del navegador para usar tu llave.</p>
+      }
+      @if (feedback(); as message) {
+        <p class="status-copy status-copy--success" role="status">{{ message }}</p>
+      }
+      @if (error(); as message) {
+        <p class="status-copy status-copy--error" role="alert">{{ message }}</p>
+      }
+      @if (authError$ | async; as message) {
+        <p class="status-copy status-copy--error" role="alert">{{ message }}</p>
+      }
+
+      @if (supported() && status() && !status()?.verified) {
+        @if (status()?.registered) {
+          <button class="primary-button" type="button" [disabled]="busy() || checking()" (click)="authenticate()">
+            Verificar llave de acceso
+          </button>
+        } @else {
+          <p class="status-copy">Registra una llave para usarla cada vez que entres con Google.</p>
+          <button class="primary-button" type="button" [disabled]="busy() || checking()" (click)="register()">
+            Registrar llave de acceso
+          </button>
+        }
+      }
+      @if (canRetryStatus()) {
+        <button class="primary-button" type="button" [disabled]="checking()" (click)="loadStatus()">
+          Reintentar
+        </button>
+      }
+      @if (!checking() && !status()?.verified) {
+        <button class="secondary-button" type="button" [disabled]="busy()" (click)="logout()">
+          {{ status() ? 'Cerrar sesión' : 'Volver a iniciar sesión' }}
+        </button>
+      }
+    </div>
+  </section>
+</main>

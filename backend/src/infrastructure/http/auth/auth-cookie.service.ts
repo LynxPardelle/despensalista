@@ -2,6 +2,10 @@ import { randomBytes } from 'crypto';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { FastifyReply, FastifyRequest } from 'fastify';
+import {
+  GOOGLE_MFA_COOKIE,
+  GOOGLE_MFA_COOKIE_OPTIONS,
+} from './google-mfa.constants';
 
 export interface AuthSessionCookieTokens {
   accessToken: string;
@@ -66,6 +70,13 @@ export class AuthCookieService {
       '/api/auth',
     );
     this.clearCookieAcrossDomainModes(reply, this.xsrfCookieName, '/');
+    this.clearGoogleMfaCookie(reply);
+  }
+
+  clearGoogleMfaCookie(reply: FastifyReply): void {
+    if (this.configService.get<string>('GOOGLE_MFA_TABLE')) {
+      reply.clearCookie(GOOGLE_MFA_COOKIE, GOOGLE_MFA_COOKIE_OPTIONS);
+    }
   }
 
   setCognitoAuthTransactionCookies(
