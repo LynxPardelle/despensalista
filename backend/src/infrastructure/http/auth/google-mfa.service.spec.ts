@@ -53,7 +53,7 @@ const credential = {
   counter: 1,
 };
 const registration = {} as RegistrationResponseJSON;
-const assertion = {} as AuthenticationResponseJSON;
+const assertion = { id: credential.id } as AuthenticationResponseJSON;
 
 function request(token?: string, requestOrigin = origin): FastifyRequest {
   return {
@@ -161,8 +161,10 @@ describe('GoogleMfaService', () => {
         userVerification: 'required',
       },
       timeout: 300_000,
+      user: {
+        name: expect.stringMatching(/^DespensaLista Dev \([a-f0-9]{8}\)$/),
+      },
     });
-    expect(options.user.name).not.toContain(subject);
     expect(send).toHaveBeenLastCalledWith(expect.any(PutCommand));
     expect(send.mock.lastCall?.[0]).toMatchObject({
       input: {
@@ -305,5 +307,19 @@ describe('GoogleMfaService', () => {
     expect(send.mock.lastCall?.[0]).toMatchObject({
       input: { Key: { pk: proof?.pk } },
     });
+  });
+
+  it('erases credential material and fences concurrent registration on account deletion', async () => {
+    const { service, send } = setup();
+    send.mockResolvedValue({});
+    await service.deleteCredential(claims.sub);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.lastCall?.[0]).toBeInstanceOf(PutCommand);
+    const { Item } = (send.mock.lastCall?.[0] as PutCommand).input;
+    expect(Item).toEqual({
+      pk: expect.stringMatching(/^credential:[a-zA-Z0-9_-]+$/),
+      expiresAt: expect.any(Number),
+    });
+    expect(Item?.pk).not.toContain(claims.sub);
   });
 });

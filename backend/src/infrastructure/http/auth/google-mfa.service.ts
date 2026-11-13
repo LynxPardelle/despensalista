@@ -213,6 +213,13 @@ export class GoogleMfaService {
     const credential = this.requireCredential(
       await this.getCredential(claims.sub),
     );
+    if (
+      response?.id !== credential.id ||
+      (response.response?.userHandle &&
+        response.response.userHandle !== digest(claims.sub))
+    ) {
+      throw new BadRequestException('Invalid WebAuthn response');
+    }
     const verification = await this.verifyResponse(() =>
       verifyAuthenticationResponse({
         response,

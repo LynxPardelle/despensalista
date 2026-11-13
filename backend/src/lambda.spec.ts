@@ -5,21 +5,37 @@ import { CognitoTokenVerifierService } from './infrastructure/auth/cognito/cogni
 
 describe('lambda handler', () => {
   let lambda: LambdaModule;
+  const origin = 'https://dev.despensalista.lynxpardelle.com';
+  const previousEnv = process.env;
 
   beforeAll(async () => {
-    process.env.NODE_ENV = 'test';
-    process.env.PERSISTENCE_PROVIDER = 'dynamodb';
-    process.env.DYNAMODB_USERS_TABLE = 'test-users';
-    process.env.DYNAMODB_PRODUCTS_TABLE = 'test-products';
-    process.env.DYNAMODB_PRODUCT_TYPES_TABLE = 'test-product-types';
-    process.env.DYNAMODB_INVENTORY_LOTS_TABLE = 'test-inventory-lots';
-    process.env.CORS_ORIGIN = 'https://despensalista.test';
-    process.env.COGNITO_ENABLED = 'false';
+    process.env = {
+      ...previousEnv,
+      NODE_ENV: 'test',
+      PERSISTENCE_PROVIDER: 'dynamodb',
+      DYNAMODB_USERS_TABLE: 'test-users',
+      DYNAMODB_PRODUCTS_TABLE: 'test-products',
+      DYNAMODB_PRODUCT_TYPES_TABLE: 'test-product-types',
+      DYNAMODB_INVENTORY_LOTS_TABLE: 'test-inventory-lots',
+      CORS_ORIGIN: origin,
+      COGNITO_ENABLED: 'true',
+      COGNITO_ISSUER:
+        'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_7MDhLOulC',
+      COGNITO_DOMAIN: 'https://cognito.example.invalid',
+      COGNITO_CLIENT_ID: 'test-client',
+      COGNITO_REDIRECT_URI: `${origin}/api/auth/cognito/callback`,
+      COGNITO_LOGOUT_REDIRECT_URI: `${origin}/login`,
+      COGNITO_ALLOWED_PROVIDERS: 'COGNITO,Google',
+      AUTH_COOKIE_SECURE: 'true',
+      GOOGLE_MFA_TABLE: 'despensalista-dev-google-mfa',
+      GOOGLE_MFA_ORIGIN: origin,
+    };
     lambda = await import('./lambda');
   });
 
   afterAll(async () => {
     await lambda.closeCachedAppForTest();
+    process.env = previousEnv;
   });
 
   it('serves the existing API through API Gateway events', async () => {
@@ -57,23 +73,6 @@ describe('lambda handler', () => {
   });
 
   it('returns fresh session cookies with the Google WebAuthn 403 response', async () => {
-    await lambda.closeCachedAppForTest();
-    const origin = 'https://dev.despensalista.lynxpardelle.com';
-    const previousEnv = process.env;
-    process.env = {
-      ...previousEnv,
-      COGNITO_ENABLED: 'true',
-      COGNITO_ISSUER:
-        'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_7MDhLOulC',
-      COGNITO_DOMAIN: 'https://cognito.example.invalid',
-      COGNITO_CLIENT_ID: 'test-client',
-      COGNITO_REDIRECT_URI: `${origin}/api/auth/cognito/callback`,
-      COGNITO_LOGOUT_REDIRECT_URI: `${origin}/login`,
-      COGNITO_ALLOWED_PROVIDERS: 'COGNITO,Google',
-      AUTH_COOKIE_SECURE: 'true',
-      GOOGLE_MFA_TABLE: 'despensalista-dev-google-mfa',
-      GOOGLE_MFA_ORIGIN: origin,
-    };
     const refresh = jest
       .spyOn(CognitoTokenClientService.prototype, 'refresh')
       .mockResolvedValue({
@@ -113,8 +112,6 @@ describe('lambda handler', () => {
     } finally {
       refresh.mockRestore();
       verify.mockRestore();
-      process.env = previousEnv;
-      await lambda.closeCachedAppForTest();
     }
   });
 });
