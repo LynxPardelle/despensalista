@@ -11,10 +11,18 @@ import { environment } from '../../../environments/environment';
 import {
   ApiAuthUser,
   AuthUser,
+  GoogleMfaStatus,
 } from '../../shared/models/auth.model';
 
 interface ApiCognitoProviders {
   providers: string[];
+}
+
+type GoogleMfaCeremony = 'registration' | 'authentication';
+
+export function isGoogleMfaRequired(error: unknown): boolean {
+  return error instanceof HttpErrorResponse &&
+    error.status === 403 && error.error?.code === 'GOOGLE_MFA_REQUIRED';
 }
 
 @Injectable({
@@ -22,6 +30,7 @@ interface ApiCognitoProviders {
 })
 export class AuthApiService {
   private readonly authUrl = `${environment.apiUrl}/auth`;
+  private readonly googleMfaUrl = `${this.authUrl}/google-mfa`;
 
   constructor(private readonly http: HttpClient) {}
 
@@ -53,6 +62,24 @@ export class AuthApiService {
     return this.http
       .get<ApiAuthUser>(`${this.authUrl}/me`, { withCredentials: true })
       .pipe(map((user) => this.normalizeUser(user)));
+  }
+
+  getGoogleMfaStatus(): Observable<GoogleMfaStatus> {
+    return this.http.get<GoogleMfaStatus>(`${this.googleMfaUrl}/status`, { withCredentials: true });
+  }
+
+  getGoogleMfaOptions(ceremony: 'registration'): Observable<PublicKeyCredentialCreationOptionsJSON>;
+  getGoogleMfaOptions(ceremony: 'authentication'): Observable<PublicKeyCredentialRequestOptionsJSON>;
+  getGoogleMfaOptions(ceremony: GoogleMfaCeremony): Observable<
+    PublicKeyCredentialCreationOptionsJSON | PublicKeyCredentialRequestOptionsJSON
+  > {
+    return this.http.post<PublicKeyCredentialCreationOptionsJSON | PublicKeyCredentialRequestOptionsJSON>(
+      `${this.googleMfaUrl}/${ceremony}/options`, {}, this.googleMfaPostOptions(),
+    );
+  }
+
+  verifyGoogleMfa(ceremony: GoogleMfaCeremony, response: PublicKeyCredentialJSON): Observable<unknown> {
+    return this.http.post(`${this.googleMfaUrl}/${ceremony}/verify`, response, this.googleMfaPostOptions());
   }
 
   buildCognitoLoginUrl(
@@ -116,6 +143,10 @@ export class AuthApiService {
 
   isUnauthorized(error: unknown): boolean {
     return error instanceof HttpErrorResponse && error.status === 401;
+  }
+
+  private googleMfaPostOptions() {
+    return { headers: this.getXsrfHeaders(), withCredentials: true };
   }
 
   private hasXsrfTokenCookie(): boolean {

@@ -10,6 +10,7 @@ import {
 import { combineLatest, Observable } from 'rxjs';
 import { filter, map, take, tap } from 'rxjs/operators';
 import { AuthFacade } from '../services/auth.facade';
+import { googleMfaRoute } from './google-mfa-route';
 
 @Injectable({
   providedIn: 'root'
@@ -51,11 +52,16 @@ export class AuthGuard implements CanActivate {
           status !== 'unknown' && !bootstrapPending && !refreshPending,
       ),
       take(1),
-      map(([status]) =>
-        authMode === 'anonymous'
-          ? this.resolveAnonymousRoute(status, route.queryParamMap?.get('redirectTo'))
-          : this.resolveAuthenticatedRoute(status, state.url),
-      ),
+      map(([status]) => {
+        const redirectTo = route.queryParamMap?.get('redirectTo');
+        if (status === 'google-mfa-required') {
+          return googleMfaRoute(this.router, authMode === 'anonymous' ? redirectTo : state.url);
+        }
+
+        return authMode === 'anonymous'
+          ? this.resolveAnonymousRoute(status, redirectTo)
+          : this.resolveAuthenticatedRoute(status, state.url);
+      }),
     );
   }
 

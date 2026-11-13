@@ -7,7 +7,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as ses from 'aws-cdk-lib/aws-ses';
-import { createStageDeliveryControls } from './stage-delivery';
+import { createStageDeliveryControls, googleMfaEnabled, requireGoogleMfaOrigin } from './stage-delivery';
 import { Construct } from 'constructs';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -22,6 +22,7 @@ const EMAIL_QUOTAS = {
 
 export class DespensaListaCognitoStack extends cdk.Stack {
   readonly allowedProviders: string[];
+  readonly googleMfaUserPoolClientId?: string;
   readonly userPoolClientId: string;
   readonly userPoolDomainUrl: string;
   readonly userPoolId: string;
@@ -53,7 +54,11 @@ export class DespensaListaCognitoStack extends cdk.Stack {
       productionFrontendBaseUrl,
     );
     const mfaConfiguration = this.readMfaConfiguration(stage);
-    const supportedIdentityProviders = ['COGNITO'];
+    const enableGoogleMfa = googleMfaEnabled(this, stage);
+    const allowedProviders = ['COGNITO', ...this.readExternalSocialProviders()];
+    if (enableGoogleMfa && !allowedProviders.includes('Google')) {
+      throw new Error('Google MFA requires Google in externallyManagedSocialProviders.');
+    }
 
     const userPool = new cognito.CfnUserPool(this, 'UserPool', {
       userPoolName: `${projectName}-${stage}-users`,
@@ -133,36 +138,29 @@ export class DespensaListaCognitoStack extends cdk.Stack {
       },
     );
 
-    this.readExternalSocialProviders().forEach((provider) => {
-      supportedIdentityProviders.push(provider);
-    });
-
-    const userPoolClient = new cognito.CfnUserPoolClient(
-      this,
-      'WebUserPoolClient',
-      {
-        userPoolId: userPool.ref,
-        clientName: `${projectName}-${stage}-web`,
-        generateSecret: false,
-        preventUserExistenceErrors: 'ENABLED',
-        enableTokenRevocation: true,
-        allowedOAuthFlowsUserPoolClient: true,
-        allowedOAuthFlows: ['code'],
-        allowedOAuthScopes: ['openid', 'email', 'profile'],
-        callbackUrLs: callbackUrls,
-        logoutUrLs: logoutUrls,
-        supportedIdentityProviders,
-        explicitAuthFlows: ['ALLOW_REFRESH_TOKEN_AUTH', 'ALLOW_USER_SRP_AUTH'],
-        accessTokenValidity: 1,
-        idTokenValidity: 1,
-        refreshTokenValidity: 30,
-        tokenValidityUnits: {
-          accessToken: 'hours',
-          idToken: 'hours',
-          refreshToken: 'days',
-        },
+    const webClientProps: cognito.CfnUserPoolClientProps = {
+      userPoolId: userPool.ref,
+      clientName: `${projectName}-${stage}-web`,
+      generateSecret: false,
+      preventUserExistenceErrors: 'ENABLED',
+      enableTokenRevocation: true,
+      allowedOAuthFlowsUserPoolClient: true,
+      allowedOAuthFlows: ['code'],
+      allowedOAuthScopes: ['openid', 'email', 'profile'],
+      callbackUrLs: callbackUrls,
+      logoutUrLs: logoutUrls,
+      supportedIdentityProviders: enableGoogleMfa ? ['COGNITO'] : allowedProviders,
+      explicitAuthFlows: ['ALLOW_REFRESH_TOKEN_AUTH', 'ALLOW_USER_SRP_AUTH'],
+      accessTokenValidity: 1,
+      idTokenValidity: 1,
+      refreshTokenValidity: 30,
+      tokenValidityUnits: {
+        accessToken: 'hours',
+        idToken: 'hours',
+        refreshToken: 'days',
       },
-    );
+    };
+    const userPoolClient = new cognito.CfnUserPoolClient(this, 'WebUserPoolClient', webClientProps);
 
     const managedLoginBranding = new cognito.CfnManagedLoginBranding(
       this,
@@ -174,6 +172,28 @@ export class DespensaListaCognitoStack extends cdk.Stack {
       },
     );
     managedLoginBranding.addDependency(userPoolClient);
+
+    if (enableGoogleMfa) {
+      const frontendOrigin = requireGoogleMfaOrigin(productionFrontendBaseUrl);
+      // The previous Lambda release keeps its COGNITO-only audience on rollback.
+      const googleMfaClient = new cognito.CfnUserPoolClient(this, 'GoogleMfaWebUserPoolClient', {
+        ...webClientProps,
+        clientName: `${projectName}-${stage}-google-mfa-web`,
+        callbackUrLs: [`${frontendOrigin}/api/auth/cognito/callback`],
+        logoutUrLs: [`${frontendOrigin}/login`],
+        supportedIdentityProviders: allowedProviders,
+      });
+      googleMfaClient.addResourceDependency(userPoolDomain);
+      new cognito.CfnManagedLoginBranding(this, 'GoogleMfaManagedLoginBranding', {
+        userPoolId: userPool.ref,
+        clientId: googleMfaClient.ref,
+        useCognitoProvidedValues: true,
+      });
+      this.googleMfaUserPoolClientId = googleMfaClient.ref;
+      new cdk.CfnOutput(this, 'GoogleMfaUserPoolClientId', {
+        value: googleMfaClient.ref,
+      });
+    }
 
     const sesIdentity = this.createSesIdentity(stage);
     createStageDeliveryControls(this, projectName, stage);
@@ -191,7 +211,7 @@ export class DespensaListaCognitoStack extends cdk.Stack {
     });
 
     const userPoolDomainUrl = `https://${domainPrefix}.auth.${cdk.Aws.REGION}.amazoncognito.com`;
-    this.allowedProviders = supportedIdentityProviders;
+    this.allowedProviders = allowedProviders;
     this.userPoolClientId = userPoolClient.ref;
     this.userPoolDomainUrl = userPoolDomainUrl;
     this.userPoolId = userPool.ref;
@@ -212,7 +232,7 @@ export class DespensaListaCognitoStack extends cdk.Stack {
       value: `${userPoolDomainUrl}/oauth2/idpresponse`,
     });
     new cdk.CfnOutput(this, 'AllowedProviders', {
-      value: supportedIdentityProviders.join(','),
+      value: allowedProviders.join(','),
     });
     if (sesIdentity) {
       new cdk.CfnOutput(this, 'SesEmailIdentityName', {

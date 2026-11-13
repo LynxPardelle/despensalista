@@ -3,6 +3,7 @@ import { TestBed } from '@angular/core/testing';
 import { ActivatedRouteSnapshot, convertToParamMap, Router, RouterStateSnapshot, UrlTree } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 import { BehaviorSubject, Observable, firstValueFrom, isObservable } from 'rxjs';
+import { SessionStatus } from '../../shared/models/auth.model';
 import { AuthFacade } from '../services/auth.facade';
 import { AuthGuard } from './auth.guard';
 
@@ -71,6 +72,19 @@ describe('AuthGuard', () => {
     expect((result as UrlTree).queryParams['redirectTo']).toBe(invitation);
   });
 
+  it('requires Google verification before opening a protected route', async () => {
+    authFacade.sessionStatus$.next('google-mfa-required');
+    const invitation = '/profile?householdInvite=fresh-token';
+    const result = await resolveGuardResult(guard.canActivate({
+      data: { authMode: 'authenticated' },
+    } as unknown as ActivatedRouteSnapshot, { url: invitation } as RouterStateSnapshot));
+
+    const router = TestBed.inject(Router);
+    expect(router.serializeUrl(result as UrlTree)).toBe(
+      router.serializeUrl(router.createUrlTree(['/mfa-google'], { queryParams: { redirectTo: invitation } })),
+    );
+  });
+
   it('rejects external login return destinations for an existing session', async () => {
     document.cookie = 'XSRF-TOKEN=test; path=/';
     authFacade.sessionStatus$.next('authenticated');
@@ -84,7 +98,7 @@ describe('AuthGuard', () => {
 });
 
 class AuthFacadeStub {
-  readonly sessionStatus$ = new BehaviorSubject<'unknown' | 'authenticated' | 'anonymous'>('unknown');
+  readonly sessionStatus$ = new BehaviorSubject<SessionStatus>('unknown');
   readonly bootstrapPending$ = new BehaviorSubject(false);
   readonly refreshPending$ = new BehaviorSubject(false);
   readonly bootstrap = jasmine.createSpy('bootstrap').and.callFake(() => {

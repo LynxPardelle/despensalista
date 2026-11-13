@@ -22,6 +22,24 @@ export function deliveryInventory(stage: string): DeliveryInventory {
   return inventory[stage] ?? {};
 }
 
+export function googleMfaEnabled(stack: cdk.Stack, stage: string): boolean {
+  const enabled = ['1', 'true', 'yes', 'y'].includes(
+    String(stack.node.tryGetContext('enableGoogleMfa')).trim().toLowerCase(),
+  );
+  if (enabled && stage !== 'dev') {
+    throw new Error('Google MFA may be enabled only in dev.');
+  }
+  return enabled;
+}
+
+export function requireGoogleMfaOrigin(value: string | undefined): string {
+  const url = value ? URL.parse(value) : null;
+  if (!url || url.protocol !== 'https:' || value !== url.origin) {
+    throw new Error('Google MFA requires an HTTPS frontend origin without a path.');
+  }
+  return url.origin;
+}
+
 export function stageSynthesizer(project: string, stage: string, administrativeBootstrap = false): cdk.DefaultStackSynthesizer {
   return new cdk.DefaultStackSynthesizer({
     fileAssetsBucketName: `${project}-${stage}-cdk-assets-\${AWS::AccountId}-\${AWS::Region}`,

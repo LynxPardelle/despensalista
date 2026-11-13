@@ -17,6 +17,13 @@ const routes: Routes = [
     redirectTo: 'login',
   },
   {
+    path: 'mfa-google',
+    title: 'Verifica tu acceso | DespensaLista',
+    loadComponent: () => import('./features/auth/google-mfa-page.component').then(
+      (module) => module.GoogleMfaPageComponent,
+    ),
+  },
+  {
     path: 'forgot-password',
     redirectTo: 'login',
   },

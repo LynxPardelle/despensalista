@@ -61,4 +61,9 @@ export const sessionExpired = createAction(
   props<{ error: string }>(),
 );
 
+export const googleMfaRequired = createAction(
+  '[Auth] Google MFA Required',
+  props<{ redirectCurrentRoute: boolean }>(),
+);
+
 export const clearFeedback = createAction('[Auth] Clear Feedback');

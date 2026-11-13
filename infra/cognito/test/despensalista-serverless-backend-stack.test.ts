@@ -4,7 +4,11 @@ import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { DespensaListaServerlessBackendStack } from '../lib/despensalista-serverless-backend-stack';
 
-function synthesizeTemplate(stage: 'dev' | 'tst' | 'prod'): Template {
+function synthesizeTemplate(
+  stage: 'dev' | 'tst' | 'prod',
+  extraContext: Record<string, string> = {},
+  allowedProviders = ['COGNITO'],
+): Template {
   const app = new cdk.App({
     context: {
       stage,
@@ -16,10 +20,11 @@ function synthesizeTemplate(stage: 'dev' | 'tst' | 'prod'): Template {
       backendArtifactPath: __dirname,
       frontendArtifactPath: __dirname,
       releaseId: 'a'.repeat(12),
+      ...extraContext,
     },
   });
   const stack = new DespensaListaServerlessBackendStack(app, `Backend-${stage}`, {
-    allowedProviders: ['COGNITO'],
+    allowedProviders,
     cognitoDomain: 'https://auth.example',
     cognitoUserPoolClientId: 'client-id',
     cognitoUserPoolId: 'us-east-1_example',
@@ -29,6 +34,58 @@ function synthesizeTemplate(stage: 'dev' | 'tst' | 'prod'): Template {
 }
 
 const productionTemplate = synthesizeTemplate('prod');
+
+test('only the explicitly enabled dev backend provisions Google MFA storage', () => {
+  const disabled = synthesizeTemplate('dev');
+  assert.doesNotMatch(JSON.stringify(disabled.toJSON()), /GOOGLE_MFA_|GoogleMfaTable/);
+
+  const enabled = synthesizeTemplate(
+    'dev', { enableGoogleMfa: 'true' }, ['COGNITO', 'Google'],
+  );
+  enabled.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'despensalista-dev-google-mfa',
+    AttributeDefinitions: [{ AttributeName: 'pk', AttributeType: 'S' }],
+    KeySchema: [{ AttributeName: 'pk', KeyType: 'HASH' }],
+    BillingMode: 'PAY_PER_REQUEST',
+    TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
+  });
+  const [tableId] = Object.keys(enabled.findResources('AWS::DynamoDB::Table', {
+    Properties: { TableName: 'despensalista-dev-google-mfa' },
+  }));
+  assert.ok(tableId);
+  enabled.hasResourceProperties('AWS::Lambda::Function', {
+    Environment: {
+      Variables: {
+        COGNITO_ALLOWED_PROVIDERS: 'COGNITO,Google',
+        GOOGLE_MFA_TABLE: { Ref: tableId },
+        GOOGLE_MFA_ORIGIN: 'https://despensalista.example',
+      },
+    },
+  });
+  const tableArn = { 'Fn::GetAtt': [tableId, 'Arn'] };
+  const grants = Object.values(enabled.findResources('AWS::IAM::Policy'))
+    .flatMap((resource) => resource.Properties.PolicyDocument.Statement)
+    .filter((statement) => JSON.stringify(statement.Resource) === JSON.stringify(tableArn));
+  assert.deepEqual(grants, [{
+    Action: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem'],
+    Effect: 'Allow',
+    Resource: tableArn,
+  }]);
+});
+
+test('Google MFA refuses a non-dev stage or a missing Google provider', () => {
+  for (const stage of ['tst', 'prod'] as const) {
+    assert.doesNotMatch(JSON.stringify(synthesizeTemplate(stage).toJSON()), /GOOGLE_MFA_|GoogleMfaTable/);
+    assert.throws(
+      () => synthesizeTemplate(stage, { enableGoogleMfa: 'true' }, ['COGNITO', 'Google']),
+      /only in dev/,
+    );
+  }
+  assert.throws(
+    () => synthesizeTemplate('dev', { enableGoogleMfa: 'true' }),
+    /requires Google/,
+  );
+});
 
 test('production Lambda does not trust X-Forwarded-For for rate-limit identity', () => {
   const functions = productionTemplate.findResources(

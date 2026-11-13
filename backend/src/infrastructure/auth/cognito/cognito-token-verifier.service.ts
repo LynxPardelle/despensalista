@@ -69,6 +69,7 @@ export class CognitoTokenVerifierService implements CognitoTokenVerifier {
       name: this.optionalString(payload.name),
       nonce: this.optionalString(payload.nonce),
       authTime: this.optionalNumber(payload.auth_time),
+      originJti: this.optionalString(payload.origin_jti),
     };
   }
 
