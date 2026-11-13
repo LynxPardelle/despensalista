@@ -1,6 +1,7 @@
 import { ForbiddenException } from '@nestjs/common';
 
-export const GOOGLE_MFA_COOKIE = '__Host-despensalista-google-mfa';
+export const LEGACY_GOOGLE_MFA_COOKIE = '__Host-despensalista-google-mfa';
+export const GOOGLE_MFA_COOKIE = '__Host-despensalista-google-mfa-v2';
 export const GOOGLE_MFA_COOKIE_OPTIONS = {
   httpOnly: true,
   secure: true,

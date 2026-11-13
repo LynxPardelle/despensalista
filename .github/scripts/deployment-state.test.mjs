@@ -960,6 +960,38 @@ test('automatic non-production rollback refuses to cross a data contract', async
   assert.equal(calls.some(args => args.includes('update-alias') || args[0] === 's3'), false);
 });
 
+test('dev rollback cannot reenable Google with legacy WebAuthn proofs', async () => {
+  const { restoreDeployment } = await load();
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-rollback-'));
+  await writeFile(path.join(directory, 'state.json'), JSON.stringify({
+    stage: 'dev',
+    functionName: 'despensalista-dev-backend-api',
+    alias: 'live',
+    version: '8',
+    backendDataContractVersion: 1,
+    bucket: 'despensalista-dev-web',
+    distribution: 'E123',
+  }));
+  const aws = args => {
+    if (args[0] === 'cloudformation') {
+      const response = backendStack('9', 'a'.repeat(12), 1);
+      response.Stacks[0].Outputs = response.Stacks[0].Outputs.map(output => ({
+        ...output,
+        OutputValue: output.OutputValue.replaceAll('prod', 'dev'),
+      }));
+      response.Stacks[0].Outputs.push({ OutputKey: 'GoogleMfaProofVersion', OutputValue: '2' });
+      return response;
+    }
+    if (args.includes('get-function-configuration')) {
+      assert.equal(args[args.indexOf('--qualifier') + 1], '8');
+      return { GOOGLE_MFA_TABLE: 'despensalista-dev-google-mfa', COGNITO_ALLOWED_PROVIDERS: 'COGNITO,Google' };
+    }
+    assert.fail(`unexpected rollback mutation: ${args.join(' ')}`);
+  };
+
+  await assert.rejects(restoreDeployment({ stage: 'dev', directory, aws }), /legacy Google WebAuthn/i);
+});
+
 test('non-production cutover drains writers and restores their exact concurrency', async () => {
   const { drainCapturedWriters, releaseCapturedWriters } = await load();
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-rollback-'));

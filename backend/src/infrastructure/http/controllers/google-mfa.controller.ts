@@ -82,6 +82,46 @@ export class GoogleMfaController {
     );
   }
 
+  @Post('recovery/code')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async issueRecoveryCode(@Req() request: FastifyRequest) {
+    return this.googleMfa.issueRecoveryCode(
+      await this.getClaims(request),
+      request,
+    );
+  }
+
+  @Post('recovery/options')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async recoveryOptions(
+    @Req() request: FastifyRequest,
+    @Body('code') code: unknown,
+  ) {
+    return this.googleMfa.recoveryOptions(
+      await this.getClaims(request),
+      request,
+      code,
+    );
+  }
+
+  @Post('recovery/verify')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async recover(
+    @Req() request: FastifyRequest,
+    @Res({ passthrough: true }) reply: FastifyReply,
+    @Body() assertion: RegistrationResponseJSON,
+  ) {
+    return this.googleMfa.recover(
+      await this.getClaims(request),
+      request,
+      reply,
+      assertion,
+    );
+  }
+
   private async getClaims(request: FastifyRequest) {
     if (!this.googleMfa.enabled) {
       throw new NotFoundException('Google WebAuthn is unavailable');

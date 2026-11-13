@@ -4,6 +4,7 @@ import { ReactiveFormsModule } from '@angular/forms';
 import { RouterTestingModule } from '@angular/router/testing';
 import { ActivatedRoute, convertToParamMap } from '@angular/router';
 import { of, throwError } from 'rxjs';
+import { AuthApiService } from '../../core/services/auth-api.service';
 import { AuthFacade } from '../../core/services/auth.facade';
 import { PantryService } from '../../core/services/pantry.service';
 import { ProfileService } from '../../core/services/profile.service';
@@ -13,6 +14,7 @@ describe('ProfilePageComponent', () => {
   let fixture: ComponentFixture<ProfilePageComponent>;
   let component: ProfilePageComponent;
   let authFacade: jasmine.SpyObj<AuthFacade>;
+  let authApi: jasmine.SpyObj<AuthApiService>;
   let profileService: jasmine.SpyObj<ProfileService>;
   let pantryService: jasmine.SpyObj<PantryService>;
 
@@ -25,6 +27,8 @@ describe('ProfilePageComponent', () => {
     );
 
     authFacade = jasmine.createSpyObj<AuthFacade>('AuthFacade', ['logout']);
+    authApi = jasmine.createSpyObj<AuthApiService>('AuthApiService', ['getGoogleMfaStatus']);
+    authApi.getGoogleMfaStatus.and.returnValue(throwError(() => new HttpErrorResponse({ status: 404 })));
     profileService = jasmine.createSpyObj<ProfileService>('ProfileService', [
       'getProfile',
       'updatePreferences',
@@ -244,6 +248,7 @@ describe('ProfilePageComponent', () => {
           provide: AuthFacade,
           useValue: authFacade,
         },
+        { provide: AuthApiService, useValue: authApi },
         {
           provide: ProfileService,
           useValue: profileService,
@@ -271,6 +276,19 @@ describe('ProfilePageComponent', () => {
       shoppingPlanLeadDays: 5,
       showGuidanceTips: false,
     });
+  });
+
+  it('shows key management only when the API confirms a verified Google session', () => {
+    const link = () => fixture.nativeElement.querySelector('a[href="/mfa-google?manage=1"]');
+    expect(link()).toBeNull();
+
+    authApi.getGoogleMfaStatus.and.returnValue(of({
+      registered: true, verified: true, keyCount: 1, recoveryConfigured: false, recentVerification: false,
+    }));
+    component.ngOnInit();
+    fixture.detectChanges();
+
+    expect(link()?.textContent).toContain('Administrar llaves de acceso');
   });
 
   it('accepts a fresh invite before a household read can create a personal household', () => {

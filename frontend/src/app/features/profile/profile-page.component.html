@@ -435,6 +435,12 @@
       <aside class="panel export-panel danger-panel">
         <p class="panel-kicker">Seguridad</p>
         <h2>Sesiones y step-up</h2>
+        @if (canManageGoogleKeys()) {
+          <p>Agrega una llave de respaldo y configura un código de recuperación para el acceso con Google.</p>
+          <a class="secondary-button" routerLink="/mfa-google" [queryParams]="{ manage: '1' }">
+            Administrar llaves de acceso
+          </a>
+        }
         @if (profile; as securityProfile) {
           <p>{{ stepUpLabel(securityProfile) }}</p>
           @if (securityProfile.knownDevices.length > 0) {

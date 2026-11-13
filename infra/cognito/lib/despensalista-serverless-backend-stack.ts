@@ -160,6 +160,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         ...(googleMfaTable && googleMfaOrigin && {
           GOOGLE_MFA_TABLE: googleMfaTable.tableName,
           GOOGLE_MFA_ORIGIN: googleMfaOrigin,
+          GOOGLE_MFA_PROOF_VERSION: '2',
         }),
         HELMET_ENABLED: 'true',
         RATE_LIMIT_ENABLED: 'true',
@@ -453,6 +454,9 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'BackendDataContractVersion', {
       value: BACKEND_DATA_CONTRACT_VERSION,
     });
+    if (googleMfaTable) {
+      new cdk.CfnOutput(this, 'GoogleMfaProofVersion', { value: '2' });
+    }
     new cdk.CfnOutput(this, 'DynamoDbUsersTable', {
       value: tables.users.tableName,
     });

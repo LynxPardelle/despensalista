@@ -3,6 +3,9 @@ export type SessionStatus = 'unknown' | 'authenticated' | 'anonymous' | 'google-
 export interface GoogleMfaStatus {
   registered: boolean;
   verified: boolean;
+  keyCount: number;
+  recoveryConfigured: boolean;
+  recentVerification: boolean;
 }
 
 export interface AuthUser {
