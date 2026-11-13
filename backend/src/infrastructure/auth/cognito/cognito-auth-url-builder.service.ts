@@ -31,12 +31,13 @@ export class CognitoAuthUrlBuilderService implements CognitoAuthUrlBuilder {
     return { url: url.toString() };
   }
 
-  buildLogoutUrl(): string {
+  buildLogoutUrl(logoutUri?: string): string {
     const url = new URL('/logout', this.getCognitoDomain());
     url.searchParams.set('client_id', this.getClientId());
     url.searchParams.set(
       'logout_uri',
-      this.configService.get<string>('COGNITO_LOGOUT_REDIRECT_URI') ??
+      logoutUri ??
+        this.configService.get<string>('COGNITO_LOGOUT_REDIRECT_URI') ??
         'http://localhost:48673/login',
     );
 

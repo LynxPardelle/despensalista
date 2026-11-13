@@ -76,6 +76,10 @@ export const authReducer = createReducer(
     sessionStatus: 'anonymous' as const,
     authError: error,
   })),
+  on(AuthActions.googleMfaRequired, () => ({
+    ...initialAuthState,
+    sessionStatus: 'google-mfa-required' as const,
+  })),
   on(AuthActions.logoutFailure, (state, { error }) => ({
     ...state,
     authError: error,

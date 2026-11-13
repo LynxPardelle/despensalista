@@ -1,4 +1,12 @@
-export type SessionStatus = 'unknown' | 'authenticated' | 'anonymous';
+export type SessionStatus = 'unknown' | 'authenticated' | 'anonymous' | 'google-mfa-required';
+
+export interface GoogleMfaStatus {
+  registered: boolean;
+  verified: boolean;
+  keyCount: number;
+  recoveryConfigured: boolean;
+  recentVerification: boolean;
+}
 
 export interface AuthUser {
   id: string;

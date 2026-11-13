@@ -148,6 +148,12 @@ import {
 import { AuthCookieService } from './infrastructure/http/auth/auth-cookie.service';
 import { AuthStepUpService } from './infrastructure/http/auth/auth-step-up.service';
 import { AccessTokenGuard } from './infrastructure/http/auth/access-token.guard';
+import { StripeBillingConfig } from './infrastructure/billing/stripe-billing-config';
+import { StripeBillingService } from './infrastructure/billing/stripe-billing.service';
+import { StripeBillingStore } from './infrastructure/billing/stripe-billing.store';
+import { StripeBillingController } from './infrastructure/http/controllers/stripe-billing.controller';
+import { GoogleMfaService } from './infrastructure/http/auth/google-mfa.service';
+import { GoogleMfaController } from './infrastructure/http/controllers/google-mfa.controller';
 import { AuthController } from './infrastructure/http/controllers/auth.controller';
 import { HouseholdController } from './infrastructure/http/controllers/household.controller';
 import { InventoryLotsController } from './infrastructure/http/controllers/inventory-lots.controller';
@@ -424,10 +430,29 @@ const wasteEventRepositoryProvider = useDynamoDb
             .allow('')
             .optional(),
         }),
+        COGNITO_SECONDARY_WEB_ORIGIN: Joi.string()
+          .uri({ scheme: ['https'] })
+          .custom((value: string, helpers) => {
+            const url = new URL(value);
+            return value === url.origin && !url.hostname.includes('*')
+              ? value
+              : helpers.error('string.uri');
+          })
+          .optional(),
         COGNITO_SCOPES: Joi.string().default('openid email profile'),
         COGNITO_ALLOWED_PROVIDERS: Joi.string().default(
           'Google,Facebook,COGNITO',
         ),
+        GOOGLE_MFA_TABLE: Joi.string().optional(),
+        GOOGLE_MFA_ORIGIN: Joi.string()
+          .uri({ scheme: ['https'] })
+          .optional(),
+        GOOGLE_MFA_PROOF_VERSION: Joi.string().valid('2').optional(),
+        STRIPE_BILLING_ORIGIN: Joi.string()
+          .uri({ scheme: ['https'] })
+          .optional(),
+        STRIPE_BILLING_TABLE: Joi.string().optional(),
+        STRIPE_BILLING_CONFIG_PARAMETER: Joi.string().optional(),
         COGNITO_AUTH_TRANSACTION_TTL_SECONDS: Joi.number()
           .integer()
           .positive()
@@ -450,6 +475,8 @@ const wasteEventRepositoryProvider = useDynamoDb
   controllers: [
     AppController,
     AuthController,
+    GoogleMfaController,
+    StripeBillingController,
     HouseholdController,
     ProductsController,
     ProductTypesController,
@@ -465,6 +492,10 @@ const wasteEventRepositoryProvider = useDynamoDb
     AuthCookieService,
     AuthStepUpService,
     AccessTokenGuard,
+    GoogleMfaService,
+    StripeBillingConfig,
+    StripeBillingService,
+    StripeBillingStore,
     CognitoAuthTransactionService,
     CognitoProfileSyncService,
     CognitoAuthUrlBuilderService,

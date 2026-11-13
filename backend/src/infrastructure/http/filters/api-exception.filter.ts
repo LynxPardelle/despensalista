@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { getRequestId } from '../request-id';
+import { GoogleMfaRequiredException } from '../auth/google-mfa.constants';
 import {
   IdempotencyPayloadConflictError,
   PantryMutationConflictError,
@@ -20,6 +21,7 @@ interface ApiErrorBody {
   path: string;
   requestId?: string;
   timestamp: string;
+  code?: string;
 }
 
 @Catch()
@@ -43,6 +45,9 @@ export class ApiExceptionFilter implements ExceptionFilter {
       path,
       requestId,
       timestamp: new Date().toISOString(),
+      ...(exception instanceof GoogleMfaRequiredException
+        ? { code: exception.code }
+        : {}),
     };
 
     if (statusCode >= 500) {

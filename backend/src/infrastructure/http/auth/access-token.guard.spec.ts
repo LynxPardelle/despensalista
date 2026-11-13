@@ -1,4 +1,5 @@
 import { ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { FastifyRequest } from 'fastify';
 import { CognitoTokenVerifier } from '../../../application/ports/cognito-auth.port';
 import { UserDao } from '../../../application/ports/daos';
@@ -6,8 +7,11 @@ import { User } from '../../../domain/entities/user.entity';
 import { UserAccountStatus } from '../../../domain/enums';
 import { AccessTokenGuard } from './access-token.guard';
 import { AuthCookieService } from './auth-cookie.service';
+import { AuthenticatedUser } from './authenticated-user.interface';
+import { GoogleMfaService } from './google-mfa.service';
 
 describe('AccessTokenGuard', () => {
+  const disabledGoogleMfa = new GoogleMfaService(new ConfigService());
   const makeUserDao = (): jest.Mocked<UserDao> => ({
     save: jest.fn(),
     findById: jest.fn(),
@@ -67,6 +71,7 @@ describe('AccessTokenGuard', () => {
       tokenVerifier,
       userDao,
       authCookieService,
+      disabledGoogleMfa,
     );
 
     await expect(
@@ -96,6 +101,7 @@ describe('AccessTokenGuard', () => {
       tokenVerifier,
       userDao,
       authCookieService,
+      disabledGoogleMfa,
     );
 
     await expect(
@@ -127,6 +133,7 @@ describe('AccessTokenGuard', () => {
       tokenVerifier,
       userDao,
       authCookieService,
+      disabledGoogleMfa,
     );
 
     await expect(
@@ -134,6 +141,37 @@ describe('AccessTokenGuard', () => {
     ).rejects.toBeInstanceOf(UnauthorizedException);
     expect(userDao.findByAuthSubject.mock.calls).toHaveLength(0);
     expect(userDao.findById.mock.calls).toHaveLength(0);
+  });
+
+  it('requires the Google WebAuthn proof before exposing a user to protected routes', async () => {
+    const tokenVerifier = makeTokenVerifier();
+    const userDao = makeUserDao();
+    const authCookieService = makeAuthCookieService();
+    const claims = {
+      sub: 'test-subject',
+      cognitoUsername: 'Google_123',
+      originJti: 'test-session',
+    };
+    const request = {} as FastifyRequest & { authUser?: AuthenticatedUser };
+    authCookieService.getAccessTokenFromRequest.mockReturnValue('access-token');
+    tokenVerifier.verifyAccessToken.mockResolvedValue(claims);
+    userDao.findByAuthSubject.mockResolvedValue(makeActiveUser());
+    const required = new Error('Google WebAuthn proof required');
+    const googleMfa = {
+      assertVerified: jest.fn().mockRejectedValue(required),
+    };
+    const guard = new AccessTokenGuard(
+      tokenVerifier,
+      userDao,
+      authCookieService,
+      googleMfa as unknown as GoogleMfaService,
+    );
+
+    await expect(guard.canActivate(makeExecutionContext(request))).rejects.toBe(
+      required,
+    );
+    expect(googleMfa.assertVerified).toHaveBeenCalledWith(claims, request);
+    expect(request.authUser).toBeUndefined();
   });
 
   it('rejects an existing session as soon as account deletion is fenced', async () => {
@@ -149,6 +187,7 @@ describe('AccessTokenGuard', () => {
       tokenVerifier,
       userDao,
       authCookieService,
+      disabledGoogleMfa,
     );
 
     await expect(

@@ -31,6 +31,7 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { AccessTokenGuard } from '../auth/access-token.guard';
 import { AuthenticatedUser } from '../auth/authenticated-user.interface';
 import { AuthCookieService } from '../auth/auth-cookie.service';
+import { GoogleMfaService } from '../auth/google-mfa.service';
 import { AuthUserResponseDto } from '../dtos/auth-user-response.dto';
 import { AuthUserMapper } from '../mappers/auth-user.mapper';
 
@@ -49,6 +50,7 @@ export class AuthController {
     private readonly tokenVerifier: CognitoTokenVerifier,
     private readonly authCookieService: AuthCookieService,
     private readonly configService: ConfigService,
+    private readonly googleMfa: GoogleMfaService,
   ) {}
 
   @Get('cognito/login')
@@ -79,7 +81,7 @@ export class AuthController {
       nonce: transaction.nonce,
       codeChallenge: transaction.codeChallenge,
       codeChallengeMethod: transaction.codeChallengeMethod,
-      redirectUri: this.getRedirectUri(),
+      redirectUri: this.getRedirectUri(reply.request),
       scopes: this.getScopes(),
       provider:
         normalizedProvider === 'COGNITO' ? undefined : normalizedProvider,
@@ -127,12 +129,34 @@ export class AuthController {
     const tokenSet = await this.tokenClient.exchangeCode({
       code,
       codeVerifier: transaction.codeVerifier,
-      redirectUri: this.getRedirectUri(),
+      redirectUri: this.getRedirectUri(request),
     });
     const idClaims = await this.tokenVerifier.verifyIdToken(tokenSet.idToken);
 
     if (idClaims.nonce !== transaction.nonce) {
       throw new UnauthorizedException('Invalid Cognito auth nonce');
+    }
+
+    let redirectTo = transaction.redirectTo;
+    if (this.googleMfa.enabled) {
+      const accessClaims = await this.tokenVerifier.verifyAccessToken(
+        tokenSet.accessToken,
+      );
+      if (
+        accessClaims.sub !== idClaims.sub ||
+        accessClaims.cognitoUsername !== idClaims.cognitoUsername
+      ) {
+        throw new UnauthorizedException('Invalid Cognito login identity');
+      }
+      if (this.googleMfa.requiresProof(accessClaims)) {
+        if (!idClaims.emailVerified) {
+          throw new UnauthorizedException('Verified Google email is required');
+        }
+        const destination =
+          this.transactionService.normalizeRedirectTo(redirectTo);
+        redirectTo = `/mfa-google?redirectTo=${encodeURIComponent(destination)}`;
+      }
+      this.authCookieService.clearGoogleMfaCookie(reply);
     }
 
     await this.profileSyncService.syncFromClaims(idClaims);
@@ -142,7 +166,7 @@ export class AuthController {
       xsrfToken: this.authCookieService.createXsrfToken(),
     });
     this.authCookieService.clearCognitoAuthTransactionCookies(reply);
-    reply.redirect(transaction.redirectTo, 302);
+    reply.redirect(redirectTo, 302);
   }
 
   @Get('me')
@@ -184,6 +208,8 @@ export class AuthController {
       xsrfToken: this.authCookieService.createXsrfToken(),
     });
 
+    await this.googleMfa.assertVerified(claims, request);
+
     return AuthUserMapper.toResponse(
       await this.getCurrentUserUseCase.executeByAuthSubject(claims.sub),
     );
@@ -200,8 +226,9 @@ export class AuthController {
     this.authCookieService.ensureXsrfForRequest(request);
     await this.revokeRefreshTokenIfPresent(request);
     this.authCookieService.clearSessionCookies(reply);
+    await this.googleMfa.revokeProof(request);
 
-    return { logoutUrl: this.authUrlBuilder.buildLogoutUrl() };
+    return { logoutUrl: this.getLogoutUrl(request) };
   }
 
   @Post('logout/browser')
@@ -214,7 +241,8 @@ export class AuthController {
     this.authCookieService.ensureXsrfForRequest(request);
     await this.revokeRefreshTokenIfPresent(request);
     this.authCookieService.clearSessionCookies(reply);
-    reply.redirect(this.authUrlBuilder.buildLogoutUrl(), 302);
+    await this.googleMfa.revokeProof(request);
+    reply.redirect(this.getLogoutUrl(request), 302);
   }
 
   private async revokeRefreshTokenIfPresent(
@@ -242,11 +270,41 @@ export class AuthController {
     }
   }
 
-  private getRedirectUri(): string {
+  private getRedirectUri(request: FastifyRequest): string {
+    const secondaryOrigin = this.getSecondaryOrigin(request);
+    if (secondaryOrigin) {
+      return `${secondaryOrigin}/api/auth/cognito/callback`;
+    }
+
     return (
       this.configService.get<string>('COGNITO_REDIRECT_URI') ??
       'http://localhost:48673/api/auth/cognito/callback'
     );
+  }
+
+  private getLogoutUrl(request: FastifyRequest): string {
+    const secondaryOrigin = this.getSecondaryOrigin(request);
+    return this.authUrlBuilder.buildLogoutUrl(
+      secondaryOrigin && `${secondaryOrigin}/login`,
+    );
+  }
+
+  private getSecondaryOrigin(request: FastifyRequest): string | undefined {
+    const secondaryOrigin = this.configService.get<string>(
+      'COGNITO_SECONDARY_WEB_ORIGIN',
+    );
+    const viewerHost = request.headers?.['x-despensalista-viewer-host'];
+    // CloudFront overwrites this header and the origin guard verifies its request.
+    if (
+      typeof viewerHost === 'string' &&
+      `https://${viewerHost}` === secondaryOrigin &&
+      this.configService.get<string>('ORIGIN_VERIFY_HEADER_NAME') &&
+      this.configService.get<string>('ORIGIN_VERIFY_HEADER_VALUE')
+    ) {
+      return secondaryOrigin;
+    }
+
+    return undefined;
   }
 
   private getScopes(): string[] {

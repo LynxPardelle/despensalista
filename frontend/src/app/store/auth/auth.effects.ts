@@ -10,7 +10,8 @@ import {
   takeUntil,
   tap,
 } from 'rxjs/operators';
-import { AuthApiService } from '../../core/services/auth-api.service';
+import { googleMfaReturnUrl, googleMfaRoute } from '../../core/guards/google-mfa-route';
+import { AuthApiService, isGoogleMfaRequired } from '../../core/services/auth-api.service';
 import * as AuthActions from './auth.actions';
 import * as PantryActions from '../pantry/pantry.actions';
 import * as ProductActions from '../product/product.actions';
@@ -33,8 +34,9 @@ export class AuthEffects {
               : AuthActions.bootstrapSessionAnonymous(),
           ),
           catchError((error) =>
-            of(
-              AuthActions.bootstrapSessionFailure({
+            of(isGoogleMfaRequired(error)
+              ? AuthActions.googleMfaRequired({ redirectCurrentRoute: false })
+              : AuthActions.bootstrapSessionFailure({
                 error: this.authApiService.getErrorMessage(error),
               }),
             ),
@@ -64,6 +66,10 @@ export class AuthEffects {
         this.authApiService.refreshSession().pipe(
           map((user) => AuthActions.refreshSessionSuccess({ user })),
           catchError((error) => {
+            if (isGoogleMfaRequired(error)) {
+              return of(AuthActions.googleMfaRequired({ redirectCurrentRoute: true }));
+            }
+
             if (this.authApiService.isUnauthorized(error)) {
               return of(
                 AuthActions.sessionExpired({
@@ -117,6 +123,7 @@ export class AuthEffects {
                 AuthActions.logout,
                 AuthActions.logoutSuccess,
                 AuthActions.sessionExpired,
+                AuthActions.googleMfaRequired,
                 AuthActions.bootstrapSessionAnonymous,
               ),
             ),
@@ -132,6 +139,7 @@ export class AuthEffects {
         AuthActions.logout,
         AuthActions.logoutSuccess,
         AuthActions.sessionExpired,
+        AuthActions.googleMfaRequired,
         AuthActions.bootstrapSessionAnonymous,
       ),
       map(() => PantryActions.resetPantry()),
@@ -144,6 +152,7 @@ export class AuthEffects {
         AuthActions.logout,
         AuthActions.logoutSuccess,
         AuthActions.sessionExpired,
+        AuthActions.googleMfaRequired,
         AuthActions.bootstrapSessionAnonymous,
       ),
       map(() => ProductActions.resetProducts()),
@@ -158,6 +167,18 @@ export class AuthEffects {
           void this.router.navigateByUrl('/login');
         }),
       ),
+    { dispatch: false },
+  );
+
+  readonly navigateWhenGoogleMfaRequired$ = createEffect(
+    () => this.actions$.pipe(
+      ofType(AuthActions.googleMfaRequired),
+      tap(({ redirectCurrentRoute }) => {
+        if (redirectCurrentRoute && googleMfaReturnUrl(this.router.url)) {
+          void this.router.navigateByUrl(googleMfaRoute(this.router, this.router.url), { replaceUrl: true });
+        }
+      }),
+    ),
     { dispatch: false },
   );
 

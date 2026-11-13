@@ -55,7 +55,7 @@ if (includeServerlessBackend) {
       synthesizer: stageSynthesizer(projectName, stage, bootstrap),
       allowedProviders: cognitoStack.allowedProviders,
       cognitoDomain: cognitoStack.userPoolDomainUrl,
-      cognitoUserPoolClientId: cognitoStack.userPoolClientId,
+      cognitoUserPoolClientId: cognitoStack.googleMfaUserPoolClientId ?? cognitoStack.userPoolClientId,
       cognitoUserPoolId: cognitoStack.userPoolId,
     },
   );

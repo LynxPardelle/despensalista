@@ -22,6 +22,39 @@ export function deliveryInventory(stage: string): DeliveryInventory {
   return inventory[stage] ?? {};
 }
 
+export function googleMfaEnabled(stack: cdk.Stack, stage: string): boolean {
+  const enabled = ['1', 'true', 'yes', 'y'].includes(
+    String(stack.node.tryGetContext('enableGoogleMfa')).trim().toLowerCase(),
+  );
+  if (enabled && stage !== 'dev') {
+    throw new Error('Google MFA may be enabled only in dev.');
+  }
+  return enabled;
+}
+
+export function requireGoogleMfaOrigin(value: string | undefined): string {
+  const url = value ? URL.parse(value) : null;
+  if (!url || url.protocol !== 'https:' || value !== url.origin) {
+    throw new Error('Google MFA requires an HTTPS frontend origin without a path.');
+  }
+  return url.origin;
+}
+
+export function stripeBillingParameter(stack: cdk.Stack, project: string, stage: string) {
+  const enabled = String(stack.node.tryGetContext('enableStripeBilling')).trim().toLowerCase() === 'true';
+  if (!enabled) {
+    return undefined;
+  }
+  if (stage !== 'dev') {
+    throw new Error('Sandbox Stripe Billing may be enabled only in dev.');
+  }
+  const resourceName = `${project}/${stage}/billing/stripe`;
+  return {
+    name: `/${resourceName}`,
+    arn: stack.formatArn({ service: 'ssm', resource: 'parameter', resourceName }),
+  };
+}
+
 export function stageSynthesizer(project: string, stage: string, administrativeBootstrap = false): cdk.DefaultStackSynthesizer {
   return new cdk.DefaultStackSynthesizer({
     fileAssetsBucketName: `${project}-${stage}-cdk-assets-\${AWS::AccountId}-\${AWS::Region}`,
@@ -47,6 +80,7 @@ export function applyRuntimeBoundary(stack: cdk.Stack, project: string, stage: s
 export function createStageDeliveryControls(stack: cdk.Stack, project: string, stage: string): void {
   const prefix = `${project}-${stage}`;
   const inventory = deliveryInventory(stage);
+  const stripeParameter = stripeBillingParameter(stack, project, stage);
   const arn = (service: string, resource: string, resourceName: string, region = stack.region) =>
     stack.formatArn({ service, region, resource, resourceName });
   const roleArn = (name: string) => arn('iam', 'role', name, '');
@@ -95,6 +129,9 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
     scoped(['sns:Publish'], [`arn:${stack.partition}:sns:${stack.region}:${stack.account}:${prefix}-*`]),
     scoped(['cloudfront:CreateInvalidation', 'cloudfront:GetInvalidation'], [arn('cloudfront', 'distribution', '*', '')], { StringEquals: { 'aws:ResourceTag/Project': project, 'aws:ResourceTag/Stage': stage } }),
   ];
+  if (stripeParameter) {
+    runtimeStatements.push(scoped(['ssm:GetParameter'], [stripeParameter.arn]));
+  }
   const boundary = new iam.ManagedPolicy(stack, 'RuntimePermissionsBoundary', {
     managedPolicyName: `${prefix}-runtime-boundary`, statements: runtimeStatements,
   });

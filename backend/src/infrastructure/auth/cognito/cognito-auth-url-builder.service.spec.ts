@@ -63,6 +63,18 @@ describe('CognitoAuthUrlBuilderService', () => {
     );
   });
 
+  it('accepts a logout URI selected for another configured frontend origin', () => {
+    const service = new CognitoAuthUrlBuilderService(makeConfigService());
+    const url = new URL(
+      service.buildLogoutUrl('https://despensalista.com/login'),
+    );
+
+    expect(url.pathname).toBe('/logout');
+    expect(url.searchParams.get('logout_uri')).toBe(
+      'https://despensalista.com/login',
+    );
+  });
+
   it('localizes email login without changing PKCE or state', () => {
     const service = new CognitoAuthUrlBuilderService(makeConfigService());
 
