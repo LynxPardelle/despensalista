@@ -7,12 +7,16 @@ import {
   ListUsersCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { CognitoUserAdmin } from '../../../application/ports/cognito-auth.port';
+import { GoogleMfaService } from '../../http/auth/google-mfa.service';
 
 @Injectable()
 export class CognitoUserAdminService implements CognitoUserAdmin {
   private readonly client: CognitoIdentityProviderClient;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly googleMfa: GoogleMfaService,
+  ) {
     this.client = new CognitoIdentityProviderClient({
       region: this.getRegion(),
     });
@@ -31,6 +35,7 @@ export class CognitoUserAdminService implements CognitoUserAdmin {
     let deletedCount = 0;
 
     for (const subjectId of this.normalizeSubjectIds(subjectIds)) {
+      await this.googleMfa.deleteCredential(subjectId);
       const username =
         knownUsernames[subjectId] ??
         (await this.findUsernameBySubjectId(userPoolId, subjectId));

@@ -1,0 +1,123 @@
+<main class="auth-page">
+  <section class="auth-card" aria-labelledby="google-mfa-title">
+    <div class="brand-block">
+      <p class="eyebrow">DespensaLista</p>
+      <h1 id="google-mfa-title">{{ managing() ? 'Llaves de acceso' : 'Verifica tu acceso' }}</h1>
+      <p class="lead">
+        {{ managing()
+          ? 'Administra las llaves que usas para entrar con Google y tu código de recuperación.'
+          : 'Usa una llave de acceso para completar el inicio de sesión con Google.' }}
+      </p>
+    </div>
+
+    <div class="auth-form">
+      @if (checking()) {
+        <p class="status-copy" role="status">Cargando verificación…</p>
+      }
+      @if (busy()) {
+        <p class="status-copy" role="status">Sigue las indicaciones del navegador para usar tu llave.</p>
+      }
+      @if (feedback(); as message) {
+        <p class="status-copy status-copy--success" role="status">{{ message }}</p>
+      }
+      @if (error(); as message) {
+        <p class="status-copy status-copy--error" role="alert">{{ message }}</p>
+      }
+      @if (authError$ | async; as message) {
+        <p class="status-copy status-copy--error" role="alert">{{ message }}</p>
+      }
+
+      @if (supported() && status(); as current) {
+        @if (managing()) {
+          <p class="status-copy">{{ current.keyCount }} de 2 llaves registradas</p>
+          <p class="status-copy">{{ current.recoveryConfigured ? 'Código de recuperación configurado.' : 'Código de recuperación pendiente.' }}</p>
+          @if (recoveryCode(); as code) {
+            <p id="google-mfa-recovery-help" class="status-copy" role="status">
+              Guarda este código fuera de línea, por ejemplo, en papel y en un lugar seguro. Solo se muestra aquí una vez.
+            </p>
+            <output #recoveryOutput id="google-mfa-recovery-code" aria-live="off" aria-describedby="google-mfa-recovery-help"><code>{{ code }}</code></output>
+            <button class="primary-button" type="button" (click)="clearRecoverySecrets()">Ya guardé el código</button>
+          } @else if (!current.recentVerification) {
+            <p class="status-copy">Confirma con una llave registrada para actualizar estas opciones.</p>
+            <button class="primary-button" type="button" [disabled]="busy() || checking()" (click)="authenticate()">
+              Confirmar con una llave
+            </button>
+          } @else {
+            @if (current.keyCount === 1) {
+              <p class="status-copy">Usa otro dispositivo o una llave física como respaldo.</p>
+              <button class="primary-button" type="button" [disabled]="busy() || checking()" (click)="register()">
+                Agregar una segunda llave
+              </button>
+            }
+            @if (!current.recoveryConfigured) {
+              <button class="secondary-button" type="button" [disabled]="busy() || checking()" (click)="generateRecoveryCode()">
+                Generar código de recuperación
+              </button>
+            } @else if (replacingCode()) {
+              <p class="status-copy">Al generar un código nuevo, el código anterior dejará de funcionar.</p>
+              <button class="primary-button" type="button" [disabled]="busy() || checking()" (click)="generateRecoveryCode()">
+                Generar código nuevo
+              </button>
+              <button class="secondary-button" type="button" [disabled]="busy()" (click)="replacingCode.set(false)">
+                Cancelar reemplazo
+              </button>
+            } @else {
+              <button class="secondary-button" type="button" [disabled]="busy()" (click)="replacingCode.set(true)">
+                Reemplazar código de recuperación
+              </button>
+            }
+          }
+        } @else if (!current.verified && current.recoveryConfigured && recoveryOpen()) {
+          <form class="auth-form" (submit)="recover($event, recoveryInput)">
+            <p class="status-copy" id="google-mfa-recover-help">
+              Al registrar una llave nueva, las llaves anteriores y este código dejarán de funcionar.
+            </p>
+            <label class="field">
+              <span>Código de recuperación</span>
+              <input #recoveryInput type="password" aria-describedby="google-mfa-recover-help" autocomplete="off"
+                autocapitalize="off" [spellcheck]="false" [disabled]="busy()" required />
+            </label>
+            <button class="primary-button" type="submit" [disabled]="busy() || checking()">
+              Registrar una llave nueva
+            </button>
+          </form>
+          <button class="secondary-button" type="button" [disabled]="busy()" (click)="recoveryOpen.set(false); error.set(null)">
+            Volver a la verificación con llave
+          </button>
+        } @else if (!current.verified && current.registered) {
+          <button class="primary-button" type="button" [disabled]="busy() || checking()" (click)="authenticate()">
+            Verificar llave de acceso
+          </button>
+          @if (current.recoveryConfigured) {
+            <button class="secondary-button" type="button" [disabled]="busy()" (click)="recoveryOpen.set(true); error.set(null)">
+              Recuperar acceso con un código
+            </button>
+          }
+        } @else if (!current.verified) {
+          <p class="status-copy">Registra una llave para usarla cada vez que entres con Google.</p>
+          <button class="primary-button" type="button" [disabled]="busy() || checking()" (click)="register()">
+            Registrar llave de acceso
+          </button>
+        }
+      }
+      @if (canRetryStatus()) {
+        <button class="primary-button" type="button" [disabled]="checking()" (click)="loadStatus()">
+          Reintentar
+        </button>
+      }
+      @if (!checking() && !status()?.verified) {
+        <button class="secondary-button" type="button" [disabled]="busy()" (click)="logout()">
+          {{ status() ? 'Cerrar sesión' : 'Volver a iniciar sesión' }}
+        </button>
+      }
+      @if (managing()) {
+        <button class="secondary-button" type="button" [disabled]="busy() || !!recoveryCode()" (click)="returnToProfile()">
+          Volver al perfil
+        </button>
+        <button class="secondary-button" type="button" [disabled]="busy() || !!recoveryCode()" (click)="logout()">
+          Cerrar sesión
+        </button>
+      }
+    </div>
+  </section>
+</main>

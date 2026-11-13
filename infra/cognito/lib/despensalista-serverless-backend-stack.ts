@@ -25,7 +25,8 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { applyRuntimeBoundary, deliveryInventory } from './stage-delivery';
+import { applyRuntimeBoundary, deliveryInventory, googleMfaEnabled, requireGoogleMfaOrigin, stripeBillingParameter } from './stage-delivery';
+import { PublicProductionDomain, publicProductionDomain } from './public-production-domain';
 
 interface DespensaListaServerlessBackendStackProps extends cdk.StackProps {
   allowedProviders: string[];
@@ -67,16 +68,49 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       'appDomainName',
       'despensalista.lynxpardelle.com',
     );
+    const publicDomain = publicProductionDomain(this, projectName, stage);
+    if (publicDomain && (domainName !== publicDomain.legacyHost ||
+        frontendBaseUrl !== `https://${publicDomain.legacyHost}`)) {
+      throw new Error('The original production frontend origin and CloudFront alias must be retained.');
+    }
     const hostedZoneId = this.readContext(
       'hostedZoneId',
       'Z05088763QG63CC5SE7PN',
     );
     const hostedZoneName = this.readContext('hostedZoneName', 'lynxpardelle.com');
+    const enableGoogleMfa = googleMfaEnabled(this, stage);
+    if (enableGoogleMfa && !props.allowedProviders.includes('Google')) {
+      throw new Error('Google MFA requires Google in the Cognito app client.');
+    }
+    const googleMfaOrigin = enableGoogleMfa ? requireGoogleMfaOrigin(frontendBaseUrl) : undefined;
+    if (googleMfaOrigin && (googleMfaOrigin !== `https://${domainName}` ||
+      this.readContext('productionFrontendBaseUrl', frontendBaseUrl) !== googleMfaOrigin)) {
+      throw new Error('Google MFA requires the same frontend origin for Cognito, WebAuthn and the app domain.');
+    }
+    const stripeParameter = stripeBillingParameter(this, projectName, stage);
+    const stripeBillingOrigin = 'https://dev.despensalista.lynxpardelle.com';
+    if (stripeParameter && (frontendBaseUrl !== stripeBillingOrigin || `https://${domainName}` !== stripeBillingOrigin)) {
+      throw new Error('Sandbox Stripe Billing requires the dev frontend origin.');
+    }
     const tables = this.createTables(projectName, stage);
     const logRetention = isProduction
       ? logs.RetentionDays.ONE_MONTH
       : logs.RetentionDays.ONE_WEEK;
     const resourceRemovalPolicy = this.resolveRemovalPolicy();
+    const googleMfaTable = googleMfaOrigin ? new dynamodb.Table(this, 'GoogleMfaTable', {
+      tableName: `${projectName}-${stage}-google-mfa`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expiresAt',
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: resourceRemovalPolicy,
+    }) : undefined;
+    const stripeBillingTable = stripeParameter ? new dynamodb.Table(this, 'StripeBillingTable', {
+      tableName: `${projectName}-${stage}-billing`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expiresAt',
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
+    }) : undefined;
     const originVerifyHeaderName = 'x-despensalista-origin-verify';
     const originSecretName = `${projectName}/${stage}/cloudfront-origin-verification`;
     const originVerifySecret = new secretsmanager.Secret(
@@ -131,7 +165,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         DYNAMODB_PRODUCTS_TABLE: tables.products.tableName,
         DYNAMODB_PRODUCT_TYPES_TABLE: tables.productTypes.tableName,
         DYNAMODB_INVENTORY_LOTS_TABLE: tables.inventoryLots.tableName,
-        CORS_ORIGIN: frontendBaseUrl,
+        CORS_ORIGIN: publicDomain ? `${frontendBaseUrl},${publicDomain.origin}` : frontendBaseUrl,
         COGNITO_ENABLED: 'true',
         COGNITO_ISSUER: `https://cognito-idp.${cdk.Aws.REGION}.${cdk.Aws.URL_SUFFIX}/${props.cognitoUserPoolId}`,
         COGNITO_DOMAIN: props.cognitoDomain,
@@ -141,6 +175,17 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         COGNITO_REDIRECT_URI: `${frontendBaseUrl}/api/auth/cognito/callback`,
         COGNITO_LOGOUT_REDIRECT_URI: `${frontendBaseUrl}/login`,
         COGNITO_ALLOWED_PROVIDERS: props.allowedProviders.join(','),
+        ...(publicDomain && { COGNITO_SECONDARY_WEB_ORIGIN: publicDomain.origin }),
+        ...(googleMfaTable && googleMfaOrigin && {
+          GOOGLE_MFA_TABLE: googleMfaTable.tableName,
+          GOOGLE_MFA_ORIGIN: googleMfaOrigin,
+          GOOGLE_MFA_PROOF_VERSION: '2',
+        }),
+        ...(stripeBillingTable && stripeParameter && {
+          STRIPE_BILLING_TABLE: stripeBillingTable.tableName,
+          STRIPE_BILLING_ORIGIN: stripeBillingOrigin,
+          STRIPE_BILLING_CONFIG_PARAMETER: stripeParameter.name,
+        }),
         HELMET_ENABLED: 'true',
         RATE_LIMIT_ENABLED: 'true',
         RATE_LIMIT_TRUST_PROXY: 'false',
@@ -152,6 +197,22 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     });
 
     Object.values(tables).forEach((table) => table.grantReadWriteData(apiFunction));
+    if (googleMfaTable) {
+      apiFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem'],
+        resources: [googleMfaTable.tableArn],
+      }));
+    }
+    if (stripeBillingTable && stripeParameter) {
+      apiFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+        resources: [stripeBillingTable.tableArn],
+      }));
+      apiFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['ssm:GetParameter'],
+        resources: [stripeParameter.arn],
+      }));
+    }
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
@@ -271,6 +332,9 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       domainName,
       validation: acm.CertificateValidation.fromDns(zone),
     });
+    const viewerCertificate = publicDomain
+      ? acm.Certificate.fromCertificateArn(this, 'PublicWebCertificate', publicDomain.certificateArn)
+      : certificate;
     const webBucket = new s3.Bucket(this, 'WebBucket', {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
@@ -297,6 +361,10 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
           originVerifyHeaderName,
         )
       : undefined;
+    const spaRewrite = {
+      eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+      function: this.createSpaRewriteFunction(projectName, stage, publicDomain),
+    };
     const distribution = new cloudfront.Distribution(this, 'WebDistribution', {
       comment: `${projectName}-${stage} serverless web`,
       defaultRootObject: 'index.html',
@@ -306,12 +374,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         responseHeadersPolicy,
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         compress: true,
-        functionAssociations: [
-          {
-            eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
-            function: this.createSpaRewriteFunction(projectName, stage),
-          },
-        ],
+        functionAssociations: [spaRewrite],
       },
       additionalBehaviors: {
         'api/*': {
@@ -327,12 +390,15 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
           originRequestPolicy:
             cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+          ...(publicDomain && { functionAssociations: [spaRewrite] }),
           responseHeadersPolicy,
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         },
       },
-      certificate,
-      domainNames: [domainName],
+      certificate: viewerCertificate,
+      domainNames: publicDomain
+        ? [domainName, publicDomain.host, publicDomain.wwwHost]
+        : [domainName],
       enableIpv6: true,
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
@@ -427,6 +493,9 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'BackendDataContractVersion', {
       value: BACKEND_DATA_CONTRACT_VERSION,
     });
+    if (googleMfaTable) {
+      new cdk.CfnOutput(this, 'GoogleMfaProofVersion', { value: '2' });
+    }
     new cdk.CfnOutput(this, 'DynamoDbUsersTable', {
       value: tables.users.tableName,
     });
@@ -596,13 +665,15 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
   private createSpaRewriteFunction(
     projectName: string,
     stage: string,
+    publicDomain?: PublicProductionDomain,
   ): cloudfront.Function {
     return new cloudfront.Function(this, 'SpaRewriteFunction', {
       functionName: `${projectName}-${stage}-spa-rewrite`,
+      ...(publicDomain && { runtime: cloudfront.FunctionRuntime.JS_2_0 }),
       code: cloudfront.FunctionCode.fromInline(`
 function handler(event) {
   var request = event.request;
-  var uri = request.uri;
+  var uri = request.uri;${publicDomain ? this.publicDomainViewerRouting(publicDomain) : ''}
 
   if (uri === '/healthz') {
     return {
@@ -630,6 +701,38 @@ function handler(event) {
 }
 `),
     });
+  }
+
+  private publicDomainViewerRouting(domain: PublicProductionDomain): string {
+    return `
+  var host = request.headers.host ? request.headers.host.value.toLowerCase() : '';
+  if (host === '${domain.wwwHost}') {
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      return {
+        statusCode: 405,
+        statusDescription: 'Method Not Allowed',
+        headers: {
+          'allow': { value: 'GET, HEAD' },
+          'cache-control': { value: 'no-store' }
+        }
+      };
+    }
+    var query = request.rawQueryString();
+    return {
+      statusCode: 302,
+      statusDescription: 'Found',
+      headers: {
+        'cache-control': { value: 'no-store' },
+        'location': { value: '${domain.origin}' + uri + (query === undefined ? '' : '?' + query) }
+      }
+    };
+  }
+  // Replace the entire entry, including viewer-supplied duplicate values.
+  delete request.headers['x-despensalista-viewer-host'];
+  if (host === '${domain.host}' || host === '${domain.legacyHost}') {
+    request.headers['x-despensalista-viewer-host'] = { value: host };
+  }
+`;
   }
 
   private createFlatRateWebAcl(

@@ -12,6 +12,7 @@ const {
   revocationKeys,
   jsonHeaders,
   activeEntityIds,
+  liveCognitoClientId,
 } = require('./deployed-api-smoke.cjs');
 
 test('JSON content type is sent only when the request has a body', () => {
@@ -72,6 +73,29 @@ test('only exact stage allowlist resolves production targets', () => {
   for (const value of ['', undefined, 'production', 'DEV', '../prod']) {
     assert.throws(() => resolveStage(value));
   }
+});
+
+test('dev smoke uses the Cognito client of the live alias after a rollback', () => {
+  const auth = { UserPoolClientId: 'native', GoogleMfaUserPoolClientId: 'mfa' };
+  const backend = {
+    ServerlessBackendFunctionName: 'despensalista-dev-backend-api',
+    ServerlessBackendAliasName: 'live',
+  };
+  const dev = resolveStage('dev');
+  for (const clientId of ['native', 'mfa']) {
+    assert.equal(liveCognitoClientId(dev, auth, backend, (...args) => {
+      assert.deepEqual(args, [
+        'lambda', 'get-function-configuration', '--function-name',
+        'despensalista-dev-backend-api', '--qualifier', 'live', '--query',
+        'Environment.Variables.COGNITO_CLIENT_ID',
+      ]);
+      return clientId;
+    }), clientId);
+  }
+  assert.throws(() => liveCognitoClientId(dev, auth, backend, () => 'unknown'), /Cognito client/);
+  const unexpectedAws = () => assert.fail('Unexpected Lambda read');
+  assert.equal(liveCognitoClientId(dev, { UserPoolClientId: 'native' }, backend, unexpectedAws), 'native');
+  assert.equal(liveCognitoClientId(resolveStage('prod'), auth, {}, unexpectedAws), 'native');
 });
 
 test('CLI cannot execute AWS without exact explicit --run arguments', () => {

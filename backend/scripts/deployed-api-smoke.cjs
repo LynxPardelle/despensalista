@@ -135,6 +135,25 @@ function stackOutputs(name) {
   );
 }
 
+function liveCognitoClientId(stage, auth, backend, readAws = awsJson) {
+  if (stage.stage !== 'dev' || !auth.GoogleMfaUserPoolClientId) {
+    return auth.UserPoolClientId;
+  }
+
+  assert.equal(backend.ServerlessBackendFunctionName, `${stage.prefix}-backend-api`);
+  assert.equal(backend.ServerlessBackendAliasName, 'live');
+  const clientId = readAws(
+    'lambda', 'get-function-configuration', '--function-name',
+    backend.ServerlessBackendFunctionName, '--qualifier', 'live', '--query',
+    'Environment.Variables.COGNITO_CLIENT_ID',
+  );
+  assert.ok(
+    clientId === auth.UserPoolClientId || clientId === auth.GoogleMfaUserPoolClientId,
+    'Live Lambda Cognito client must match a dev stack output',
+  );
+  return clientId;
+}
+
 async function signIn(srp, target, fixture, enroll) {
   // The supported Cognito library handles SRP. TOTP uses Node crypto, not custom SRP.
   const values = new Map();
@@ -269,7 +288,7 @@ async function run(stage) {
   assert.equal(backend.AppDomainName, selected.host);
   const target = {
     poolId: auth.UserPoolId,
-    clientId: auth.UserPoolClientId,
+    clientId: liveCognitoClientId(selected, auth, backend),
     base: `https://${selected.host}`,
     direct: backend.ServerlessBackendApiEndpoint,
     tables: [
@@ -1179,4 +1198,5 @@ module.exports = {
   revocationKeys,
   jsonHeaders,
   activeEntityIds,
+  liveCognitoClientId,
 };

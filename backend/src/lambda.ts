@@ -94,7 +94,10 @@ async function getApp(): Promise<NestFastifyApplication> {
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
     new FastifyAdapter(),
-    { logger: ['error', 'warn', 'log'] },
+    {
+      logger: ['error', 'warn', 'log'],
+      rawBody: Boolean(process.env.STRIPE_BILLING_CONFIG_PARAMETER),
+    },
   );
   const configService = app.get(ConfigService);
   await configureApp(app, configService);
@@ -157,15 +160,12 @@ function toHeaders(event: ApiGatewayHttpEvent): Record<string, string> {
   return headers;
 }
 
-function decodeBody(event: ApiGatewayHttpEvent): string | undefined {
+function decodeBody(event: ApiGatewayHttpEvent): Buffer | string | undefined {
   if (!event.body) {
     return undefined;
   }
 
-  // ponytail: text payload adapter; add binary handling when uploads move here.
-  return event.isBase64Encoded
-    ? Buffer.from(event.body, 'base64').toString('utf8')
-    : event.body;
+  return event.isBase64Encoded ? Buffer.from(event.body, 'base64') : event.body;
 }
 
 function toApiGatewayResponse(response: {

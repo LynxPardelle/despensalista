@@ -47,6 +47,7 @@ function stackDeploymentState(stage, stack) {
     deploymentVersion: outputs.ServerlessBackendVersion,
     deploymentReleaseId: outputs.DeploymentReleaseId,
     backendDataContractVersion: stackBackendDataContractVersion(stack),
+    googleMfaProofVersion: outputs.GoogleMfaProofVersion,
     bucket: outputs.WebBucketName,
     distribution: outputs.CloudFrontDistributionId,
   };
@@ -345,6 +346,15 @@ export async function restoreDeployment({
       );
     }
   }
+  // Before the first cutover opens traffic, no recovery can have changed the
+  // credential generation. Keep the existing automatic rollback in that window.
+  const firstMfaCutoverStillDrained = current.stage === 'dev' &&
+    current.googleMfaProofVersion === '2' && state.googleMfaProofVersion === undefined &&
+    state.writersDrained === true &&
+    aws(['lambda', 'get-function-concurrency', '--function-name', state.functionName]).ReservedConcurrentExecutions === 0;
+  if (!firstMfaCutoverStillDrained) {
+    assertGoogleMfaRollbackTarget(current, state.version, aws);
+  }
   await restore(state, path.join(directory, 'frontend'), aws, wait);
   if (stage !== 'prod') {
     await restoreDeploymentConcurrency(state, aws);
@@ -521,6 +531,7 @@ export async function restoreRelease({
     version.Version === recorded.version && version.CodeSha256 === hash,
   );
   if (!selected) throw new Error('Recorded Lambda version is unavailable or does not match the release');
+  assertGoogleMfaRollbackTarget(state, recorded.version, aws);
   const reservedConcurrency = normalizedReservedConcurrency(
     recorded.reservedConcurrency,
   );
@@ -631,6 +642,18 @@ function versionBackendDataContractVersion(functionName, version, aws) {
   return normalizeBackendDataContractVersion(
     configuration.Environment?.Variables?.BACKEND_DATA_CONTRACT_VERSION,
   );
+}
+
+function assertGoogleMfaRollbackTarget(state, targetVersion, aws) {
+  if (state.stage !== 'dev' || state.googleMfaProofVersion !== '2') return;
+  const target = aws([
+    'lambda', 'get-function-configuration', '--function-name', state.functionName,
+    '--qualifier', targetVersion, '--query',
+    'Environment.Variables.{GOOGLE_MFA_PROOF_VERSION:GOOGLE_MFA_PROOF_VERSION,GOOGLE_MFA_TABLE:GOOGLE_MFA_TABLE,COGNITO_ALLOWED_PROVIDERS:COGNITO_ALLOWED_PROVIDERS}',
+  ]);
+  if (target?.GOOGLE_MFA_PROOF_VERSION === '2') return;
+  if (!target?.GOOGLE_MFA_TABLE && target?.COGNITO_ALLOWED_PROVIDERS === 'COGNITO') return;
+  throw new Error('Rollback to legacy Google WebAuthn would bypass credential revocation; select a compatible release or fix forward');
 }
 
 function assertArtifactContractMatchesState(manifest, state) {

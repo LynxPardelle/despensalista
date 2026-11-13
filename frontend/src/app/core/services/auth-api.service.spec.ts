@@ -98,6 +98,31 @@ describe('AuthApiService', () => {
 
     expect(refreshedUser?.id).toBe('user-1');
   });
+
+  it('sends a credentialed XSRF-protected request with the raw assertion JSON', () => {
+    document.cookie = 'XSRF-TOKEN=assertion-token; path=/';
+    const assertion = { id: 'test-credential', response: { signature: 'test-signature' } };
+    service.verifyGoogleMfa('authentication', assertion).subscribe();
+
+    const request = httpMock.expectOne(`${environment.apiUrl}/auth/google-mfa/authentication/verify`);
+    expect(request.request.method).toBe('POST');
+    expect(request.request.withCredentials).toBeTrue();
+    expect(request.request.headers.get('x-xsrf-token')).toBe('assertion-token');
+    expect(request.request.body).toEqual(assertion);
+    request.flush(null, { status: 204, statusText: 'No Content' });
+  });
+
+  it('sends the recovery code in an XSRF-protected POST body', () => {
+    document.cookie = 'XSRF-TOKEN=recovery-token; path=/';
+    service.getGoogleMfaOptions('recovery', 'test-code').subscribe();
+
+    const request = httpMock.expectOne(`${environment.apiUrl}/auth/google-mfa/recovery/options`);
+    expect(request.request.method).toBe('POST');
+    expect(request.request.withCredentials).toBeTrue();
+    expect(request.request.headers.get('x-xsrf-token')).toBe('recovery-token');
+    expect(request.request.body).toEqual({ code: 'test-code' });
+    request.flush({ challenge: 'test-challenge' });
+  });
 });
 
 function makeApiUser(): AuthUser {

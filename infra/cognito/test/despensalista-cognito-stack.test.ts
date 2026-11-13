@@ -54,6 +54,22 @@ test('production Cognito client excludes every localhost callback and logout URL
   assert.ok(client.LogoutURLs.includes('https://despensalista.example/login'));
 });
 
+test('production custom domain extends the existing Cognito client URLs', () => {
+  const client = synthesizeUserPoolClient('prod', {
+    productionFrontendBaseUrl: 'https://despensalista.lynxpardelle.com',
+    enablePublicProductionDomain: 'true',
+    publicProductionCertificateArn: 'arn:aws:acm:us-east-1:123456789012:certificate/01234567-89ab-cdef-0123-456789abcdef',
+  });
+  assert.deepEqual(client.CallbackURLs, [
+    'https://despensalista.lynxpardelle.com/api/auth/cognito/callback',
+    'https://despensalista.com/api/auth/cognito/callback',
+  ]);
+  assert.deepEqual(client.LogoutURLs, [
+    'https://despensalista.lynxpardelle.com/login',
+    'https://despensalista.com/login',
+  ]);
+});
+
 test('production Cognito template omits the localhost callback output', () => {
   const app = new cdk.App({
     context: {
@@ -77,6 +93,36 @@ test('development Cognito client includes localhost callback and logout URLs', (
     ),
   );
   assert.ok(client.LogoutURLs.includes('http://localhost:48673/login'));
+});
+
+test('Google MFA uses a separate dev web client with its own login branding', () => {
+  const context = {
+    stage: 'dev',
+    productionFrontendBaseUrl: 'https://dev.despensalista.example',
+  };
+  const synth = (extraContext: Record<string, string>) => {
+    const app = new cdk.App({ context: { ...context, ...extraContext } });
+    return Template.fromStack(new DespensaListaCognitoStack(app, 'Cognito-dev'));
+  };
+  const baseline = synth({});
+  const enabled = synth({ enableGoogleMfa: 'true', externallyManagedSocialProviders: 'Google' });
+  const type = 'AWS::Cognito::UserPoolClient';
+  const clients = enabled.findResources(type);
+
+  enabled.resourceCountIs(type, 2);
+  assert.deepEqual(clients.WebUserPoolClient, baseline.findResources(type).WebUserPoolClient);
+  assert.deepEqual(enabled.toJSON().Outputs.UserPoolClientId, baseline.toJSON().Outputs.UserPoolClientId);
+  assert.deepEqual(enabled.toJSON().Outputs.GoogleMfaUserPoolClientId.Value, { Ref: 'GoogleMfaWebUserPoolClient' });
+  enabled.hasResourceProperties(type, {
+    ClientName: 'despensalista-dev-google-mfa-web',
+    SupportedIdentityProviders: ['COGNITO', 'Google'],
+    CallbackURLs: ['https://dev.despensalista.example/api/auth/cognito/callback'],
+    LogoutURLs: ['https://dev.despensalista.example/login'],
+  });
+  enabled.hasResourceProperties('AWS::Cognito::ManagedLoginBranding', {
+    ClientId: { Ref: 'GoogleMfaWebUserPoolClient' },
+    UseCognitoProvidedValues: true,
+  });
 });
 
 test('production requires software-token MFA and protects the user pool', () => {
@@ -364,6 +410,25 @@ test('runtime boundary permits CodeDeploy to inspect and move only stage aliases
   assert.match(JSON.stringify(statement.Resource), /function:despensalista-prod-\*/);
   assert.match(JSON.stringify(statement.Resource), /function:despensalista-prod-\*:\*/);
   assert.doesNotMatch(JSON.stringify(statement.Resource), /function:\*/);
+});
+
+test('the protected runtime boundary permits reading only the explicit dev Stripe configuration', () => {
+  function synthesizeBoundary(stage: string, enableStripeBilling = 'false') {
+    const app = new cdk.App({ context: { stage, enableStripeBilling } });
+    const template = Template.fromStack(new DespensaListaCognitoStack(app, `Billing-boundary-${stage}`));
+    return Object.values(template.findResources('AWS::IAM::ManagedPolicy'))
+      .find((resource) => resource.Properties.ManagedPolicyName === `despensalista-${stage}-runtime-boundary`)
+      ?.Properties.PolicyDocument.Statement;
+  }
+
+  for (const stage of ['dev', 'tst', 'prod']) {
+    assert.doesNotMatch(JSON.stringify(synthesizeBoundary(stage)), /ssm:GetParameter|billing\/stripe/);
+  }
+  const statements = synthesizeBoundary('dev', 'true').filter((statement: { Action: string }) => statement.Action === 'ssm:GetParameter');
+  assert.equal(statements.length, 1);
+  assert.equal(statements[0].Effect, 'Allow');
+  assert.match(JSON.stringify(statements[0].Resource), /:parameter\/despensalista\/dev\/billing\/stripe"/);
+  assert.doesNotMatch(JSON.stringify(statements[0].Resource), /\*/);
 });
 
 test('CloudFormation execution may read only the exact protected delivery roles', () => {

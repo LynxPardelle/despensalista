@@ -43,11 +43,12 @@ export interface CognitoVerifiedClaims {
   name?: string;
   nonce?: string;
   authTime?: number;
+  originJti?: string;
 }
 
 export interface CognitoAuthUrlBuilder {
   buildAuthorizeUrl(input: CognitoAuthorizeUrlInput): CognitoAuthorizeUrlOutput;
-  buildLogoutUrl(): string;
+  buildLogoutUrl(logoutUri?: string): string;
 }
 
 export interface CognitoTokenClient {

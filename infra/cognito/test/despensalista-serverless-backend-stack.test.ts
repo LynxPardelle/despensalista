@@ -1,10 +1,15 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import { runInNewContext } from 'node:vm';
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { DespensaListaServerlessBackendStack } from '../lib/despensalista-serverless-backend-stack';
 
-function synthesizeTemplate(stage: 'dev' | 'tst' | 'prod'): Template {
+function synthesizeTemplate(
+  stage: 'dev' | 'tst' | 'prod',
+  extraContext: Record<string, string> = {},
+  allowedProviders = ['COGNITO'],
+): Template {
   const app = new cdk.App({
     context: {
       stage,
@@ -16,10 +21,11 @@ function synthesizeTemplate(stage: 'dev' | 'tst' | 'prod'): Template {
       backendArtifactPath: __dirname,
       frontendArtifactPath: __dirname,
       releaseId: 'a'.repeat(12),
+      ...extraContext,
     },
   });
   const stack = new DespensaListaServerlessBackendStack(app, `Backend-${stage}`, {
-    allowedProviders: ['COGNITO'],
+    allowedProviders,
     cognitoDomain: 'https://auth.example',
     cognitoUserPoolClientId: 'client-id',
     cognitoUserPoolId: 'us-east-1_example',
@@ -29,6 +35,174 @@ function synthesizeTemplate(stage: 'dev' | 'tst' | 'prod'): Template {
 }
 
 const productionTemplate = synthesizeTemplate('prod');
+
+test('public production domain preserves the legacy site and stamps the trusted viewer host', () => {
+  const certificateArn = 'arn:aws:acm:us-east-1:123456789012:certificate/01234567-89ab-cdef-0123-456789abcdef';
+  const context = {
+    appDomainName: 'despensalista.lynxpardelle.com',
+    serverlessFrontendBaseUrl: 'https://despensalista.lynxpardelle.com',
+    enablePublicProductionDomain: 'true',
+    publicProductionCertificateArn: certificateArn,
+  };
+  const template = synthesizeTemplate('prod', context);
+  template.hasResourceProperties('AWS::CertificateManager::Certificate', {
+    DomainName: 'despensalista.lynxpardelle.com',
+  });
+  template.hasResourceProperties('AWS::CloudFront::Distribution', {
+    DistributionConfig: {
+      Aliases: ['despensalista.lynxpardelle.com', 'despensalista.com', 'www.despensalista.com'],
+      ViewerCertificate: { AcmCertificateArn: certificateArn },
+      CacheBehaviors: Match.arrayWith([Match.objectLike({
+        PathPattern: 'api/*',
+        FunctionAssociations: [{ EventType: 'viewer-request', FunctionARN: Match.anyValue() }],
+      })]),
+    },
+  });
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Environment: {
+      Variables: {
+        CORS_ORIGIN: 'https://despensalista.lynxpardelle.com,https://despensalista.com',
+        COGNITO_REDIRECT_URI: 'https://despensalista.lynxpardelle.com/api/auth/cognito/callback',
+        COGNITO_SECONDARY_WEB_ORIGIN: 'https://despensalista.com',
+      },
+    },
+  });
+  const [viewerFunction] = Object.values(template.findResources('AWS::CloudFront::Function'));
+  assert.equal(viewerFunction.Properties.FunctionConfig.Runtime, 'cloudfront-js-2.0');
+  const handler = runInNewContext(viewerFunction.Properties.FunctionCode + '\nhandler');
+  const rawQuery = 'redirectTo=%2Finventory%3Fitem%3D1&flag=first&flag=second';
+  const route = (host: string, method = 'GET', uri = '/api/auth/cognito/login') => handler({
+    request: {
+      method, uri,
+      rawQueryString: () => rawQuery,
+      headers: { host: { value: host }, 'x-despensalista-viewer-host': {
+        value: 'forged.example', multiValue: [{ value: 'forged.example' }],
+      } },
+    },
+  });
+  for (const host of ['despensalista.lynxpardelle.com', 'despensalista.com']) {
+    const response = route(host);
+    assert.equal(response.uri, '/api/auth/cognito/login');
+    assert.equal(response.headers['x-despensalista-viewer-host'].value, host);
+    assert.equal(response.headers['x-despensalista-viewer-host'].multiValue, undefined);
+  }
+  assert.equal(route('dj4i17emyf2p5.cloudfront.net').headers['x-despensalista-viewer-host'], undefined);
+  const wwwResponse = route('www.despensalista.com');
+  assert.equal(wwwResponse.statusCode, 302);
+  assert.equal(wwwResponse.headers['cache-control'].value, 'no-store');
+  assert.equal(wwwResponse.headers.location.value,
+    `https://despensalista.com/api/auth/cognito/login?${rawQuery}`);
+  assert.equal(route('www.despensalista.com', 'POST').statusCode, 405);
+  assert.throws(() => synthesizeTemplate('dev', context), /only be enabled/);
+});
+
+test('only the explicitly enabled dev backend provisions Google MFA storage', () => {
+  const disabled = synthesizeTemplate('dev');
+  assert.doesNotMatch(JSON.stringify(disabled.toJSON()), /GOOGLE_MFA_|GoogleMfaTable/);
+
+  const enabled = synthesizeTemplate(
+    'dev', { enableGoogleMfa: 'true' }, ['COGNITO', 'Google'],
+  );
+  enabled.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'despensalista-dev-google-mfa',
+    AttributeDefinitions: [{ AttributeName: 'pk', AttributeType: 'S' }],
+    KeySchema: [{ AttributeName: 'pk', KeyType: 'HASH' }],
+    BillingMode: 'PAY_PER_REQUEST',
+    TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
+  });
+  const [tableId] = Object.keys(enabled.findResources('AWS::DynamoDB::Table', {
+    Properties: { TableName: 'despensalista-dev-google-mfa' },
+  }));
+  assert.ok(tableId);
+  enabled.hasResourceProperties('AWS::Lambda::Function', {
+    Environment: {
+      Variables: {
+        COGNITO_ALLOWED_PROVIDERS: 'COGNITO,Google',
+        GOOGLE_MFA_TABLE: { Ref: tableId },
+        GOOGLE_MFA_ORIGIN: 'https://despensalista.example',
+        GOOGLE_MFA_PROOF_VERSION: '2',
+      },
+    },
+  });
+  enabled.hasOutput('GoogleMfaProofVersion', { Value: '2' });
+  const tableArn = { 'Fn::GetAtt': [tableId, 'Arn'] };
+  const grants = Object.values(enabled.findResources('AWS::IAM::Policy'))
+    .flatMap((resource) => resource.Properties.PolicyDocument.Statement)
+    .filter((statement) => JSON.stringify(statement.Resource) === JSON.stringify(tableArn));
+  assert.deepEqual(grants, [{
+    Action: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem'],
+    Effect: 'Allow',
+    Resource: tableArn,
+  }]);
+});
+
+test('Google MFA refuses a non-dev stage or a missing Google provider', () => {
+  for (const stage of ['tst', 'prod'] as const) {
+    assert.doesNotMatch(JSON.stringify(synthesizeTemplate(stage).toJSON()), /GOOGLE_MFA_|GoogleMfaTable/);
+    assert.throws(
+      () => synthesizeTemplate(stage, { enableGoogleMfa: 'true' }, ['COGNITO', 'Google']),
+      /only in dev/,
+    );
+  }
+  assert.throws(
+    () => synthesizeTemplate('dev', { enableGoogleMfa: 'true' }),
+    /requires Google/,
+  );
+});
+
+test('Stripe Billing provisions an isolated table and exact Lambda grants only when enabled in dev', () => {
+  const devOrigin = 'https://dev.despensalista.lynxpardelle.com';
+  for (const stage of ['dev', 'tst', 'prod'] as const) {
+    assert.doesNotMatch(JSON.stringify(synthesizeTemplate(stage).toJSON()), /STRIPE_BILLING_|StripeBillingTable|billing\/stripe/);
+  }
+  const enabled = synthesizeTemplate('dev', {
+    enableStripeBilling: 'true',
+    serverlessFrontendBaseUrl: devOrigin,
+    appDomainName: new URL(devOrigin).hostname,
+  });
+  const [tableId] = Object.keys(enabled.findResources('AWS::DynamoDB::Table', {
+    Properties: {
+      TableName: 'despensalista-dev-billing',
+      AttributeDefinitions: [{ AttributeName: 'pk', AttributeType: 'S' }],
+      KeySchema: [{ AttributeName: 'pk', KeyType: 'HASH' }],
+      BillingMode: 'PAY_PER_REQUEST',
+      TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
+    },
+  }));
+  assert.ok(tableId);
+  assert.equal(enabled.toJSON().Resources[tableId].DeletionPolicy, 'RetainExceptOnCreate');
+  enabled.hasResourceProperties('AWS::Lambda::Function', {
+    FunctionName: 'despensalista-dev-backend-api',
+    Environment: {
+      Variables: {
+        STRIPE_BILLING_TABLE: { Ref: tableId },
+        STRIPE_BILLING_ORIGIN: devOrigin,
+        STRIPE_BILLING_CONFIG_PARAMETER: '/despensalista/dev/billing/stripe',
+      },
+    },
+  });
+  const apiPolicies = Object.values(enabled.findResources('AWS::IAM::Policy'))
+    .filter((resource) => JSON.stringify(resource.Properties.Roles).includes('BackendFunctionServiceRole'))
+    .flatMap((resource) => resource.Properties.PolicyDocument.Statement);
+  const tableArn = { 'Fn::GetAtt': [tableId, 'Arn'] };
+  assert.deepEqual(apiPolicies.filter((statement) => JSON.stringify(statement.Resource) === JSON.stringify(tableArn)), [{
+    Action: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+    Effect: 'Allow',
+    Resource: tableArn,
+  }]);
+  const getParameter = apiPolicies.filter((statement) => statement.Action === 'ssm:GetParameter');
+  assert.equal(getParameter.length, 1);
+  assert.equal(getParameter[0].Effect, 'Allow');
+  assert.match(JSON.stringify(getParameter[0].Resource), /:parameter\/despensalista\/dev\/billing\/stripe"/);
+  assert.doesNotMatch(JSON.stringify(getParameter[0].Resource), /\*/);
+});
+
+test('Stripe Billing refuses protected stages and any other return origin', () => {
+  for (const stage of ['tst', 'prod'] as const) {
+    assert.throws(() => synthesizeTemplate(stage, { enableStripeBilling: 'true' }), /only in dev/);
+  }
+  assert.throws(() => synthesizeTemplate('dev', { enableStripeBilling: 'true' }), /requires the dev frontend origin/);
+});
 
 test('production Lambda does not trust X-Forwarded-For for rate-limit identity', () => {
   const functions = productionTemplate.findResources(

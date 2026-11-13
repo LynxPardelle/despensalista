@@ -13,6 +13,7 @@ import { AuthenticatedUser } from './authenticated-user.interface';
 import { AuthCookieService } from './auth-cookie.service';
 import { UserId } from '../../../domain/value-objects/user-id.vo';
 import { UserAccountStatus } from '../../../domain/enums';
+import { GoogleMfaService } from './google-mfa.service';
 
 @Injectable()
 export class AccessTokenGuard implements CanActivate {
@@ -22,6 +23,7 @@ export class AccessTokenGuard implements CanActivate {
     @Inject(USER_DAO)
     private readonly userDao: UserDao,
     private readonly authCookieService: AuthCookieService,
+    private readonly googleMfa: GoogleMfaService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -30,6 +32,14 @@ export class AccessTokenGuard implements CanActivate {
         authUser?: AuthenticatedUser;
       }
     >();
+    const { claims, authUser } = await this.authenticatePending(request);
+    await this.googleMfa.assertVerified(claims, request);
+    request.authUser = authUser;
+
+    return true;
+  }
+
+  async authenticatePending(request: FastifyRequest) {
     const accessToken =
       this.authCookieService.getAccessTokenFromRequest(request);
 
@@ -51,7 +61,7 @@ export class AccessTokenGuard implements CanActivate {
     }
 
     this.authCookieService.ensureXsrfForRequest(request);
-    request.authUser = {
+    const authUser: AuthenticatedUser = {
       userId: user.id.toString(),
       authSubjectId: claims.sub,
       authenticatedAt: claims.authTime
@@ -59,7 +69,7 @@ export class AccessTokenGuard implements CanActivate {
         : undefined,
     };
 
-    return true;
+    return { claims, authUser };
   }
 
   private async verifyAccessToken(accessToken: string) {
