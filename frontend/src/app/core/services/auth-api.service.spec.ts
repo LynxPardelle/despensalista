@@ -111,6 +111,18 @@ describe('AuthApiService', () => {
     expect(request.request.body).toEqual(assertion);
     request.flush(null, { status: 204, statusText: 'No Content' });
   });
+
+  it('sends the recovery code in an XSRF-protected POST body', () => {
+    document.cookie = 'XSRF-TOKEN=recovery-token; path=/';
+    service.getGoogleMfaOptions('recovery', 'test-code').subscribe();
+
+    const request = httpMock.expectOne(`${environment.apiUrl}/auth/google-mfa/recovery/options`);
+    expect(request.request.method).toBe('POST');
+    expect(request.request.withCredentials).toBeTrue();
+    expect(request.request.headers.get('x-xsrf-token')).toBe('recovery-token');
+    expect(request.request.body).toEqual({ code: 'test-code' });
+    request.flush({ challenge: 'test-challenge' });
+  });
 });
 
 function makeApiUser(): AuthUser {

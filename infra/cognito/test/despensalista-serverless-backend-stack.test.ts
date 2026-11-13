@@ -59,9 +59,11 @@ test('only the explicitly enabled dev backend provisions Google MFA storage', ()
         COGNITO_ALLOWED_PROVIDERS: 'COGNITO,Google',
         GOOGLE_MFA_TABLE: { Ref: tableId },
         GOOGLE_MFA_ORIGIN: 'https://despensalista.example',
+        GOOGLE_MFA_PROOF_VERSION: '2',
       },
     },
   });
+  enabled.hasOutput('GoogleMfaProofVersion', { Value: '2' });
   const tableArn = { 'Fn::GetAtt': [tableId, 'Arn'] };
   const grants = Object.values(enabled.findResources('AWS::IAM::Policy'))
     .flatMap((resource) => resource.Properties.PolicyDocument.Statement)

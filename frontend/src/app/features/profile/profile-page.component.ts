@@ -3,16 +3,20 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  DestroyRef,
   OnInit,
   PLATFORM_ID,
   inject,
+  signal,
 } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule, DOCUMENT, isPlatformBrowser } from '@angular/common';
 import { HttpErrorResponse } from '@angular/common/http';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { ActivatedRoute, Router, RouterModule } from '@angular/router';
 import { finalize } from 'rxjs/operators';
 import { AuthFacade } from '../../core/services/auth.facade';
+import { AuthApiService } from '../../core/services/auth-api.service';
 import { PantryService } from '../../core/services/pantry.service';
 import { ProfileService } from '../../core/services/profile.service';
 import {
@@ -68,11 +72,14 @@ export class ProfilePageComponent implements OnInit {
   private readonly profileService = inject(ProfileService);
   private readonly pantryService = inject(PantryService);
   private readonly authFacade = inject(AuthFacade);
+  private readonly authApi = inject(AuthApiService);
+  private readonly destroyRef = inject(DestroyRef);
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
   private readonly document = inject(DOCUMENT);
   private readonly platformId = inject(PLATFORM_ID);
   private readonly changeDetector = inject(ChangeDetectorRef);
+  protected readonly canManageGoogleKeys = signal(false);
 
   profile: UserProfile | null = null;
   loading = false;
@@ -240,6 +247,10 @@ export class ProfilePageComponent implements OnInit {
   ngOnInit(): void {
     if (isPlatformBrowser(this.platformId)) {
       this.loadProfile();
+      this.authApi.getGoogleMfaStatus().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+        next: ({ verified, keyCount }) => this.canManageGoogleKeys.set(verified && keyCount > 0),
+        error: () => this.canManageGoogleKeys.set(false),
+      });
       this.loadMonetizationDiscoveryEvents();
       const inviteToken =
         this.route.snapshot.queryParamMap.get('householdInvite');

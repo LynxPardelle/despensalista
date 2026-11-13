@@ -434,6 +434,7 @@ const wasteEventRepositoryProvider = useDynamoDb
         GOOGLE_MFA_ORIGIN: Joi.string()
           .uri({ scheme: ['https'] })
           .optional(),
+        GOOGLE_MFA_PROOF_VERSION: Joi.string().valid('2').optional(),
         COGNITO_AUTH_TRANSACTION_TTL_SECONDS: Joi.number()
           .integer()
           .positive()

@@ -17,9 +17,11 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { DynamoDbDocumentClientService } from '../../database/dynamodb/dynamodb-document-client.service';
 import {
   GOOGLE_MFA_COOKIE,
+  LEGACY_GOOGLE_MFA_COOKIE,
   GoogleMfaRequiredException,
 } from './google-mfa.constants';
 import { GoogleMfaService } from './google-mfa.service';
+import { digest } from './google-mfa-store';
 
 jest.mock('@simplewebauthn/server', () => ({
   ...jest.requireActual<typeof import('@simplewebauthn/server')>(
@@ -54,6 +56,9 @@ const credential = {
 };
 const registration = {} as RegistrationResponseJSON;
 const assertion = { id: credential.id } as AuthenticationResponseJSON;
+const secondKey = { credentialId: 'cred-456', publicKey: 'AQID', counter: 0 };
+const proofToken = 'a'.repeat(43);
+const recoveryCode = 'A'.repeat(32);
 
 function request(token?: string, requestOrigin = origin): FastifyRequest {
   return {
@@ -81,8 +86,41 @@ function storedCredential() {
   };
 }
 
-function pendingChallenge(expiresAt = Math.floor(Date.now() / 1000) + 299) {
-  return { Attributes: { challenge: 'example-challenge', expiresAt } };
+function pendingChallenge(generation = 'legacy', recoveryCodeHash?: string) {
+  return {
+    Attributes: {
+      challenge: 'example-challenge',
+      expiresAt: Math.floor(Date.now() / 1000) + 299,
+      generation,
+      recoveryCodeHash,
+    },
+  };
+}
+
+function currentAccount(keyCount = 1, recoveryCodeHash?: string) {
+  return {
+    Item: {
+      revision: 'revision-a',
+      generation: 'generation-a',
+      credentials:
+        keyCount === 1
+          ? [storedCredential().Item]
+          : [storedCredential().Item, secondKey],
+      recoveryCodeHash,
+    },
+  };
+}
+
+function storedProof(age = 0, generation = 'generation-a') {
+  const verifiedAt = Math.floor(Date.now() / 1000) - age;
+  return {
+    Item: {
+      binding: digest(`${claims.sub}\0${claims.originJti}`),
+      generation,
+      verifiedAt,
+      expiresAt: verifiedAt + 3600,
+    },
+  };
 }
 
 describe('GoogleMfaService', () => {
@@ -106,6 +144,7 @@ describe('GoogleMfaService', () => {
       { COGNITO_ISSUER: 'https://cognito-idp.us-east-1.amazonaws.com/other' },
       { AUTH_COOKIE_DOMAIN: 'despensalista.lynxpardelle.com' },
       { AUTH_COOKIE_SECURE: 'false' },
+      { GOOGLE_MFA_PROOF_VERSION: '1' },
     ]) {
       expect(
         () =>
@@ -140,6 +179,26 @@ describe('GoogleMfaService', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('reports the legacy key as eligible for upgrading after verification', async () => {
+    const { service, send } = setup();
+    send.mockResolvedValueOnce(storedCredential());
+    await expect(service.status(claims, request())).resolves.toEqual({
+      registered: true,
+      verified: false,
+      keyCount: 1,
+      recoveryConfigured: false,
+      recentVerification: false,
+    });
+  });
+
+  it('requires a recent WebAuthn proof for registering a second key', async () => {
+    const { service, send } = setup();
+    send.mockResolvedValueOnce(storedCredential());
+    await expect(
+      service.options('registration', claims, request()),
+    ).rejects.toBeInstanceOf(GoogleMfaRequiredException);
+  });
+
   it('issues origin-bound registration options for a fresh Google sign-in', async () => {
     const { service, send } = setup();
     send.mockResolvedValue({});
@@ -169,7 +228,7 @@ describe('GoogleMfaService', () => {
     expect(send.mock.lastCall?.[0]).toMatchObject({
       input: {
         Item: {
-          pk: expect.stringMatching(/^challenge:registration:/),
+          pk: expect.stringMatching(/^challenge:v2:registration:/),
           challenge: options.challenge,
           expiresAt: expect.any(Number),
         },
@@ -179,7 +238,9 @@ describe('GoogleMfaService', () => {
 
   it('enrolls only the first credential, without granting a proof', async () => {
     const { service, send } = setup();
-    send.mockResolvedValueOnce({}).mockResolvedValueOnce(pendingChallenge());
+    send
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(pendingChallenge('unenrolled'));
     jest.mocked(verifyRegistrationResponse).mockResolvedValue({
       verified: true,
       registrationInfo: { credential },
@@ -202,16 +263,16 @@ describe('GoogleMfaService', () => {
         ConditionExpression: 'attribute_not_exists(pk)',
         Item: {
           pk: expect.stringMatching(/^credential:/),
-          credentialId: credential.id,
-          counter: credential.counter,
-          publicKey: 'AQID',
+          credentials: [storedCredential().Item],
+          generation: expect.any(String),
+          revision: expect.any(String),
         },
       },
     });
     send.mockResolvedValueOnce(storedCredential());
     await expect(
       service.register(claims, request(), registration),
-    ).rejects.toMatchObject({ status: 409 });
+    ).rejects.toBeInstanceOf(GoogleMfaRequiredException);
     expect(verifyRegistrationResponse).toHaveBeenCalledTimes(1);
   });
 
@@ -220,6 +281,7 @@ describe('GoogleMfaService', () => {
     const used = new Error('used');
     used.name = 'ConditionalCheckFailedException';
     send
+      .mockResolvedValueOnce(storedCredential())
       .mockResolvedValueOnce(pendingChallenge())
       .mockResolvedValueOnce(storedCredential())
       .mockRejectedValueOnce(used);
@@ -233,8 +295,8 @@ describe('GoogleMfaService', () => {
     await expect(
       service.authenticate(claims, request(), reply, assertion),
     ).rejects.toMatchObject({ status: 400 });
-    expect(send.mock.calls[0][0]).toBeInstanceOf(DeleteCommand);
-    expect(send.mock.calls[0][0]).toMatchObject({
+    expect(send.mock.calls[1][0]).toBeInstanceOf(DeleteCommand);
+    expect(send.mock.calls[1][0]).toMatchObject({
       input: {
         ConditionExpression: 'expiresAt > :now',
         ReturnValues: 'ALL_OLD',
@@ -247,8 +309,8 @@ describe('GoogleMfaService', () => {
   it('binds a secure proof to the Cognito refresh family and revokes it by cookie on logout', async () => {
     const { service, send, reply, setCookie } = setup();
     send
-      .mockResolvedValueOnce(pendingChallenge())
       .mockResolvedValueOnce(storedCredential())
+      .mockResolvedValueOnce(pendingChallenge())
       .mockResolvedValue({});
     jest.mocked(verifyAuthenticationResponse).mockResolvedValue({
       verified: true,
@@ -258,11 +320,11 @@ describe('GoogleMfaService', () => {
     await expect(
       service.authenticate(claims, request(), reply, assertion),
     ).resolves.toEqual({ ok: true });
-    expect(send.mock.calls[2][0]).toBeInstanceOf(UpdateCommand);
+    expect(send.mock.calls[2][0]).toBeInstanceOf(PutCommand);
     expect(send.mock.calls[2][0]).toMatchObject({
       input: {
         ConditionExpression:
-          'credentialId = :credentialId AND #counter = :oldCounter',
+          'attribute_not_exists(revision) AND credentialId = :id AND #counter = :counter',
       },
     });
     expect(setCookie).toHaveBeenCalledWith(
@@ -277,10 +339,15 @@ describe('GoogleMfaService', () => {
       },
     );
     const token = setCookie.mock.calls[0][1] as string;
+    const account = (send.mock.calls[2][0] as PutCommand).input.Item;
     const proof = (send.mock.calls[3][0] as PutCommand).input.Item;
     expect(proof?.pk).not.toContain(token);
     expect(proof?.binding).not.toContain(subject);
-    send.mockResolvedValue({ Item: proof });
+    send.mockImplementation((command: GetCommand) =>
+      Promise.resolve({
+        Item: command.input.Key?.pk === proof?.pk ? proof : account,
+      }),
+    );
 
     await expect(
       service.assertVerified({ ...claims, authTime: 0 }, request(token)),
@@ -298,6 +365,7 @@ describe('GoogleMfaService', () => {
       ),
     ).rejects.toBeInstanceOf(GoogleMfaRequiredException);
     expect(send).toHaveBeenLastCalledWith(expect.any(GetCommand));
+    send.mockResolvedValueOnce({ Item: account });
     send.mockResolvedValueOnce({ Item: { ...proof, expiresAt: 0 } });
     await expect(
       service.assertVerified(claims, request(token)),
@@ -307,6 +375,206 @@ describe('GoogleMfaService', () => {
     expect(send.mock.lastCall?.[0]).toMatchObject({
       input: { Key: { pk: proof?.pk } },
     });
+  });
+
+  it('offers either registered key and requires recent verification before adding a distinct second one', async () => {
+    const { service, send } = setup();
+    send
+      .mockResolvedValueOnce(currentAccount())
+      .mockResolvedValueOnce(storedProof(301));
+    await expect(
+      service.options('registration', claims, request(proofToken)),
+    ).rejects.toBeInstanceOf(GoogleMfaRequiredException);
+
+    send
+      .mockResolvedValueOnce(currentAccount())
+      .mockResolvedValueOnce(storedProof());
+    await expect(
+      service.options('registration', claims, request(proofToken)),
+    ).resolves.toMatchObject({ excludeCredentials: [{ id: credential.id }] });
+    send
+      .mockResolvedValueOnce(currentAccount(2))
+      .mockResolvedValueOnce(storedProof());
+    await expect(
+      service.options('registration', claims, request(proofToken)),
+    ).rejects.toMatchObject({ status: 409 });
+
+    send.mockResolvedValueOnce(currentAccount(2));
+    await expect(
+      service.options('authentication', claims, request()),
+    ).resolves.toMatchObject({
+      allowCredentials: [{ id: credential.id }, { id: secondKey.credentialId }],
+    });
+
+    const secondCredential = {
+      ...credential,
+      id: secondKey.credentialId,
+      counter: 0,
+    };
+    jest.mocked(verifyRegistrationResponse).mockResolvedValue({
+      verified: true,
+      registrationInfo: { credential: secondCredential },
+    } as Awaited<ReturnType<typeof verifyRegistrationResponse>>);
+    send
+      .mockResolvedValueOnce(currentAccount())
+      .mockResolvedValueOnce(storedProof())
+      .mockResolvedValueOnce(pendingChallenge('generation-a'))
+      .mockResolvedValueOnce(storedProof());
+    await expect(
+      service.register(claims, request(proofToken), registration),
+    ).resolves.toEqual({ ok: true });
+    expect(send.mock.lastCall?.[0]).toMatchObject({
+      input: {
+        ConditionExpression: 'revision = :revision',
+        Item: {
+          credentials: [storedCredential().Item, secondKey],
+          generation: 'generation-a',
+        },
+      },
+    });
+  });
+
+  it('generates a high-entropy recovery code only after WebAuthn and stores only its digest', async () => {
+    const { service, send } = setup();
+    send
+      .mockResolvedValueOnce(currentAccount())
+      .mockResolvedValueOnce(storedProof(301));
+    await expect(
+      service.issueRecoveryCode(claims, request(proofToken)),
+    ).rejects.toBeInstanceOf(GoogleMfaRequiredException);
+    send
+      .mockResolvedValueOnce(currentAccount())
+      .mockResolvedValueOnce(storedProof());
+    const { code } = await service.issueRecoveryCode(
+      claims,
+      request(proofToken),
+    );
+    expect(Buffer.from(code, 'base64url')).toHaveLength(24);
+    const input = (send.mock.lastCall?.[0] as PutCommand).input;
+    expect(input.Item?.recoveryCodeHash).toBe(digest(code));
+    expect(JSON.stringify(input)).not.toContain(code);
+    expect(input.Item).not.toHaveProperty('credentialId');
+  });
+
+  it('counts recovery attempts per subject across sessions before comparing the code', async () => {
+    const { service, send } = setup();
+    const exhausted = new Error('attempt limit');
+    exhausted.name = 'ConditionalCheckFailedException';
+    send
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(currentAccount(1, digest(recoveryCode)));
+    await expect(
+      service.recoveryOptions(claims, request(), 'bad-code'),
+    ).rejects.toMatchObject({
+      status: 400,
+      message: 'Invalid recovery code',
+    });
+    send.mockRejectedValueOnce(exhausted);
+    await expect(
+      service.recoveryOptions(
+        { ...claims, originJti: 'session-b' },
+        request(),
+        recoveryCode,
+      ),
+    ).rejects.toMatchObject({ status: 429 });
+    const first = send.mock.calls[0][0] as UpdateCommand;
+    const last = send.mock.lastCall?.[0] as UpdateCommand;
+    expect(first.input.Key).toEqual(last.input.Key);
+    expect(first.input).toMatchObject({
+      ConditionExpression: 'attribute_not_exists(attempts) OR attempts < :max',
+      ExpressionAttributeValues: { ':max': 5 },
+    });
+    await expect(
+      service.recoveryOptions(
+        { ...claims, authTime: 1 },
+        request(),
+        recoveryCode,
+      ),
+    ).rejects.toMatchObject({ status: 401 });
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  it('requires the same code generation to consume the code and replace all keys in one conditional write', async () => {
+    const { service, send, setCookie } = setup();
+    const clearCookie = jest.fn();
+    const reply = { clearCookie } as unknown as FastifyReply;
+    const hash = digest(recoveryCode);
+    const account = currentAccount(2, hash);
+    const replacement = { ...credential, id: 'new-key', counter: 0 };
+    jest.mocked(verifyRegistrationResponse).mockResolvedValue({
+      verified: true,
+      registrationInfo: { credential: replacement },
+    } as Awaited<ReturnType<typeof verifyRegistrationResponse>>);
+    send.mockResolvedValueOnce({}).mockResolvedValueOnce(account);
+    await expect(
+      service.recoveryOptions(claims, request(), recoveryCode),
+    ).resolves.toMatchObject({
+      excludeCredentials: [
+        { id: credential.id },
+        { id: secondKey.credentialId },
+      ],
+    });
+    expect(send.mock.lastCall?.[0]).toMatchObject({
+      input: { Item: { recoveryCodeHash: hash, generation: 'generation-a' } },
+    });
+    send
+      .mockResolvedValueOnce(account)
+      .mockResolvedValueOnce(pendingChallenge('generation-a', 'rotated'));
+    await expect(
+      service.recover(claims, request(), reply, registration),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(verifyRegistrationResponse).not.toHaveBeenCalled();
+
+    send
+      .mockResolvedValueOnce(account)
+      .mockResolvedValueOnce(pendingChallenge('generation-a', hash));
+    await expect(
+      service.recover(claims, request(), reply, registration),
+    ).resolves.toEqual({ ok: true });
+    const write = (send.mock.lastCall?.[0] as PutCommand).input;
+    expect(write.ConditionExpression).toBe('revision = :revision');
+    expect(write.ExpressionAttributeValues).toEqual({
+      ':revision': 'revision-a',
+    });
+    expect(write.Item?.generation).not.toBe('generation-a');
+    expect(write.Item?.credentials).toEqual([
+      { credentialId: 'new-key', publicKey: 'AQID', counter: 0 },
+    ]);
+    expect(write.Item).not.toHaveProperty('recoveryCodeHash');
+    expect(clearCookie).toHaveBeenCalledTimes(2);
+    expect(setCookie).not.toHaveBeenCalled();
+
+    send
+      .mockResolvedValueOnce({ Item: write.Item })
+      .mockResolvedValueOnce(storedProof());
+    await expect(
+      service.assertVerified(claims, request(proofToken)),
+    ).rejects.toBeInstanceOf(GoogleMfaRequiredException);
+    send
+      .mockResolvedValueOnce({ Item: write.Item })
+      .mockResolvedValueOnce(pendingChallenge('generation-a', hash));
+    await expect(
+      service.recover(claims, request(), reply, registration),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('accepts legacy proofs only while the legacy account has not been upgraded and never as recent', async () => {
+    const { service, send } = setup();
+    const legacyRequest = {
+      ...request(),
+      cookies: { [LEGACY_GOOGLE_MFA_COOKIE]: proofToken },
+    } as FastifyRequest;
+    send
+      .mockResolvedValueOnce(storedCredential())
+      .mockResolvedValueOnce(storedProof());
+    await expect(service.status(claims, legacyRequest)).resolves.toMatchObject({
+      verified: true,
+      recentVerification: false,
+    });
+    send.mockResolvedValueOnce(currentAccount());
+    await expect(
+      service.assertVerified(claims, legacyRequest),
+    ).rejects.toBeInstanceOf(GoogleMfaRequiredException);
   });
 
   it('erases credential material and fences concurrent registration on account deletion', async () => {
