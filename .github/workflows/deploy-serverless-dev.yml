@@ -50,7 +50,7 @@ jobs:
 
   build-release:
     needs: package-backend
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # The locked Playwright version publishes FFmpeg for this image.
     permissions:
       contents: read
 
