@@ -24,6 +24,7 @@
   "dependencies": {
     "@aws-sdk/client-cognito-identity-provider": "^3.1064.0",
     "@aws-sdk/client-dynamodb": "^3.1038.0",
+    "@aws-sdk/client-ssm": "3.1168.0",
     "@aws-sdk/lib-dynamodb": "^3.1038.0",
     "@fastify/cookie": "^11.0.2",
     "@fastify/helmet": "^13.0.2",
@@ -42,7 +43,8 @@
     "joi": "^17.13.6",
     "mongoose": "^8.24.4",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "stripe": "23.1.0"
   },
   "overrides": {
     "fastify": "^5.12.1",

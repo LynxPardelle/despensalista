@@ -14,9 +14,17 @@ import { CommonModule, DOCUMENT, isPlatformBrowser } from '@angular/common';
 import { HttpErrorResponse } from '@angular/common/http';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { ActivatedRoute, Router, RouterModule } from '@angular/router';
+import { Subscription } from 'rxjs';
 import { finalize } from 'rxjs/operators';
 import { AuthFacade } from '../../core/services/auth.facade';
 import { AuthApiService } from '../../core/services/auth-api.service';
+import {
+  AvailableBillingStatus,
+  BillingAction,
+  BillingPlan,
+  BillingService,
+  SubscriptionStatus,
+} from '../../core/services/billing.service';
 import { PantryService } from '../../core/services/pantry.service';
 import { ProfileService } from '../../core/services/profile.service';
 import {
@@ -58,6 +66,18 @@ const MONETIZATION_EVENT_LIMIT = 20;
 const PANTRY_DELETION_IDEMPOTENCY_KEY_STORAGE_KEY =
   'despensalista.pendingPantryDeletionIdempotencyKey.v1';
 const PANTRY_DELETION_IDEMPOTENCY_KEY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SUBSCRIPTION_STATUS_LABELS: Record<SubscriptionStatus, string> = {
+  none: 'Sin suscripción',
+  pending: 'Pago pendiente',
+  incomplete: 'Pago incompleto',
+  incomplete_expired: 'Pago vencido',
+  trialing: 'En periodo de prueba',
+  active: 'Activa',
+  past_due: 'Pago atrasado',
+  canceled: 'Cancelada',
+  unpaid: 'Sin pagar',
+  paused: 'En pausa',
+};
 
 @Component({
   selector: 'app-profile-page',
@@ -65,6 +85,7 @@ const PANTRY_DELETION_IDEMPOTENCY_KEY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   styleUrl: './profile-page.component.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule, ReactiveFormsModule, RouterModule],
+  host: { '(window:pageshow)': 'onPageShow($event)' },
   standalone: true,
 })
 export class ProfilePageComponent implements OnInit {
@@ -73,6 +94,7 @@ export class ProfilePageComponent implements OnInit {
   private readonly pantryService = inject(PantryService);
   private readonly authFacade = inject(AuthFacade);
   private readonly authApi = inject(AuthApiService);
+  private readonly billingService = inject(BillingService);
   private readonly destroyRef = inject(DestroyRef);
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
@@ -80,6 +102,12 @@ export class ProfilePageComponent implements OnInit {
   private readonly platformId = inject(PLATFORM_ID);
   private readonly changeDetector = inject(ChangeDetectorRef);
   protected readonly canManageGoogleKeys = signal(false);
+  protected readonly billing = signal<AvailableBillingStatus | null>(null);
+  protected readonly billingLoading = signal(false);
+  protected readonly billingStatusError = signal(false);
+  protected readonly billingAction = signal<BillingAction | null>(null);
+  protected readonly billingActionError = signal<string | null>(null);
+  private billingStatusRequest?: Subscription;
 
   profile: UserProfile | null = null;
   loading = false;
@@ -252,6 +280,7 @@ export class ProfilePageComponent implements OnInit {
         error: () => this.canManageGoogleKeys.set(false),
       });
       this.loadMonetizationDiscoveryEvents();
+      this.refreshBillingStatus();
       const inviteToken =
         this.route.snapshot.queryParamMap.get('householdInvite');
       if (inviteToken) {
@@ -261,6 +290,80 @@ export class ProfilePageComponent implements OnInit {
         this.loadHouseholdWorkspace();
       }
     }
+  }
+
+  protected get billingReturn(): string | null {
+    return this.route.snapshot.queryParamMap.get('billing');
+  }
+
+  protected get awaitingBillingConfirmation(): boolean {
+    const status = this.billing()?.status;
+    return this.billingReturn === 'success' &&
+      (status === 'pending' || status === 'incomplete');
+  }
+
+  protected subscriptionStatusLabel(status: SubscriptionStatus): string {
+    return SUBSCRIPTION_STATUS_LABELS[status] ?? 'Por confirmar';
+  }
+
+  protected formatPlanPrice(plan: BillingPlan): string {
+    const amount = new Intl.NumberFormat('es-MX', {
+      style: 'currency',
+      currency: plan.currency,
+      currencyDisplay: 'code',
+    }).format(plan.amountMinor / 100);
+    return `${amount} al mes`;
+  }
+
+  protected onPageShow(event: PageTransitionEvent): void {
+    if (event.persisted) {
+      this.billingAction.set(null);
+      this.refreshBillingStatus();
+    }
+  }
+
+  protected refreshBillingStatus(): void {
+    this.billingStatusRequest?.unsubscribe();
+    this.billingLoading.set(true);
+    this.billingStatusError.set(false);
+    this.billingStatusRequest = this.billingService.getStatus()
+      .pipe(
+        takeUntilDestroyed(this.destroyRef),
+        finalize(() => this.billingLoading.set(false)),
+      )
+      .subscribe({
+        next: (status) => this.billing.set(status.available ? status : null),
+        error: (error: HttpErrorResponse) => {
+          if (error.status === 404) {
+            this.billing.set(null);
+          } else {
+            this.billingStatusError.set(true);
+          }
+        },
+      });
+  }
+
+  protected openBillingSession(action: BillingAction): void {
+    const billing = this.billing();
+    if (this.billingAction() || this.billingLoading() || this.householdAccepting || !billing?.canManage) {
+      return;
+    }
+    if (action === 'checkout' && (!billing.canCheckout || this.awaitingBillingConfirmation)) return;
+    if (action === 'portal' && !billing.canOpenPortal) return;
+
+    this.billingAction.set(action);
+    this.billingActionError.set(null);
+    this.billingService.createSession(action)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (url) => this.document.location.assign(url),
+        error: () => {
+          this.billingAction.set(null);
+          this.billingActionError.set(action === 'checkout'
+            ? 'No pudimos abrir el pago de prueba. Inténtalo de nuevo.'
+            : 'No pudimos abrir el portal de Stripe. Inténtalo de nuevo.');
+        },
+      });
   }
 
   logout(): void {
@@ -608,6 +711,9 @@ export class ProfilePageComponent implements OnInit {
           this.householdWorkspace = workspace;
           this.householdAcceptForm.reset({ token: '' });
           this.householdMessage = 'Invitacion aceptada.';
+          this.billing.set(null);
+          this.billingActionError.set(null);
+          this.refreshBillingStatus();
           if (this.route.snapshot.queryParamMap.has('householdInvite')) {
             void this.router.navigate([], {
               relativeTo: this.route,

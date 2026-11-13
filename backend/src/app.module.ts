@@ -148,6 +148,10 @@ import {
 import { AuthCookieService } from './infrastructure/http/auth/auth-cookie.service';
 import { AuthStepUpService } from './infrastructure/http/auth/auth-step-up.service';
 import { AccessTokenGuard } from './infrastructure/http/auth/access-token.guard';
+import { StripeBillingConfig } from './infrastructure/billing/stripe-billing-config';
+import { StripeBillingService } from './infrastructure/billing/stripe-billing.service';
+import { StripeBillingStore } from './infrastructure/billing/stripe-billing.store';
+import { StripeBillingController } from './infrastructure/http/controllers/stripe-billing.controller';
 import { GoogleMfaService } from './infrastructure/http/auth/google-mfa.service';
 import { GoogleMfaController } from './infrastructure/http/controllers/google-mfa.controller';
 import { AuthController } from './infrastructure/http/controllers/auth.controller';
@@ -435,6 +439,11 @@ const wasteEventRepositoryProvider = useDynamoDb
           .uri({ scheme: ['https'] })
           .optional(),
         GOOGLE_MFA_PROOF_VERSION: Joi.string().valid('2').optional(),
+        STRIPE_BILLING_ORIGIN: Joi.string()
+          .uri({ scheme: ['https'] })
+          .optional(),
+        STRIPE_BILLING_TABLE: Joi.string().optional(),
+        STRIPE_BILLING_CONFIG_PARAMETER: Joi.string().optional(),
         COGNITO_AUTH_TRANSACTION_TTL_SECONDS: Joi.number()
           .integer()
           .positive()
@@ -458,6 +467,7 @@ const wasteEventRepositoryProvider = useDynamoDb
     AppController,
     AuthController,
     GoogleMfaController,
+    StripeBillingController,
     HouseholdController,
     ProductsController,
     ProductTypesController,
@@ -474,6 +484,9 @@ const wasteEventRepositoryProvider = useDynamoDb
     AuthStepUpService,
     AccessTokenGuard,
     GoogleMfaService,
+    StripeBillingConfig,
+    StripeBillingService,
+    StripeBillingStore,
     CognitoAuthTransactionService,
     CognitoProfileSyncService,
     CognitoAuthUrlBuilderService,

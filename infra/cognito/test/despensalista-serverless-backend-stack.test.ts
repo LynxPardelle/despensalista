@@ -89,6 +89,60 @@ test('Google MFA refuses a non-dev stage or a missing Google provider', () => {
   );
 });
 
+test('Stripe Billing provisions an isolated table and exact Lambda grants only when enabled in dev', () => {
+  const devOrigin = 'https://dev.despensalista.lynxpardelle.com';
+  for (const stage of ['dev', 'tst', 'prod'] as const) {
+    assert.doesNotMatch(JSON.stringify(synthesizeTemplate(stage).toJSON()), /STRIPE_BILLING_|StripeBillingTable|billing\/stripe/);
+  }
+  const enabled = synthesizeTemplate('dev', {
+    enableStripeBilling: 'true',
+    serverlessFrontendBaseUrl: devOrigin,
+    appDomainName: new URL(devOrigin).hostname,
+  });
+  const [tableId] = Object.keys(enabled.findResources('AWS::DynamoDB::Table', {
+    Properties: {
+      TableName: 'despensalista-dev-billing',
+      AttributeDefinitions: [{ AttributeName: 'pk', AttributeType: 'S' }],
+      KeySchema: [{ AttributeName: 'pk', KeyType: 'HASH' }],
+      BillingMode: 'PAY_PER_REQUEST',
+      TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
+    },
+  }));
+  assert.ok(tableId);
+  assert.equal(enabled.toJSON().Resources[tableId].DeletionPolicy, 'RetainExceptOnCreate');
+  enabled.hasResourceProperties('AWS::Lambda::Function', {
+    FunctionName: 'despensalista-dev-backend-api',
+    Environment: {
+      Variables: {
+        STRIPE_BILLING_TABLE: { Ref: tableId },
+        STRIPE_BILLING_ORIGIN: devOrigin,
+        STRIPE_BILLING_CONFIG_PARAMETER: '/despensalista/dev/billing/stripe',
+      },
+    },
+  });
+  const apiPolicies = Object.values(enabled.findResources('AWS::IAM::Policy'))
+    .filter((resource) => JSON.stringify(resource.Properties.Roles).includes('BackendFunctionServiceRole'))
+    .flatMap((resource) => resource.Properties.PolicyDocument.Statement);
+  const tableArn = { 'Fn::GetAtt': [tableId, 'Arn'] };
+  assert.deepEqual(apiPolicies.filter((statement) => JSON.stringify(statement.Resource) === JSON.stringify(tableArn)), [{
+    Action: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+    Effect: 'Allow',
+    Resource: tableArn,
+  }]);
+  const getParameter = apiPolicies.filter((statement) => statement.Action === 'ssm:GetParameter');
+  assert.equal(getParameter.length, 1);
+  assert.equal(getParameter[0].Effect, 'Allow');
+  assert.match(JSON.stringify(getParameter[0].Resource), /:parameter\/despensalista\/dev\/billing\/stripe"/);
+  assert.doesNotMatch(JSON.stringify(getParameter[0].Resource), /\*/);
+});
+
+test('Stripe Billing refuses protected stages and any other return origin', () => {
+  for (const stage of ['tst', 'prod'] as const) {
+    assert.throws(() => synthesizeTemplate(stage, { enableStripeBilling: 'true' }), /only in dev/);
+  }
+  assert.throws(() => synthesizeTemplate('dev', { enableStripeBilling: 'true' }), /requires the dev frontend origin/);
+});
+
 test('production Lambda does not trust X-Forwarded-For for rate-limit identity', () => {
   const functions = productionTemplate.findResources(
     'AWS::Lambda::Function',

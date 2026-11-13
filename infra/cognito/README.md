@@ -257,6 +257,33 @@ COGNITO_REDIRECT_URI=https://<stage-domain>/api/auth/cognito/callback
 COGNITO_LOGOUT_REDIRECT_URI=https://<stage-domain>/login
 ```
 
+## Stripe Billing sandbox in dev
+
+Create a Standard `SecureString` at `/despensalista/dev/billing/stripe` in
+`us-east-1`, encrypted with the default AWS managed key `alias/aws/ssm`.
+Its JSON object has `apiKey`, `webhookSigningSecret`, `priceId`, and an
+optional `portalConfigurationId` when Stripe has a default Portal configuration.
+Use credentials, a recurring price and an endpoint from the same Stripe test
+environment. Enter the JSON directly into Parameter Store.
+
+An administrator must first update the existing dev Cognito stack. Use its
+deployed CloudFormation template and create a change set limited to the dev
+runtime boundary. The only change is allowing `ssm:GetParameter` for the exact
+parameter ARN, as modeled by `--context enableStripeBilling=true`. Keep the
+existing template parameters and exports so the deployed API retains its
+Google WebAuthn client.
+
+Set GitHub environment `dev` variable `ENABLE_STRIPE_BILLING` to `true`, then
+run the dev release workflow. It provisions the on-demand billing table and
+supplies the parameter name and return origin to the backend. Confirm dev
+Checkout, webhook delivery, and Customer Portal with a Stripe test card.
+
+Use the normal dev release rollback to switch application versions. The
+billing table survives stack removal after its creation succeeds. If the
+feature is deliberately deprovisioned, use an administrator change set to
+remove the boundary permission, then clear the GitHub variable and deploy.
+Re-enabling after deprovisioning requires importing the retained table.
+
 ## Useful Outputs
 
 - `UserPoolId`: Cognito User Pool ID.

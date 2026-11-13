@@ -168,95 +168,174 @@
         </ul>
       </aside>
 
-      <aside class="panel monetization-panel">
-        <p class="panel-kicker">Monetizaci&oacute;n</p>
-        <h2>Plan y Stripe</h2>
-        <p>
-          Despensa Lista sigue en plan Free. Stripe queda como proveedor elegido
-          para pagos web/PWA cuando activemos checkout real.
-        </p>
+      @if (billing(); as subscription) {
+        <section class="panel monetization-panel" aria-labelledby="subscription-title">
+          <p class="panel-kicker">Modo de prueba</p>
+          <h2 id="subscription-title">Suscripción de prueba</h2>
+          <p>Stripe simula el cobro. Esta suscripción sirve para probar el pago y su gestión.</p>
 
-        <dl class="billing-decision-list" aria-label="Decisi&oacute;n de pagos">
-          <div>
-            <dt>Proveedor</dt>
-            <dd>Stripe</dd>
-          </div>
-          <div>
-            <dt>Checkout</dt>
-            <dd>Checkout Sessions</dd>
-          </div>
-          <div>
-            <dt>Modelo</dt>
-            <dd>Billing + Prices</dd>
-          </div>
-          <div>
-            <dt>Portal</dt>
-            <dd>Customer Portal</dd>
-          </div>
-        </dl>
+          <dl class="billing-decision-list" aria-label="Detalles de la suscripción">
+            <div>
+              <dt>{{ subscription.plan.label }}</dt>
+              <dd>{{ formatPlanPrice(subscription.plan) }}</dd>
+            </div>
+            <div>
+              <dt>Estado</dt>
+              <dd aria-live="polite">{{ subscriptionStatusLabel(subscription.status) }}</dd>
+            </div>
+          </dl>
 
-        <div class="plan-list" aria-label="Frontera Free y Plus">
-          @for (plan of monetizationPlans; track plan.id) {
-            <section>
-              <div class="plan-heading">
-                <div>
-                  <strong>{{ plan.name }}</strong>
-                  <span>{{ plan.statusLabel }}</span>
-                </div>
-                <span>{{ plan.priceLabel }}</span>
-              </div>
-              <p>{{ plan.features.join(' · ') }}</p>
-              <small>{{ plan.boundaries.join(' · ') }}</small>
-              @if (plan.id !== 'free') {
-                <button
-                  class="secondary-button"
-                  type="button"
-                  (click)="registerMonetizationInterest(plan.id)"
-                >
-                  Registrar inter&eacute;s
-                </button>
-              }
-            </section>
+          @if (awaitingBillingConfirmation) {
+            <p class="helper-copy" role="status">Estamos confirmando el pago de prueba con Stripe.</p>
+          } @else if (billingReturn === 'success' && subscription.status === 'none') {
+            <p class="helper-copy" role="status">Aún no hay un pago de prueba confirmado para este hogar.</p>
+          } @else if (billingReturn === 'cancelled' && subscription.canCheckout) {
+            <p class="helper-copy" role="status">Saliste del pago de prueba. Puedes retomarlo aquí.</p>
           }
-        </div>
 
-        <ul class="stripe-readiness-list">
-          @for (item of stripeReadinessItems; track item) {
-            <li>{{ item }}</li>
+          @if (!subscription.canManage) {
+            <p class="helper-copy">Solo la persona propietaria del hogar puede gestionar la suscripción.</p>
           }
-        </ul>
 
-        @if (monetizationStatus) {
-          <p class="success-copy" role="status">{{ monetizationStatus }}</p>
-        }
-
-        @if (monetizationError) {
-          <p class="field-error" role="alert">{{ monetizationError }}</p>
-        }
-
-        @if (monetizationEvents.length > 0) {
-          <section aria-label="Eventos locales de monetizaci&oacute;n">
-            <h3>Eventos locales</h3>
-            <ul>
-              @for (event of monetizationEvents; track event.id) {
-                <li>
-                  <strong>{{ monetizationPlanLabel(event.planId) }}</strong>
-                  <span>
-                    {{ event.provider }} · {{ formatMonetizationEventCreatedAt(event) }} hora Central
-                  </span>
-                </li>
-              }
-            </ul>
+          <div class="billing-actions">
+            @if (subscription.canManage && subscription.canCheckout && !awaitingBillingConfirmation) {
+              <button
+                class="secondary-button"
+                type="button"
+                [disabled]="billingAction() || billingLoading() || householdAccepting"
+                (click)="openBillingSession('checkout')"
+              >
+                {{ subscription.status === 'pending' ? 'Continuar pago de prueba' : 'Iniciar pago de prueba' }}
+              </button>
+            }
+            @if (subscription.canManage && subscription.canOpenPortal) {
+              <button
+                class="secondary-button"
+                type="button"
+                [disabled]="billingAction() || billingLoading() || householdAccepting"
+                (click)="openBillingSession('portal')"
+              >
+                Abrir portal de Stripe
+              </button>
+            }
             <button
               class="ghost-button"
               type="button"
-              (click)="clearMonetizationDiscoveryEvents()"
+              [disabled]="billingAction() || billingLoading()"
+              (click)="refreshBillingStatus()"
             >
-              Limpiar eventos locales
+              Actualizar estado
             </button>
-          </section>
-        }
-      </aside>
+          </div>
+
+          @if (billingAction()) {
+            <p class="loading-copy" role="status">Abriendo Stripe…</p>
+          } @else if (billingLoading()) {
+            <p class="loading-copy" role="status">Consultando el estado de la suscripción…</p>
+          }
+          @if (billingStatusError()) {
+            <p class="field-error" role="alert">No pudimos actualizar el estado de la suscripción de prueba.</p>
+          }
+          @if (billingActionError(); as message) {
+            <p class="field-error" role="alert">{{ message }}</p>
+          }
+        </section>
+      } @else {
+        <aside class="panel monetization-panel">
+          <p class="panel-kicker">Monetizaci&oacute;n</p>
+          <h2>Plan y Stripe</h2>
+          <p>
+            Despensa Lista sigue en plan Free. Stripe queda como proveedor elegido
+            para pagos web/PWA cuando activemos checkout real.
+          </p>
+
+          <dl class="billing-decision-list" aria-label="Decisi&oacute;n de pagos">
+            <div>
+              <dt>Proveedor</dt>
+              <dd>Stripe</dd>
+            </div>
+            <div>
+              <dt>Checkout</dt>
+              <dd>Checkout Sessions</dd>
+            </div>
+            <div>
+              <dt>Modelo</dt>
+              <dd>Billing + Prices</dd>
+            </div>
+            <div>
+              <dt>Portal</dt>
+              <dd>Customer Portal</dd>
+            </div>
+          </dl>
+
+          <div class="plan-list" aria-label="Frontera Free y Plus">
+            @for (plan of monetizationPlans; track plan.id) {
+              <section>
+                <div class="plan-heading">
+                  <div>
+                    <strong>{{ plan.name }}</strong>
+                    <span>{{ plan.statusLabel }}</span>
+                  </div>
+                  <span>{{ plan.priceLabel }}</span>
+                </div>
+                <p>{{ plan.features.join(' · ') }}</p>
+                <small>{{ plan.boundaries.join(' · ') }}</small>
+                @if (plan.id !== 'free') {
+                  <button
+                    class="secondary-button"
+                    type="button"
+                    (click)="registerMonetizationInterest(plan.id)"
+                  >
+                    Registrar inter&eacute;s
+                  </button>
+                }
+              </section>
+            }
+          </div>
+
+          <ul class="stripe-readiness-list">
+            @for (item of stripeReadinessItems; track item) {
+              <li>{{ item }}</li>
+            }
+          </ul>
+
+          @if (billingStatusError()) {
+            <p class="field-error" role="alert">No pudimos consultar el estado de la suscripción de prueba.</p>
+            <button class="ghost-button" type="button" (click)="refreshBillingStatus()">Volver a consultar</button>
+          }
+
+          @if (monetizationStatus) {
+            <p class="success-copy" role="status">{{ monetizationStatus }}</p>
+          }
+
+          @if (monetizationError) {
+            <p class="field-error" role="alert">{{ monetizationError }}</p>
+          }
+
+          @if (monetizationEvents.length > 0) {
+            <section aria-label="Eventos locales de monetizaci&oacute;n">
+              <h3>Eventos locales</h3>
+              <ul>
+                @for (event of monetizationEvents; track event.id) {
+                  <li>
+                    <strong>{{ monetizationPlanLabel(event.planId) }}</strong>
+                    <span>
+                      {{ event.provider }} · {{ formatMonetizationEventCreatedAt(event) }} hora Central
+                    </span>
+                  </li>
+                }
+              </ul>
+              <button
+                class="ghost-button"
+                type="button"
+                (click)="clearMonetizationDiscoveryEvents()"
+              >
+                Limpiar eventos locales
+              </button>
+            </section>
+          }
+        </aside>
+      }
 
       <aside class="panel household-panel">
         <p class="panel-kicker">Hogar</p>
