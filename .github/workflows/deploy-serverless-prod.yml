@@ -2,6 +2,11 @@ name: Deploy Serverless Prod
 
 on:
   workflow_dispatch:
+    inputs:
+      backend_only:
+        description: Deploy the production backend stack for closed Checkout billing setup
+        type: boolean
+        default: false
   push:
     branches:
       - prod
@@ -63,9 +68,11 @@ jobs:
       contents: read
       id-token: write
     env:
+      STRIPE_BILLING_BACKEND_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.backend_only }}
       STRIPE_BILLING_BOUNDARY_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING_BOUNDARY || 'false' }}
       STRIPE_BILLING_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING || 'false' }}
       STRIPE_BILLING_CHECKOUT_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING_CHECKOUT || 'false' }}
+      STRIPE_BILLING_EXTERNAL_BOUNDARY: ${{ vars.STRIPE_BILLING_BOUNDARY_EXTERNALLY_MANAGED || 'false' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -116,7 +123,7 @@ jobs:
             false) ;;
             *) echo "ENABLE_PUBLIC_PRODUCTION_DOMAIN must be true or false" >&2; exit 1 ;;
           esac
-          for flag in STRIPE_BILLING_BOUNDARY_ENABLED STRIPE_BILLING_ENABLED STRIPE_BILLING_CHECKOUT_ENABLED; do
+          for flag in STRIPE_BILLING_BOUNDARY_ENABLED STRIPE_BILLING_ENABLED STRIPE_BILLING_CHECKOUT_ENABLED STRIPE_BILLING_EXTERNAL_BOUNDARY; do
             case "${!flag}" in
               true|false) ;;
               *) echo "$flag must be true or false" >&2; exit 1 ;;
@@ -129,11 +136,35 @@ jobs:
           if [[ "$STRIPE_BILLING_CHECKOUT_ENABLED" == true ]]; then
             test "$STRIPE_BILLING_ENABLED" = true
           fi
+          if [[ "$STRIPE_BILLING_BACKEND_ONLY" == true ]]; then
+            test "$STRIPE_BILLING_ENABLED" = true
+            test "$STRIPE_BILLING_BOUNDARY_ENABLED" = true
+            test "$STRIPE_BILLING_CHECKOUT_ENABLED" = false
+          fi
+          if [[ "$STRIPE_BILLING_EXTERNAL_BOUNDARY" == true ]]; then
+            test "$STRIPE_BILLING_BOUNDARY_ENABLED" = true
+          fi
 
       - uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Verify the administrator-managed Stripe Billing boundary
+        if: env.STRIPE_BILLING_BACKEND_ONLY == 'true' || env.STRIPE_BILLING_EXTERNAL_BOUNDARY == 'true'
+        run: |
+          set -euo pipefail
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          [[ "$account_id" =~ ^[0-9]{12}$ ]]
+          boundary_arn="arn:aws:iam::$account_id:policy/despensalista-prod-runtime-boundary"
+          parameter_arn="arn:aws:ssm:$AWS_REGION:$account_id:parameter/despensalista/prod/billing/stripe"
+          version="$(aws iam get-policy --policy-arn "$boundary_arn" --query Policy.DefaultVersionId --output text)"
+          aws iam get-policy-version --policy-arn "$boundary_arn" --version-id "$version" --query PolicyVersion.Document --output json |
+            jq -e --arg resource "$parameter_arn" '.Statement | any(
+              .Effect == "Allow" and
+              ([.Action] | flatten) == ["ssm:GetParameter"] and
+              ([.Resource] | flatten) == [$resource] and
+              .Condition == null)' >/dev/null
 
       - name: Recover an interrupted production writer drain
         run: node .github/scripts/deployment-state.mjs recover-drain prod
@@ -242,7 +273,11 @@ jobs:
               --context publicProductionCertificateArn="$PUBLIC_CERTIFICATE_ARN"
             )
           fi
-          npx cdk deploy --all --require-approval never --change-set-name despensalista-prod-release \
+          deploy_target=(--all)
+          if [[ "$STRIPE_BILLING_BACKEND_ONLY" == true ]]; then
+            deploy_target=(despensalista-prod-serverless-backend --exclusively)
+          fi
+          npx cdk deploy "${deploy_target[@]}" --require-approval never --change-set-name despensalista-prod-release \
             --context projectName=despensalista \
             --context stage=prod \
             --context awsRegion="$AWS_REGION" \
@@ -256,6 +291,7 @@ jobs:
             --context productionFrontendBaseUrl="$FRONTEND_BASE_URL" \
             --context serverlessFrontendBaseUrl="$FRONTEND_BASE_URL" \
             --context enableStripeBillingBoundary="$STRIPE_BILLING_BOUNDARY_ENABLED" \
+            --context externalStripeBillingBoundary="$STRIPE_BILLING_EXTERNAL_BOUNDARY" \
             --context enableStripeBilling="$STRIPE_BILLING_ENABLED" \
             --context enableStripeBillingCheckout="$STRIPE_BILLING_CHECKOUT_ENABLED" \
             --context externallyManagedSocialProviders=Google \
