@@ -48,6 +48,7 @@ function stackDeploymentState(stage, stack) {
     deploymentReleaseId: outputs.DeploymentReleaseId,
     backendDataContractVersion: stackBackendDataContractVersion(stack),
     googleMfaProofVersion: outputs.GoogleMfaProofVersion,
+    stripeBillingTable: outputs.StripeBillingTableName,
     bucket: outputs.WebBucketName,
     distribution: outputs.CloudFrontDistributionId,
   };
@@ -532,6 +533,16 @@ export async function restoreRelease({
   );
   if (!selected) throw new Error('Recorded Lambda version is unavailable or does not match the release');
   assertGoogleMfaRollbackTarget(state, recorded.version, aws);
+  if (stage === 'prod' && state.stripeBillingTable) {
+    const { Environment } = aws([
+      'lambda', 'get-function-configuration', '--function-name', state.functionName,
+      '--qualifier', recorded.version,
+    ]);
+    if (Environment?.Variables?.STRIPE_BILLING_MODE !== 'live' ||
+        Environment.Variables.STRIPE_BILLING_TABLE !== state.stripeBillingTable) {
+      throw new Error('Production rollback must preserve Stripe Billing and subscription cancellation');
+    }
+  }
   const reservedConcurrency = normalizedReservedConcurrency(
     recorded.reservedConcurrency,
   );

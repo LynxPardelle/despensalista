@@ -36,7 +36,8 @@ export class StripeBillingConfig {
   constructor(private readonly config: ConfigService) {}
 
   async get(): Promise<StripeBillingSettings | undefined> {
-    const mode = this.config.get<string>('STRIPE_BILLING_MODE') ?? 'test';
+    const configuredMode = this.config.get<string>('STRIPE_BILLING_MODE');
+    const mode = configuredMode ?? 'test';
     const checkoutFlag = this.config.get<string>(
       'STRIPE_BILLING_CHECKOUT_ENABLED',
     );
@@ -45,6 +46,13 @@ export class StripeBillingConfig {
     const parameter = this.config.get<string>(
       'STRIPE_BILLING_CONFIG_PARAMETER',
     );
+    if (
+      [configuredMode, checkoutFlag, origin, table, parameter].every(
+        (value) => value === undefined,
+      )
+    ) {
+      return undefined;
+    }
     const isDev =
       mode === 'test' &&
       origin === devOrigin &&
@@ -63,7 +71,7 @@ export class StripeBillingConfig {
       (!isDev && !isProduction) ||
       (checkoutFlag !== undefined && !['true', 'false'].includes(checkoutFlag))
     ) {
-      return undefined;
+      throw new ServiceUnavailableException('Billing is unavailable');
     }
 
     if (!this.cached || this.cached.expiresAt <= Date.now()) {

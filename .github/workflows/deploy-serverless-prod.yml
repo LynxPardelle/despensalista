@@ -141,6 +141,35 @@ jobs:
       - name: Snapshot current published release
         run: node .github/scripts/deployment-state.mjs capture prod .rollback
 
+      - name: Keep billing available after its first production deployment
+        run: |
+          set -euo pipefail
+          if [[ "$(jq -r '.unavailable // false' .rollback/state.json)" == true ]]; then
+            if [[ "$STRIPE_BILLING_CHECKOUT_ENABLED" == true ]]; then
+              echo "Deploy and verify live billing with Checkout closed before opening sales." >&2
+              exit 1
+            fi
+            exit 0
+          fi
+          billing_table="$(aws cloudformation describe-stacks \
+            --stack-name despensalista-prod-serverless-backend \
+            --query "Stacks[0].Outputs[?OutputKey=='StripeBillingTableName'].OutputValue | [0]" \
+            --output text)"
+          if [[ "$STRIPE_BILLING_ENABLED" == false && "$billing_table" != None ]]; then
+            echo "Production billing is provisioned. Disable only Checkout to preserve cancellations and account deletion." >&2
+            exit 1
+          fi
+          if [[ "$STRIPE_BILLING_CHECKOUT_ENABLED" == true ]]; then
+            live_version="$(jq -er '.version' .rollback/state.json)"
+            live_billing="$(aws lambda get-function-configuration \
+              --function-name despensalista-prod-backend-api --qualifier "$live_version" \
+              --query 'Environment.Variables.STRIPE_BILLING_MODE' --output text)"
+            if [[ "$billing_table" != despensalista-prod-billing || "$live_billing" != live ]]; then
+              echo "Deploy and verify live billing with Checkout closed before opening sales." >&2
+              exit 1
+            fi
+          fi
+
       - name: Validate infrastructure against AWS
         run: npm --prefix infra/cognito run build
 
