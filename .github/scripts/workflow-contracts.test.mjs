@@ -121,6 +121,26 @@ test('production deploy preserves billing infrastructure after its first deploym
   assert.match(prod, /"\$STRIPE_BILLING_CHECKOUT_ENABLED" == true[\s\S]*?"\$live_billing" != live[\s\S]*?exit 1/);
 });
 
+test('production backend-only delivery is an opt-in with Stripe Checkout closed', async () => {
+  const prod = await readWorkflow('deploy-serverless-prod.yml');
+  assert.match(prod, /workflow_dispatch:\s+inputs:\s+backend_only:[\s\S]*?type: boolean\s+default: false/);
+  assert.match(prod, /github\.event_name == 'workflow_dispatch' && inputs\.backend_only/);
+  assert.match(prod, /STRIPE_BILLING_BACKEND_ONLY" == true[\s\S]*?test "\$STRIPE_BILLING_ENABLED" = true[\s\S]*?test "\$STRIPE_BILLING_BOUNDARY_ENABLED" = true[\s\S]*?test "\$STRIPE_BILLING_CHECKOUT_ENABLED" = false/);
+  assert.match(prod, /deploy_target=\(--all\)[\s\S]*?STRIPE_BILLING_BACKEND_ONLY" == true[\s\S]*?deploy_target=\(despensalista-prod-serverless-backend --exclusively\)[\s\S]*?npx cdk deploy "\$\{deploy_target\[@\]\}"/);
+});
+
+test('production delivery checks the exact runtime boundary grant before a backend-only deploy', async () => {
+  const prod = await readWorkflow('deploy-serverless-prod.yml');
+  const start = prod.indexOf('Verify the administrator-managed Stripe Billing boundary');
+  const end = prod.indexOf('Recover an interrupted production writer drain');
+  assert.ok(start >= 0 && start < end);
+  const check = prod.slice(start, end);
+  assert.match(check, /despensalista-prod-runtime-boundary/);
+  assert.match(check, /parameter\/despensalista\/prod\/billing\/stripe/);
+  assert.match(check, /aws iam get-policy\b[\s\S]*?aws iam get-policy-version\b/);
+  assert.match(check, /\.Effect == "Allow"[\s\S]*?\["ssm:GetParameter"\][\s\S]*?\[\$resource\]/);
+});
+
 test('durably drains the old production Lambda before an all-at-once schema cutover', async () => {
   const prod = await readWorkflow('deploy-serverless-prod.yml');
   const deploymentState = await readFile(
