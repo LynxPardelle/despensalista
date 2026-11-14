@@ -50,6 +50,7 @@ export function stripeBillingDeployment(stack: cdk.Stack, project: string, stage
   };
   const enabled = readFlag('enableStripeBilling') ?? false;
   const boundaryEnabled = readFlag('enableStripeBillingBoundary') ?? false;
+  const externalBoundary = readFlag('externalStripeBillingBoundary') ?? false;
   const checkoutEnabled = readFlag('enableStripeBillingCheckout') ?? (stage === 'dev' && enabled);
   if ((enabled || boundaryEnabled || checkoutEnabled) &&
       (project !== 'despensalista' || !['dev', 'prod'].includes(stage))) {
@@ -57,6 +58,9 @@ export function stripeBillingDeployment(stack: cdk.Stack, project: string, stage
   }
   if (boundaryEnabled && stage !== 'prod') {
     throw new Error('enableStripeBillingBoundary is a production control; dev uses enableStripeBilling.');
+  }
+  if (externalBoundary && (stage !== 'prod' || !boundaryEnabled)) {
+    throw new Error('externalStripeBillingBoundary requires the production Stripe Billing boundary.');
   }
   if (checkoutEnabled && !enabled) {
     throw new Error('Stripe Checkout requires Stripe Billing to be enabled.');
@@ -69,6 +73,7 @@ export function stripeBillingDeployment(stack: cdk.Stack, project: string, stage
     enabled,
     checkoutEnabled,
     boundaryEnabled: stage === 'dev' ? enabled : boundaryEnabled,
+    externalBoundary,
     mode: stage === 'prod' ? 'live' : 'test',
     parameterName: `/${resourceName}`,
     parameterArn: stack.formatArn({ service: 'ssm', resource: 'parameter', resourceName }),
@@ -149,7 +154,8 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
     scoped(['sns:Publish'], [`arn:${stack.partition}:sns:${stack.region}:${stack.account}:${prefix}-*`]),
     scoped(['cloudfront:CreateInvalidation', 'cloudfront:GetInvalidation'], [arn('cloudfront', 'distribution', '*', '')], { StringEquals: { 'aws:ResourceTag/Project': project, 'aws:ResourceTag/Stage': stage } }),
   ];
-  if (stripeBilling.boundaryEnabled) {
+  // An administrator-provisioned grant is verified by the production workflow.
+  if (stripeBilling.boundaryEnabled && !stripeBilling.externalBoundary) {
     runtimeStatements.push(scoped(['ssm:GetParameter'], [stripeBilling.parameterArn]));
   }
   const boundary = new iam.ManagedPolicy(stack, 'RuntimePermissionsBoundary', {

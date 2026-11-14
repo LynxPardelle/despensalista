@@ -300,6 +300,14 @@ production CloudFront aliases and Cognito URLs. Production billing requires
    touches only the boundary statement. Set `ENABLE_STRIPE_BILLING_BOUNDARY=true`
    in the GitHub `prod` environment once that change is applied. Keep this
    variable set on subsequent deployments.
+   If the administrator applied the grant directly in IAM, set the GitHub
+   `prod` variable `STRIPE_BILLING_BOUNDARY_EXTERNALLY_MANAGED=true`. This
+   keeps the Cognito template aligned with its current CloudFormation template
+   while the workflow verifies the live grant. An administrator must give
+   `despensalista-prod-github-deploy` `iam:GetPolicy` and `iam:GetPolicyVersion`
+   on the exact `despensalista-prod-runtime-boundary` policy ARN for this check.
+   Clear the external boundary variable only after an administrator has synced
+   the Cognito CloudFormation template with the IAM grant.
 2. Create a Standard `SecureString` at `/despensalista/prod/billing/stripe` in
    `us-east-1` using the AWS-managed SSM key. The JSON uses `accountId`,
    `productId`, `priceId`, `portalConfigurationId`, `apiKey` and
@@ -310,6 +318,10 @@ production CloudFront aliases and Cognito URLs. Production billing requires
    `ENABLE_STRIPE_BILLING_CHECKOUT=false` to deploy billing with new purchases
    closed. The normal production workflow creates the retained on-demand
    table and grants the backend access to that table and exact parameter.
+   For a manual deployment scoped to the backend stack, dispatch the same
+   production workflow with `backend_only=true`. This option requires
+   `ENABLE_STRIPE_BILLING_BOUNDARY=true`, checks the live IAM grant before the
+   deployment, and uses the same release artifact and production review.
    Verify the production event destination and portal configuration, and
    complete the payment and cancellation checks in the sandbox.
 4. Set `ENABLE_STRIPE_BILLING_CHECKOUT=true` and redeploy when the offer and
