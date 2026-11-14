@@ -404,6 +404,73 @@ describe('ProfilePageComponent', () => {
     expect(checkout.disabled).toBeFalse();
   });
 
+  it('requires consent to the recurring live charge before opening Stripe Checkout', () => {
+    spyOnProperty(fixture.componentInstance as unknown as { canOpenLiveBillingHere: boolean }, 'canOpenLiveBillingHere').and.returnValue(true);
+    http.expectOne('/api/billing/status').flush({ ...subscription, mode: 'live', hasPlus: false });
+    fixture.detectChanges();
+
+    const panel = (fixture.nativeElement as HTMLElement).querySelector('section[aria-labelledby="subscription-title"]')!;
+    const consent = panel.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    const checkout = Array.from(panel.querySelectorAll('button')).find((button) => button.textContent.includes('Suscribirme'))!;
+    expect(consent.checked).toBeFalse();
+    expect(panel.textContent).toContain('El primer cargo se hace al confirmar el pago en Stripe');
+    expect(panel.textContent).toContain('59.00');
+    expect(panel.querySelector('a')?.getAttribute('href')).toBe('/terminos-plus-hogar');
+    expect(panel.textContent).not.toContain('pago de prueba');
+    expect(checkout.disabled).toBeTrue();
+    checkout.click();
+    http.expectNone('/api/billing/checkout');
+
+    consent.click();
+    fixture.detectChanges();
+    expect(checkout.disabled).toBeFalse();
+    checkout.click();
+    const request = http.expectOne({ method: 'POST', url: '/api/billing/checkout' });
+    expect(request.request.body).toEqual({ acceptRecurringTerms: true });
+    request.flush({ url: 'https://example.com/' });
+  });
+
+  it('shows Plus as active only after the server confirms paid access', () => {
+    spyOnProperty(fixture.componentInstance as unknown as { canOpenLiveBillingHere: boolean }, 'canOpenLiveBillingHere').and.returnValue(true);
+    http.expectOne('/api/billing/status').flush({
+      ...subscription,
+      mode: 'live',
+      hasPlus: false,
+      status: 'active',
+      canCheckout: false,
+      canOpenPortal: true,
+    });
+    fixture.detectChanges();
+
+    const panel = (fixture.nativeElement as HTMLElement).querySelector('section[aria-labelledby="subscription-title"]')!;
+    expect(panel.textContent).not.toContain('Plus activo');
+    const refresh = Array.from(panel.querySelectorAll('button')).find((button) => button.textContent.includes('Actualizar estado'))!;
+    refresh.click();
+    http.expectOne('/api/billing/status').flush({
+      ...subscription,
+      mode: 'live',
+      hasPlus: true,
+      status: 'active',
+      canCheckout: false,
+      canOpenPortal: true,
+      cancelAtPeriodEnd: true,
+      currentPeriodEnd: '2026-12-15T12:00:00.000Z',
+    });
+    fixture.detectChanges();
+
+    expect(panel.textContent).toContain('Plus activo');
+    expect(panel.textContent).toContain('Tu suscripción no se renovará');
+    expect(panel.textContent).toContain('15 de diciembre de 2026');
+    expect(panel.querySelector('input[type="checkbox"]')).toBeNull();
+    const portal = Array.from(panel.querySelectorAll('button')).find((button) => button.textContent.includes('Gestionar suscripción'))!;
+    portal.click();
+    const request = http.expectOne({ method: 'POST', url: '/api/billing/portal' });
+    expect(request.request.body).toEqual({});
+    request.flush(null, { status: 503, statusText: 'Unavailable' });
+    const deletionForm = (fixture.nativeElement as HTMLElement).querySelector('.danger-panel:has(input[placeholder="ELIMINAR CUENTA"])')!;
+    expect(deletionForm.textContent).toContain('cancela Plus Hogar de inmediato');
+  });
+
   it('keeps subscription status readable and payment actions unavailable to household members', () => {
     http.expectOne('/api/billing/status').flush({
       ...subscription,

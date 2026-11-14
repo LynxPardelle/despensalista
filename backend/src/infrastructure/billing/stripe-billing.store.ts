@@ -13,6 +13,7 @@ import {
   ConditionalCheckFailedException,
   TransactionCanceledException,
 } from '@aws-sdk/client-dynamodb';
+import { randomUUID } from 'node:crypto';
 import type Stripe from 'stripe';
 import { DynamoDbDocumentClientService } from '../database/dynamodb/dynamodb-document-client.service';
 
@@ -30,6 +31,9 @@ export interface BillingRecord {
   checkout?: CheckoutAttempt;
   status?: Stripe.Subscription.Status | 'pending';
   subscriptionId?: string;
+  paidThrough?: number;
+  cancelAtPeriodEnd?: boolean;
+  closed?: boolean;
 }
 
 @Injectable()
@@ -54,12 +58,161 @@ export class StripeBillingStore {
 
   async save(next: BillingRecord, table: string): Promise<boolean> {
     try {
-      await this.db.send(new PutCommand(this.recordWrite(next, table)));
+      if (next.customerId) {
+        await this.db.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              { Put: this.recordWrite(next, table) },
+              {
+                Put: {
+                  TableName: table,
+                  Item: {
+                    pk: `customer:${next.customerId}`,
+                    householdId: next.householdId,
+                  },
+                  ConditionExpression:
+                    'attribute_not_exists(pk) OR householdId = :household',
+                  ExpressionAttributeValues: { ':household': next.householdId },
+                },
+              },
+            ],
+          }),
+        );
+      } else {
+        await this.db.send(new PutCommand(this.recordWrite(next, table)));
+      }
       return true;
     } catch (error) {
-      if (error instanceof ConditionalCheckFailedException) {
+      if (isWriteConflict(error)) {
         return false;
       }
+      throw error;
+    }
+  }
+
+  async readHouseholdByCustomer(
+    table: string,
+    customerId: string,
+  ): Promise<string | undefined> {
+    const row = await this.db.send(
+      new GetCommand({
+        TableName: table,
+        Key: { pk: `customer:${customerId}` },
+        ConsistentRead: true,
+      }),
+    );
+    return typeof row.Item?.householdId === 'string'
+      ? row.Item.householdId
+      : undefined;
+  }
+
+  async beginCheckout(
+    table: string,
+    householdId: string,
+  ): Promise<string | undefined> {
+    const token = randomUUID();
+    const now = Date.now();
+    try {
+      await this.db.send(
+        new PutCommand({
+          TableName: table,
+          // Longer than the configured Lambda timeout. The process cannot still
+          // create a Stripe session when deletion gains a stale checkout lease.
+          Item: {
+            pk: checkoutLock(householdId),
+            lease: token,
+            leaseUntil: now + 60_000,
+          },
+          ConditionExpression:
+            'attribute_not_exists(closing) AND (attribute_not_exists(lease) OR leaseUntil <= :now)',
+          ExpressionAttributeValues: { ':now': now },
+        }),
+      );
+      return token;
+    } catch (error) {
+      if (isWriteConflict(error)) return undefined;
+      throw error;
+    }
+  }
+
+  async endCheckout(
+    table: string,
+    householdId: string,
+    token: string,
+  ): Promise<void> {
+    try {
+      await this.db.send(
+        new PutCommand({
+          TableName: table,
+          Item: { pk: checkoutLock(householdId) },
+          ConditionExpression: 'lease = :token',
+          ExpressionAttributeValues: { ':token': token },
+        }),
+      );
+    } catch (error) {
+      if (!isWriteConflict(error)) throw error;
+    }
+  }
+
+  async beginClosure(table: string, householdId: string): Promise<boolean> {
+    try {
+      await this.db.send(
+        new PutCommand({
+          TableName: table,
+          Item: { pk: checkoutLock(householdId), closing: true },
+          ConditionExpression:
+            'attribute_not_exists(lease) OR leaseUntil <= :now',
+          ExpressionAttributeValues: { ':now': Date.now() },
+        }),
+      );
+      return true;
+    } catch (error) {
+      if (isWriteConflict(error)) return false;
+      throw error;
+    }
+  }
+
+  async finishClosure(table: string, current: BillingRecord): Promise<boolean> {
+    const record = this.recordWrite(
+      {
+        householdId: current.householdId,
+        revision: current.revision + 1,
+        closed: true,
+      },
+      table,
+    );
+    if (!current.customerId) {
+      return this.save(
+        {
+          householdId: current.householdId,
+          revision: current.revision + 1,
+          closed: true,
+        },
+        table,
+      );
+    }
+    try {
+      await this.db.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            { Put: record },
+            {
+              Delete: {
+                TableName: table,
+                Key: { pk: `customer:${current.customerId}` },
+                ConditionExpression:
+                  'attribute_not_exists(pk) OR householdId = :household',
+                ExpressionAttributeValues: {
+                  ':household': current.householdId,
+                },
+              },
+            },
+          ],
+        }),
+      );
+      return true;
+    } catch (error) {
+      if (isWriteConflict(error)) return false;
       throw error;
     }
   }
@@ -139,4 +292,27 @@ export class StripeBillingStore {
     }
     return this.dynamodb;
   }
+}
+
+function checkoutLock(householdId: string): string {
+  return `checkout-lock:${householdId}`;
+}
+
+function isWriteConflict(error: unknown): boolean {
+  if (error instanceof ConditionalCheckFailedException) return true;
+  if (!(error instanceof TransactionCanceledException)) return false;
+  const reasons = error.CancellationReasons;
+  return Boolean(
+    reasons?.some(
+      (reason) =>
+        reason.Code === 'ConditionalCheckFailed' ||
+        reason.Code === 'TransactionConflict',
+    ) &&
+    reasons.every(
+      (reason) =>
+        reason.Code === 'None' ||
+        reason.Code === 'ConditionalCheckFailed' ||
+        reason.Code === 'TransactionConflict',
+    ),
+  );
 }

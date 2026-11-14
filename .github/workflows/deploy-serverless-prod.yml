@@ -62,6 +62,10 @@ jobs:
       actions: read
       contents: read
       id-token: write
+    env:
+      STRIPE_BILLING_BOUNDARY_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING_BOUNDARY || 'false' }}
+      STRIPE_BILLING_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING || 'false' }}
+      STRIPE_BILLING_CHECKOUT_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING_CHECKOUT || 'false' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -112,6 +116,19 @@ jobs:
             false) ;;
             *) echo "ENABLE_PUBLIC_PRODUCTION_DOMAIN must be true or false" >&2; exit 1 ;;
           esac
+          for flag in STRIPE_BILLING_BOUNDARY_ENABLED STRIPE_BILLING_ENABLED STRIPE_BILLING_CHECKOUT_ENABLED; do
+            case "${!flag}" in
+              true|false) ;;
+              *) echo "$flag must be true or false" >&2; exit 1 ;;
+            esac
+          done
+          if [[ "$STRIPE_BILLING_ENABLED" == true ]]; then
+            test "$PUBLIC_DOMAIN_ENABLED" = true
+            test "$STRIPE_BILLING_BOUNDARY_ENABLED" = true
+          fi
+          if [[ "$STRIPE_BILLING_CHECKOUT_ENABLED" == true ]]; then
+            test "$STRIPE_BILLING_ENABLED" = true
+          fi
 
       - uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
         with:
@@ -209,6 +226,9 @@ jobs:
             --context appDomainName="$APP_DOMAIN_NAME" \
             --context productionFrontendBaseUrl="$FRONTEND_BASE_URL" \
             --context serverlessFrontendBaseUrl="$FRONTEND_BASE_URL" \
+            --context enableStripeBillingBoundary="$STRIPE_BILLING_BOUNDARY_ENABLED" \
+            --context enableStripeBilling="$STRIPE_BILLING_ENABLED" \
+            --context enableStripeBillingCheckout="$STRIPE_BILLING_CHECKOUT_ENABLED" \
             --context externallyManagedSocialProviders=Google \
             "${public_domain_context[@]}"
 
@@ -237,7 +257,17 @@ jobs:
         id: smoke
         env:
           APP_DOMAIN_NAME: ${{ vars.APP_DOMAIN_NAME || 'despensalista.lynxpardelle.com' }}
-        run: node .github/scripts/smoke.mjs --base-url "https://$APP_DOMAIN_NAME" --attempts 18 --delay-ms 10000
+        run: |
+          set -euo pipefail
+          node .github/scripts/smoke.mjs --base-url "https://$APP_DOMAIN_NAME" --attempts 18 --delay-ms 10000
+          if [[ "$STRIPE_BILLING_ENABLED" == true ]]; then
+            # An unsigned delivery must be rejected after loading the protected settings.
+            status="$(curl --silent --show-error --max-time 15 \
+              --output /dev/null --write-out '%{http_code}' \
+              --header 'Content-Type: application/json' --data '{}' \
+              https://despensalista.com/api/billing/webhook)"
+            test "$status" = 400
+          fi
 
       - name: Finalize durable production recovery
         run: node .github/scripts/deployment-state.mjs finalize-drain prod

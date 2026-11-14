@@ -40,18 +40,38 @@ export function requireGoogleMfaOrigin(value: string | undefined): string {
   return url.origin;
 }
 
-export function stripeBillingParameter(stack: cdk.Stack, project: string, stage: string) {
-  const enabled = String(stack.node.tryGetContext('enableStripeBilling')).trim().toLowerCase() === 'true';
-  if (!enabled) {
-    return undefined;
+export function stripeBillingDeployment(stack: cdk.Stack, project: string, stage: string) {
+  const readFlag = (name: string): boolean | undefined => {
+    const value = stack.node.tryGetContext(name);
+    if (value === undefined) return undefined;
+    if (value === 'true' || value === true) return true;
+    if (value === 'false' || value === false) return false;
+    throw new Error(`${name} must be true or false.`);
+  };
+  const enabled = readFlag('enableStripeBilling') ?? false;
+  const boundaryEnabled = readFlag('enableStripeBillingBoundary') ?? false;
+  const checkoutEnabled = readFlag('enableStripeBillingCheckout') ?? (stage === 'dev' && enabled);
+  if ((enabled || boundaryEnabled || checkoutEnabled) &&
+      (project !== 'despensalista' || !['dev', 'prod'].includes(stage))) {
+    throw new Error('Stripe Billing may be enabled only in dev and prod for DespensaLista.');
   }
-  if (stage !== 'dev') {
-    throw new Error('Sandbox Stripe Billing may be enabled only in dev.');
+  if (boundaryEnabled && stage !== 'prod') {
+    throw new Error('enableStripeBillingBoundary is a production control; dev uses enableStripeBilling.');
+  }
+  if (checkoutEnabled && !enabled) {
+    throw new Error('Stripe Checkout requires Stripe Billing to be enabled.');
+  }
+  if (enabled && stage === 'prod' && !boundaryEnabled) {
+    throw new Error('Production Stripe Billing requires the administrator-managed runtime boundary grant.');
   }
   const resourceName = `${project}/${stage}/billing/stripe`;
   return {
-    name: `/${resourceName}`,
-    arn: stack.formatArn({ service: 'ssm', resource: 'parameter', resourceName }),
+    enabled,
+    checkoutEnabled,
+    boundaryEnabled: stage === 'dev' ? enabled : boundaryEnabled,
+    mode: stage === 'prod' ? 'live' : 'test',
+    parameterName: `/${resourceName}`,
+    parameterArn: stack.formatArn({ service: 'ssm', resource: 'parameter', resourceName }),
   };
 }
 
@@ -80,7 +100,7 @@ export function applyRuntimeBoundary(stack: cdk.Stack, project: string, stage: s
 export function createStageDeliveryControls(stack: cdk.Stack, project: string, stage: string): void {
   const prefix = `${project}-${stage}`;
   const inventory = deliveryInventory(stage);
-  const stripeParameter = stripeBillingParameter(stack, project, stage);
+  const stripeBilling = stripeBillingDeployment(stack, project, stage);
   const arn = (service: string, resource: string, resourceName: string, region = stack.region) =>
     stack.formatArn({ service, region, resource, resourceName });
   const roleArn = (name: string) => arn('iam', 'role', name, '');
@@ -129,8 +149,8 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
     scoped(['sns:Publish'], [`arn:${stack.partition}:sns:${stack.region}:${stack.account}:${prefix}-*`]),
     scoped(['cloudfront:CreateInvalidation', 'cloudfront:GetInvalidation'], [arn('cloudfront', 'distribution', '*', '')], { StringEquals: { 'aws:ResourceTag/Project': project, 'aws:ResourceTag/Stage': stage } }),
   ];
-  if (stripeParameter) {
-    runtimeStatements.push(scoped(['ssm:GetParameter'], [stripeParameter.arn]));
+  if (stripeBilling.boundaryEnabled) {
+    runtimeStatements.push(scoped(['ssm:GetParameter'], [stripeBilling.parameterArn]));
   }
   const boundary = new iam.ManagedPolicy(stack, 'RuntimePermissionsBoundary', {
     managedPolicyName: `${prefix}-runtime-boundary`, statements: runtimeStatements,

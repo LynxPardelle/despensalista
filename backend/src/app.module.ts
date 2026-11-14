@@ -14,6 +14,7 @@ import {
   INVENTORY_LOT_DAO,
   INVENTORY_LOT_REPOSITORY,
   PANTRY_MUTATION_PORT,
+  HOUSEHOLD_BILLING,
   HOUSEHOLD_REPOSITORY,
   PRODUCT_DAO,
   PRODUCT_REPOSITORY,
@@ -151,6 +152,7 @@ import { AccessTokenGuard } from './infrastructure/http/auth/access-token.guard'
 import { StripeBillingConfig } from './infrastructure/billing/stripe-billing-config';
 import { StripeBillingService } from './infrastructure/billing/stripe-billing.service';
 import { StripeBillingStore } from './infrastructure/billing/stripe-billing.store';
+import { StripeHouseholdBilling } from './infrastructure/billing/stripe-household-billing';
 import { StripeBillingController } from './infrastructure/http/controllers/stripe-billing.controller';
 import { GoogleMfaService } from './infrastructure/http/auth/google-mfa.service';
 import { GoogleMfaController } from './infrastructure/http/controllers/google-mfa.controller';
@@ -496,6 +498,7 @@ const wasteEventRepositoryProvider = useDynamoDb
     StripeBillingConfig,
     StripeBillingService,
     StripeBillingStore,
+    { provide: HOUSEHOLD_BILLING, useClass: StripeHouseholdBilling },
     CognitoAuthTransactionService,
     CognitoProfileSyncService,
     CognitoAuthUrlBuilderService,

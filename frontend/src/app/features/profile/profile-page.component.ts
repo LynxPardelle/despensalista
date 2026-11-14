@@ -107,6 +107,7 @@ export class ProfilePageComponent implements OnInit {
   protected readonly billingStatusError = signal(false);
   protected readonly billingAction = signal<BillingAction | null>(null);
   protected readonly billingActionError = signal<string | null>(null);
+  protected readonly recurringTermsAccepted = signal(false);
   private billingStatusRequest?: Subscription;
 
   profile: UserProfile | null = null;
@@ -302,6 +303,17 @@ export class ProfilePageComponent implements OnInit {
       (status === 'pending' || status === 'incomplete');
   }
 
+  protected get canOpenLiveBillingHere(): boolean {
+    return this.document.defaultView?.location.origin === 'https://despensalista.com';
+  }
+
+  protected subscriptionDisplayLabel(subscription: AvailableBillingStatus): string {
+    if (this.billingStatusError()) return 'Estado por confirmar';
+    if (subscription.hasPlus === true) return 'Plus activo';
+    if (subscription.status === 'active') return 'Pago por confirmar';
+    return this.subscriptionStatusLabel(subscription.status);
+  }
+
   protected subscriptionStatusLabel(status: SubscriptionStatus): string {
     return SUBSCRIPTION_STATUS_LABELS[status] ?? 'Por confirmar';
   }
@@ -315,6 +327,16 @@ export class ProfilePageComponent implements OnInit {
     return `${amount} al mes`;
   }
 
+  protected formatBillingDate(value?: string): string | null {
+    if (!value) return null;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    return new Intl.DateTimeFormat('es-MX', {
+      dateStyle: 'long',
+      timeZone: 'America/Mexico_City',
+    }).format(date);
+  }
+
   protected onPageShow(event: PageTransitionEvent): void {
     if (event.persisted) {
       this.billingAction.set(null);
@@ -326,6 +348,7 @@ export class ProfilePageComponent implements OnInit {
     this.billingStatusRequest?.unsubscribe();
     this.billingLoading.set(true);
     this.billingStatusError.set(false);
+    this.recurringTermsAccepted.set(false);
     this.billingStatusRequest = this.billingService.getStatus()
       .pipe(
         takeUntilDestroyed(this.destroyRef),
@@ -348,19 +371,27 @@ export class ProfilePageComponent implements OnInit {
     if (this.billingAction() || this.billingLoading() || this.householdAccepting || !billing?.canManage) {
       return;
     }
-    if (action === 'checkout' && (!billing.canCheckout || this.awaitingBillingConfirmation)) return;
+    const live = billing.mode === 'live';
+    if (live && !this.canOpenLiveBillingHere) return;
+    if (action === 'checkout' && (
+      !billing.canCheckout || this.billingStatusError() || this.awaitingBillingConfirmation ||
+      (live && !this.recurringTermsAccepted())
+    )) return;
     if (action === 'portal' && !billing.canOpenPortal) return;
 
     this.billingAction.set(action);
     this.billingActionError.set(null);
-    this.billingService.createSession(action)
+    this.billingService.createSession(action, live && action === 'checkout' && this.recurringTermsAccepted())
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (url) => this.document.location.assign(url),
         error: () => {
           this.billingAction.set(null);
+          const checkoutError = live
+            ? 'No pudimos abrir el pago. Inténtalo de nuevo.'
+            : 'No pudimos abrir el pago de prueba. Inténtalo de nuevo.';
           this.billingActionError.set(action === 'checkout'
-            ? 'No pudimos abrir el pago de prueba. Inténtalo de nuevo.'
+            ? checkoutError
             : 'No pudimos abrir el portal de Stripe. Inténtalo de nuevo.');
         },
       });
