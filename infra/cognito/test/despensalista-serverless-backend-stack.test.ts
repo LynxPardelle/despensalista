@@ -236,6 +236,7 @@ test('Stripe Billing requires the canonical public origin and separate opt-ins i
   }));
   assert.ok(tableId);
   assert.equal(template.toJSON().Resources[tableId].DeletionPolicy, 'RetainExceptOnCreate');
+  template.hasOutput('StripeBillingTableName', { Value: { Ref: tableId } });
   template.hasResourceProperties('AWS::Lambda::Function', {
     FunctionName: 'despensalista-prod-backend-api',
     Environment: {

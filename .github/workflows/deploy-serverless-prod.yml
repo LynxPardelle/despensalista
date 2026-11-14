@@ -146,7 +146,7 @@ jobs:
           set -euo pipefail
           billing_table="$(aws cloudformation describe-stacks \
             --stack-name despensalista-prod-serverless-backend \
-            --query "Stacks[0].Outputs[?OutputKey=='StripeBillingTable'].OutputValue | [0]" \
+            --query "Stacks[0].Outputs[?OutputKey=='StripeBillingTableName'].OutputValue | [0]" \
             --output text)"
           if [[ "$STRIPE_BILLING_ENABLED" == false && "$billing_table" != None ]]; then
             echo "Production billing is provisioned. Disable only Checkout to preserve cancellations and account deletion." >&2

@@ -48,7 +48,7 @@ function stackDeploymentState(stage, stack) {
     deploymentReleaseId: outputs.DeploymentReleaseId,
     backendDataContractVersion: stackBackendDataContractVersion(stack),
     googleMfaProofVersion: outputs.GoogleMfaProofVersion,
-    stripeBillingTable: outputs.StripeBillingTable,
+    stripeBillingTable: outputs.StripeBillingTableName,
     bucket: outputs.WebBucketName,
     distribution: outputs.CloudFrontDistributionId,
   };

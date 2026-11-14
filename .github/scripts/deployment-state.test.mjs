@@ -1162,7 +1162,7 @@ test('manual production rollback preserves cancellation after billing is deploye
   const aws = args => {
     const response = underlyingAws(args);
     if (args.includes('despensalista-prod-serverless-backend')) {
-      response.Stacks[0].Outputs.push({ OutputKey: 'StripeBillingTable', OutputValue: 'despensalista-prod-billing' });
+      response.Stacks[0].Outputs.push({ OutputKey: 'StripeBillingTableName', OutputValue: 'despensalista-prod-billing' });
     }
     return response;
   };

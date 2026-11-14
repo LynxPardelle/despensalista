@@ -116,7 +116,7 @@ test('production deploy preserves billing infrastructure after its first deploym
   const prod = await readWorkflow('deploy-serverless-prod.yml');
   const guard = prod.indexOf('Keep billing available after its first production deployment');
   assert.ok(guard >= 0 && guard < prod.indexOf('Arm durable production recovery'));
-  assert.match(prod, /OutputKey=='StripeBillingTable'[\s\S]*?"\$STRIPE_BILLING_ENABLED" == false && "\$billing_table" != None[\s\S]*?exit 1/);
+  assert.match(prod, /OutputKey=='StripeBillingTableName'[\s\S]*?"\$STRIPE_BILLING_ENABLED" == false && "\$billing_table" != None[\s\S]*?exit 1/);
   assert.match(prod, /"\$STRIPE_BILLING_CHECKOUT_ENABLED" == true[\s\S]*?"\$live_billing" != live[\s\S]*?exit 1/);
 });
 
