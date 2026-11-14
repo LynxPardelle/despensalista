@@ -50,6 +50,14 @@ const routes: Routes = [
       ),
   },
   {
+    path: 'terminos-plus-hogar',
+    title: 'Condiciones de Plus Hogar | DespensaLista',
+    loadComponent: () =>
+      import('./features/legal/plus-hogar-terms-page.component').then(
+        (module) => module.PlusHogarTermsPageComponent,
+      ),
+  },
+  {
     path: 'pantry',
     loadChildren: () =>
       import('./features/pantry/pantry.module').then(

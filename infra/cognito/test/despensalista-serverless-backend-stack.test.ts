@@ -150,7 +150,7 @@ test('Google MFA refuses a non-dev stage or a missing Google provider', () => {
   );
 });
 
-test('Stripe Billing provisions an isolated table and exact Lambda grants only when enabled in dev', () => {
+test('Stripe Billing keeps the dev sandbox and scopes its Lambda grants', () => {
   const devOrigin = 'https://dev.despensalista.lynxpardelle.com';
   for (const stage of ['dev', 'tst', 'prod'] as const) {
     assert.doesNotMatch(JSON.stringify(synthesizeTemplate(stage).toJSON()), /STRIPE_BILLING_|StripeBillingTable|billing\/stripe/);
@@ -178,6 +178,8 @@ test('Stripe Billing provisions an isolated table and exact Lambda grants only w
         STRIPE_BILLING_TABLE: { Ref: tableId },
         STRIPE_BILLING_ORIGIN: devOrigin,
         STRIPE_BILLING_CONFIG_PARAMETER: '/despensalista/dev/billing/stripe',
+        STRIPE_BILLING_MODE: 'test',
+        STRIPE_BILLING_CHECKOUT_ENABLED: 'true',
       },
     },
   });
@@ -186,7 +188,7 @@ test('Stripe Billing provisions an isolated table and exact Lambda grants only w
     .flatMap((resource) => resource.Properties.PolicyDocument.Statement);
   const tableArn = { 'Fn::GetAtt': [tableId, 'Arn'] };
   assert.deepEqual(apiPolicies.filter((statement) => JSON.stringify(statement.Resource) === JSON.stringify(tableArn)), [{
-    Action: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+    Action: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:DeleteItem', 'dynamodb:ConditionCheckItem'],
     Effect: 'Allow',
     Resource: tableArn,
   }]);
@@ -195,12 +197,82 @@ test('Stripe Billing provisions an isolated table and exact Lambda grants only w
   assert.equal(getParameter[0].Effect, 'Allow');
   assert.match(JSON.stringify(getParameter[0].Resource), /:parameter\/despensalista\/dev\/billing\/stripe"/);
   assert.doesNotMatch(JSON.stringify(getParameter[0].Resource), /\*/);
+  const checkoutClosed = synthesizeTemplate('dev', {
+    enableStripeBilling: 'true',
+    enableStripeBillingCheckout: 'false',
+    serverlessFrontendBaseUrl: devOrigin,
+    appDomainName: new URL(devOrigin).hostname,
+  });
+  checkoutClosed.hasResourceProperties('AWS::Lambda::Function', {
+    FunctionName: 'despensalista-dev-backend-api',
+    Environment: {
+      Variables: {
+        STRIPE_BILLING_TABLE: { Ref: tableId },
+        STRIPE_BILLING_MODE: 'test',
+        STRIPE_BILLING_CHECKOUT_ENABLED: 'false',
+      },
+    },
+  });
 });
 
-test('Stripe Billing refuses protected stages and any other return origin', () => {
-  for (const stage of ['tst', 'prod'] as const) {
-    assert.throws(() => synthesizeTemplate(stage, { enableStripeBilling: 'true' }), /only in dev/);
-  }
+test('Stripe Billing requires the canonical public origin and separate opt-ins in prod', () => {
+  const publicContext = {
+    enablePublicProductionDomain: 'true',
+    publicProductionCertificateArn: 'arn:aws:acm:us-east-1:123456789012:certificate/01234567-89ab-cdef-0123-456789abcdef',
+    serverlessFrontendBaseUrl: 'https://despensalista.lynxpardelle.com',
+    appDomainName: 'despensalista.lynxpardelle.com',
+  };
+  const enabled = {
+    ...publicContext,
+    enableStripeBillingBoundary: 'true',
+    enableStripeBilling: 'true',
+  };
+  const onlyBoundary = synthesizeTemplate('prod', { ...publicContext, enableStripeBillingBoundary: 'true' });
+  assert.doesNotMatch(JSON.stringify(onlyBoundary.toJSON()), /STRIPE_BILLING_|StripeBillingTable|billing\/stripe/);
+
+  const template = synthesizeTemplate('prod', enabled);
+  const [tableId] = Object.keys(template.findResources('AWS::DynamoDB::Table', {
+    Properties: { TableName: 'despensalista-prod-billing' },
+  }));
+  assert.ok(tableId);
+  assert.equal(template.toJSON().Resources[tableId].DeletionPolicy, 'RetainExceptOnCreate');
+  template.hasOutput('StripeBillingTableName', { Value: { Ref: tableId } });
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    FunctionName: 'despensalista-prod-backend-api',
+    Environment: {
+      Variables: {
+        STRIPE_BILLING_TABLE: { Ref: tableId },
+        STRIPE_BILLING_ORIGIN: 'https://despensalista.com',
+        STRIPE_BILLING_CONFIG_PARAMETER: '/despensalista/prod/billing/stripe',
+        STRIPE_BILLING_MODE: 'live',
+        STRIPE_BILLING_CHECKOUT_ENABLED: 'false',
+      },
+    },
+  });
+  const apiStatements = Object.values(template.findResources('AWS::IAM::Policy'))
+    .filter((resource) => JSON.stringify(resource.Properties.Roles).includes('BackendFunctionServiceRole'))
+    .flatMap((resource) => resource.Properties.PolicyDocument.Statement);
+  const parameters = apiStatements.filter((statement) => statement.Action === 'ssm:GetParameter');
+  assert.equal(parameters.length, 1);
+  assert.match(JSON.stringify(parameters[0].Resource), /:parameter\/despensalista\/prod\/billing\/stripe"/);
+  assert.doesNotMatch(JSON.stringify(parameters[0].Resource), /\*/);
+  const tableArn = { 'Fn::GetAtt': [tableId, 'Arn'] };
+  assert.deepEqual(apiStatements.filter((statement) => JSON.stringify(statement.Resource) === JSON.stringify(tableArn)), [{
+    Action: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:DeleteItem', 'dynamodb:ConditionCheckItem'],
+    Effect: 'Allow',
+    Resource: tableArn,
+  }]);
+  const checkoutEnabled = synthesizeTemplate('prod', { ...enabled, enableStripeBillingCheckout: 'true' });
+  checkoutEnabled.hasResourceProperties('AWS::Lambda::Function', {
+    FunctionName: 'despensalista-prod-backend-api',
+    Environment: { Variables: { STRIPE_BILLING_CHECKOUT_ENABLED: 'true' } },
+  });
+
+  assert.throws(() => synthesizeTemplate('prod', { ...publicContext, enableStripeBilling: 'true' }), /runtime boundary/);
+  assert.throws(() => synthesizeTemplate('prod', { ...enabled, enablePublicProductionDomain: 'false' }), /public production domain/);
+  assert.throws(() => synthesizeTemplate('prod', { ...publicContext, enableStripeBillingCheckout: 'true' }), /requires Stripe Billing/);
+  assert.throws(() => synthesizeTemplate('prod', { ...enabled, enableStripeBillingCheckout: 'yes' }), /must be true or false/);
+  assert.throws(() => synthesizeTemplate('tst', { enableStripeBilling: 'true' }), /only in dev and prod/);
   assert.throws(() => synthesizeTemplate('dev', { enableStripeBilling: 'true' }), /requires the dev frontend origin/);
 });
 

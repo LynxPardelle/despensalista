@@ -169,10 +169,19 @@
       </aside>
 
       @if (billing(); as subscription) {
+        @let liveBilling = subscription.mode === 'live';
+        @let canOpenSessions = !liveBilling || canOpenLiveBillingHere;
+        @let periodEnd = formatBillingDate(subscription.currentPeriodEnd);
         <section class="panel monetization-panel" aria-labelledby="subscription-title">
-          <p class="panel-kicker">Modo de prueba</p>
-          <h2 id="subscription-title">Suscripción de prueba</h2>
-          <p>Stripe simula el cobro. Esta suscripción sirve para probar el pago y su gestión.</p>
+          @if (liveBilling) {
+            <h2 id="subscription-title">Plus Hogar</h2>
+            <p>Suscripción mensual para tu hogar.</p>
+            <p><a routerLink="/terminos-plus-hogar">Condiciones de Plus Hogar</a></p>
+          } @else {
+            <p class="panel-kicker">Modo de prueba</p>
+            <h2 id="subscription-title">Suscripción de prueba</h2>
+            <p>Stripe simula el cobro. Esta suscripción sirve para probar el pago y su gestión.</p>
+          }
 
           <dl class="billing-decision-list" aria-label="Detalles de la suscripción">
             <div>
@@ -181,41 +190,92 @@
             </div>
             <div>
               <dt>Estado</dt>
-              <dd aria-live="polite">{{ subscriptionStatusLabel(subscription.status) }}</dd>
+              <dd aria-live="polite">
+                {{ subscriptionDisplayLabel(subscription) }}
+              </dd>
             </div>
+            @if (periodEnd && !billingStatusError()) {
+              <div>
+                <dt>Fin del periodo pagado</dt>
+                <dd>{{ periodEnd }}</dd>
+              </div>
+            }
           </dl>
 
+          @if (subscription.cancelAtPeriodEnd && !billingStatusError()) {
+            <p class="helper-copy">
+              Tu suscripción no se renovará.
+              @if (subscription.hasPlus === true) {
+                Conservas el acceso hasta que termine el periodo pagado.
+              }
+            </p>
+          }
           @if (awaitingBillingConfirmation) {
-            <p class="helper-copy" role="status">Estamos confirmando el pago de prueba con Stripe.</p>
+            <p class="helper-copy" role="status">
+              {{ liveBilling ? 'Estamos confirmando el pago con Stripe.' : 'Estamos confirmando el pago de prueba con Stripe.' }}
+            </p>
           } @else if (billingReturn === 'success' && subscription.status === 'none') {
-            <p class="helper-copy" role="status">Aún no hay un pago de prueba confirmado para este hogar.</p>
+            <p class="helper-copy" role="status">
+              {{ liveBilling ? 'Aún no hay un pago confirmado para este hogar.' : 'Aún no hay un pago de prueba confirmado para este hogar.' }}
+            </p>
           } @else if (billingReturn === 'cancelled' && subscription.canCheckout) {
-            <p class="helper-copy" role="status">Saliste del pago de prueba. Puedes retomarlo aquí.</p>
+            <p class="helper-copy" role="status">
+              {{ liveBilling ? 'Saliste del pago. Puedes retomarlo aquí.' : 'Saliste del pago de prueba. Puedes retomarlo aquí.' }}
+            </p>
           }
 
           @if (!subscription.canManage) {
             <p class="helper-copy">Solo la persona propietaria del hogar puede gestionar la suscripción.</p>
           }
 
+          @if (liveBilling && !canOpenSessions && subscription.canManage) {
+            <p class="helper-copy">
+              <a href="https://despensalista.com/profile">Gestiona Plus Hogar en despensalista.com</a>.
+            </p>
+          }
+
+          @if (liveBilling && canOpenSessions && subscription.canManage && subscription.canCheckout && !awaitingBillingConfirmation) {
+            <p class="helper-copy" id="plus-checkout-details">
+              El primer cargo se hace al confirmar el pago en Stripe. Luego se cobra
+              {{ formatPlanPrice(subscription.plan) }} hasta que canceles. En tu perfil puedes consultar el
+              periodo y cancelar la renovación.
+            </p>
+            <label class="billing-consent">
+              <input
+                #recurringConsent
+                type="checkbox"
+                [checked]="recurringTermsAccepted()"
+                [disabled]="billingAction() !== null || billingLoading() || billingStatusError()"
+                aria-describedby="plus-checkout-details"
+                (change)="recurringTermsAccepted.set(recurringConsent.checked)"
+              />
+              <span>Acepto las condiciones y autorizo el cobro recurrente.</span>
+            </label>
+          }
+
           <div class="billing-actions">
-            @if (subscription.canManage && subscription.canCheckout && !awaitingBillingConfirmation) {
+            @if (canOpenSessions && subscription.canManage && subscription.canCheckout && !awaitingBillingConfirmation) {
               <button
                 class="secondary-button"
                 type="button"
-                [disabled]="billingAction() || billingLoading() || householdAccepting"
+                [disabled]="billingAction() || billingLoading() || billingStatusError() || householdAccepting || (liveBilling && !recurringTermsAccepted())"
                 (click)="openBillingSession('checkout')"
               >
-                {{ subscription.status === 'pending' ? 'Continuar pago de prueba' : 'Iniciar pago de prueba' }}
+                @if (liveBilling) {
+                  {{ subscription.status === 'pending' ? 'Continuar pago' : 'Suscribirme a Plus Hogar' }}
+                } @else {
+                  {{ subscription.status === 'pending' ? 'Continuar pago de prueba' : 'Iniciar pago de prueba' }}
+                }
               </button>
             }
-            @if (subscription.canManage && subscription.canOpenPortal) {
+            @if (canOpenSessions && subscription.canManage && subscription.canOpenPortal) {
               <button
                 class="secondary-button"
                 type="button"
                 [disabled]="billingAction() || billingLoading() || householdAccepting"
                 (click)="openBillingSession('portal')"
               >
-                Abrir portal de Stripe
+                {{ liveBilling ? 'Gestionar suscripción en Stripe' : 'Abrir portal de Stripe' }}
               </button>
             }
             <button
@@ -234,7 +294,9 @@
             <p class="loading-copy" role="status">Consultando el estado de la suscripción…</p>
           }
           @if (billingStatusError()) {
-            <p class="field-error" role="alert">No pudimos actualizar el estado de la suscripción de prueba.</p>
+            <p class="field-error" role="alert">
+              {{ liveBilling ? 'No pudimos actualizar el estado de la suscripción.' : 'No pudimos actualizar el estado de la suscripción de prueba.' }}
+            </p>
           }
           @if (billingActionError(); as message) {
             <p class="field-error" role="alert">{{ message }}</p>
@@ -599,6 +661,14 @@
         <p class="panel-kicker">Cuenta</p>
         <h2>Borrar cuenta</h2>
         <p>Elimina la cuenta local, datos de despensa y la identidad Cognito conectada.</p>
+        @if (billing(); as subscription) {
+          @if (subscription.mode === 'live' && subscription.canManage && (subscription.canOpenPortal || subscription.hasPlus)) {
+            <p>
+              Borrar la cuenta cancela Plus Hogar de inmediato. Para detener la renovación y conservar el acceso
+              durante el periodo pagado, cancela en «Gestionar suscripción en Stripe».
+            </p>
+          }
+        }
 
         <form class="preferences-form" [formGroup]="deleteAccountForm" (ngSubmit)="deleteAccount()">
           <label class="field">

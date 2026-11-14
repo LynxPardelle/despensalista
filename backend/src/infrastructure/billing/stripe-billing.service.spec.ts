@@ -18,10 +18,24 @@ describe('StripeBillingService', () => {
   const stripe = new Stripe('sk_test_unit_test_key');
   const billing = {
     stripe,
+    mode: 'test',
+    stage: 'dev',
+    checkoutEnabled: true,
     origin: 'https://dev.despensalista.lynxpardelle.com',
     table: 'despensalista-dev-billing',
     priceId: 'price_test',
     webhookSigningSecret: secret,
+  };
+  const production = {
+    ...billing,
+    mode: 'live',
+    stage: 'prod',
+    origin: 'https://despensalista.com',
+    table: 'despensalista-prod-billing',
+    accountId: 'acct_despensa',
+    productId: 'prod_despensa',
+    portalConfigurationId: 'bpc_despensa',
+    checkoutEnabled: false,
   };
   const session = {
     id: 'cs_test_thissession',
@@ -39,11 +53,17 @@ describe('StripeBillingService', () => {
   let membership: jest.Mock;
   let permissions: jest.Mock;
   let settings: jest.Mock;
+  let customerMapping: jest.Mock;
+  let beginCheckout: jest.Mock;
+  let endCheckout: jest.Mock;
 
   beforeEach(() => {
     record = undefined;
     exists = jest.fn().mockResolvedValue(false);
     settings = jest.fn().mockResolvedValue(billing);
+    customerMapping = jest.fn().mockResolvedValue(undefined);
+    beginCheckout = jest.fn().mockResolvedValue('lease');
+    endCheckout = jest.fn().mockResolvedValue(undefined);
     commit = jest.fn().mockImplementation((next: BillingRecord) => {
       record = next;
       return Promise.resolve(true);
@@ -58,6 +78,9 @@ describe('StripeBillingService', () => {
         return Promise.resolve(true);
       }),
       hasEvent: exists,
+      readHouseholdByCustomer: customerMapping,
+      beginCheckout,
+      endCheckout,
       applyEvent: commit,
     } as unknown as StripeBillingStore;
     membership = jest.fn().mockResolvedValue(null);
@@ -127,9 +150,210 @@ describe('StripeBillingService', () => {
 
   afterEach(() => jest.restoreAllMocks());
 
+  it('keeps closed live enrollment separate from existing subscriptions', async () => {
+    settings.mockResolvedValue(production);
+    membership.mockResolvedValue({ householdId: 'household-1', role: 'owner' });
+    record = {
+      householdId: 'household-1',
+      revision: 1,
+      customerId: 'cus_live',
+      subscriptionId: 'sub_live',
+      status: 'active',
+    };
+    await expect(
+      service.checkout('owner-1', production.origin, true),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(permissions).not.toHaveBeenCalled();
+    expect(stripe.customers.create).not.toHaveBeenCalled();
+    const testPrice = await stripe.prices.retrieve(billing.priceId);
+    jest.mocked(stripe.prices.retrieve).mockResolvedValueOnce({
+      ...testPrice,
+      active: false,
+      livemode: true,
+      product: production.productId,
+    });
+    await expect(service.status('owner-1')).resolves.toMatchObject({
+      mode: 'live',
+      hasPlus: false,
+      canCheckout: false,
+      canOpenPortal: true,
+    });
+  });
+
+  it('requires explicit recurring terms before opening a live Checkout', async () => {
+    settings.mockResolvedValue({ ...production, checkoutEnabled: true });
+    await expect(
+      service.checkout('owner-1', production.origin),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(permissions).not.toHaveBeenCalled();
+    expect(stripe.customers.create).not.toHaveBeenCalled();
+  });
+
+  it('does not start billing changes while the household checkout is locked', async () => {
+    beginCheckout.mockResolvedValue(undefined);
+    await expect(
+      service.checkout('owner-1', billing.origin),
+    ).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(beginCheckout).toHaveBeenCalledWith(billing.table, 'household-1');
+    expect(endCheckout).not.toHaveBeenCalled();
+    expect(stripe.customers.create).not.toHaveBeenCalled();
+    expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
+  });
+
+  it('releases the household checkout lease after a Stripe failure', async () => {
+    jest
+      .mocked(stripe.customers.create)
+      .mockRejectedValueOnce(new Error('unavailable'));
+    await expect(
+      service.checkout('owner-1', billing.origin),
+    ).rejects.toMatchObject({
+      status: 503,
+    });
+    expect(endCheckout).toHaveBeenCalledWith(
+      billing.table,
+      'household-1',
+      'lease',
+    );
+  });
+
+  it('ignores a signed same-account foreign customer before reading Stripe or saving', async () => {
+    settings.mockResolvedValue(production);
+    const payload = JSON.stringify({
+      id: 'evt_roadmap2u',
+      type: 'invoice.paid',
+      livemode: true,
+      data: { object: { customer: 'cus_roadmap2u' } },
+    });
+    const signature = stripe.webhooks.generateTestHeaderString({
+      payload,
+      secret,
+    });
+    await expect(
+      service.webhook(Buffer.from(payload), signature),
+    ).resolves.toBeUndefined();
+    expect(customerMapping).toHaveBeenCalledWith(
+      production.table,
+      'cus_roadmap2u',
+    );
+    expect(stripe.customers.retrieve).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it('does not grant Plus when only the subscription status is active', async () => {
+    membership.mockResolvedValue({ householdId: 'household-1', role: 'owner' });
+    record = { householdId: 'household-1', revision: 1, status: 'active' };
+    await expect(service.status('owner-1')).resolves.toMatchObject({
+      mode: 'test',
+      hasPlus: false,
+    });
+  });
+
+  it('grants live Plus only after a paid invoice for the present item period', async () => {
+    settings.mockResolvedValue(production);
+    membership.mockResolvedValue({ householdId: 'household-1', role: 'owner' });
+    customerMapping.mockResolvedValue('household-1');
+    record = {
+      householdId: 'household-1',
+      revision: 1,
+      customerId: 'cus_live',
+    };
+    const metadata = {
+      integration: 'despensalista',
+      stage: 'prod',
+      despensalistaHouseholdId: 'household-1',
+    };
+    jest.mocked(stripe.customers.retrieve).mockResolvedValue({
+      id: 'cus_live',
+      livemode: true,
+      metadata,
+    } as unknown as Stripe.Response<Stripe.Customer>);
+    const currentPeriodEnd = Math.ceil(Date.now() / 1000) + 60;
+    const subscription = {
+      id: 'sub_live',
+      status: 'active',
+      customer: 'cus_live',
+      livemode: true,
+      metadata,
+      cancel_at_period_end: true,
+      items: {
+        has_more: false,
+        data: [
+          {
+            id: 'si_live',
+            quantity: 1,
+            price: { id: production.priceId, product: production.productId },
+            current_period_end: currentPeriodEnd,
+          },
+        ],
+      },
+      latest_invoice: {
+        status: 'paid',
+        amount_paid: 5900,
+        currency: 'mxn',
+        customer: 'cus_live',
+        livemode: true,
+        parent: { subscription_details: { subscription: 'sub_live' } },
+        lines: {
+          data: [
+            {
+              currency: 'mxn',
+              amount: 5900,
+              period: { end: currentPeriodEnd - 60 },
+              parent: {
+                subscription_item_details: { subscription_item: 'si_live' },
+              },
+              pricing: { price_details: { price: production.priceId } },
+            },
+          ],
+        },
+      },
+    };
+    jest.mocked(stripe.subscriptions.list).mockResolvedValue({
+      data: [subscription],
+      has_more: false,
+    } as unknown as Stripe.Response<Stripe.ApiList<Stripe.Subscription>>);
+    const sendPaidEvent = async (id: string) => {
+      const payload = JSON.stringify({
+        id,
+        type: 'invoice.paid',
+        livemode: true,
+        data: { object: { customer: 'cus_live' } },
+      });
+      await service.webhook(
+        Buffer.from(payload),
+        stripe.webhooks.generateTestHeaderString({
+          payload,
+          secret,
+        }),
+      );
+    };
+    await sendPaidEvent('evt_old_period');
+    expect(record?.paidThrough).toBeUndefined();
+    subscription.latest_invoice.lines.data[0].period.end = currentPeriodEnd;
+    await sendPaidEvent('evt_current_period');
+    expect(record?.paidThrough).toBe(currentPeriodEnd);
+    const testPrice = await stripe.prices.retrieve(billing.priceId);
+    jest.mocked(stripe.prices.retrieve).mockResolvedValueOnce({
+      ...testPrice,
+      livemode: true,
+      product: production.productId,
+    });
+    await expect(service.status('owner-1')).resolves.toMatchObject({
+      mode: 'live',
+      hasPlus: true,
+      canCheckout: false,
+      cancelAtPeriodEnd: true,
+      currentPeriodEnd: new Date(currentPeriodEnd * 1000).toISOString(),
+    });
+  });
+
   it('reads the plan without creating a household for a new user', async () => {
     expect(await service.status('owner-1')).toEqual({
       available: true,
+      mode: 'test',
+      hasPlus: false,
       canManage: true,
       canCheckout: true,
       canOpenPortal: false,

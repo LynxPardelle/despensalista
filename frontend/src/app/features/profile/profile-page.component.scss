@@ -170,6 +170,16 @@
   gap: 0.65rem;
 }
 
+.billing-consent {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.billing-consent input {
+  flex: none;
+}
+
 .billing-decision-list dt,
 .plan-heading span,
 .plan-list small {
