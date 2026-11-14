@@ -478,11 +478,12 @@ describe('ProfilePageComponent', () => {
       canCheckout: false,
       canOpenPortal: false,
       status: 'active',
+      hasPlus: true,
     });
     fixture.detectChanges();
 
     const panel = (fixture.nativeElement as HTMLElement).querySelector('section[aria-labelledby="subscription-title"]')!;
-    expect(panel.textContent).toContain('Activa');
+    expect(panel.textContent).toContain('Plus activo');
     expect(panel.textContent).toContain('persona propietaria del hogar');
     expect(panel.textContent).not.toContain('Iniciar pago de prueba');
     expect(panel.textContent).not.toContain('Abrir portal de Stripe');
@@ -503,7 +504,7 @@ describe('ProfilePageComponent', () => {
     const panel = (fixture.nativeElement as HTMLElement).querySelector('section[aria-labelledby="subscription-title"]')!;
     const refresh = Array.from(panel.querySelectorAll('button')).find((button) => button.textContent.includes('Actualizar estado'))!;
     expect(panel.textContent).toContain('Estamos confirmando el pago de prueba');
-    expect(panel.textContent).not.toContain('Activa');
+    expect(panel.textContent).not.toContain('Plus activo');
 
     refresh.click();
     http.expectOne('/api/billing/status').flush({
@@ -511,10 +512,11 @@ describe('ProfilePageComponent', () => {
       canCheckout: false,
       canOpenPortal: true,
       status: 'active',
+      hasPlus: true,
     });
     fixture.detectChanges();
 
-    expect(panel.textContent).toContain('Activa');
+    expect(panel.textContent).toContain('Plus activo');
     expect(panel.textContent).not.toContain('Estamos confirmando el pago de prueba');
     const portal = Array.from(panel.querySelectorAll('button')).find((button) => button.textContent.includes('Abrir portal de Stripe'))!;
     portal.click();
