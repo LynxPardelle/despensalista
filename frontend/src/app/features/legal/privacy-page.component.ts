@@ -12,7 +12,7 @@ import { RouterLink } from '@angular/router';
       <article class="legal-document">
         <p class="eyebrow">Despensa Lista</p>
         <h1 id="privacy-title">Politica de privacidad</h1>
-        <p class="updated">Ultima actualizacion: 9 de julio de 2026</p>
+        <p class="updated">Última actualización: 13 de noviembre de 2026</p>
 
         <p>
           Despensa Lista ayuda a organizar productos del hogar, lotes,
@@ -23,8 +23,7 @@ import { RouterLink } from '@angular/router';
 
         <h2>Responsable</h2>
         <p>
-          Despensa Lista es operada por Lynx Pardelle para el dominio
-          despensalista.lynxpardelle.com.
+          Despensa Lista es operada por Lynx Pardelle para el dominio despensalista.com.
         </p>
 
         <h2>Datos que recopilamos</h2>
@@ -52,6 +51,20 @@ import { RouterLink } from '@angular/router';
           acceso basico necesario: identificador de cuenta, correo, nombre y
           perfil basico segun el proveedor. No publicamos contenido en tus
           cuentas sociales y no vendemos estos datos.
+        </p>
+
+        <h2>Pagos y suscripción</h2>
+        <p>
+          Si contratas Plus Hogar, Stripe procesa el pago y recoge directamente los datos de
+          facturación y de la tarjeta en su página de pago. Despensa Lista no recibe ni almacena
+          el número de tarjeta ni el código de seguridad. Usamos el identificador del hogar,
+          las referencias de Stripe y el estado de pago para conciliar los cobros, activar el
+          plan y gestionar la suscripción.
+        </p>
+        <p>
+          Conservamos los registros de facturación necesarios para atender la suscripción,
+          conciliar pagos y cumplir las obligaciones aplicables.
+          <a routerLink="/terminos-plus-hogar">Consulta las condiciones de Plus Hogar.</a>
         </p>
 
         <h2>Como usamos los datos</h2>

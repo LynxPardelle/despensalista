@@ -27,11 +27,15 @@ export interface BillingPlan {
 
 export interface AvailableBillingStatus {
   available: true;
+  mode?: 'test' | 'live';
+  hasPlus?: boolean;
   canManage: boolean;
   canCheckout: boolean;
   canOpenPortal: boolean;
   plan: BillingPlan;
   status: SubscriptionStatus;
+  cancelAtPeriodEnd?: boolean;
+  currentPeriodEnd?: string;
 }
 
 type BillingStatus = { available: false } | AvailableBillingStatus;
@@ -48,9 +52,12 @@ export class BillingService {
     });
   }
 
-  createSession(action: BillingAction): Observable<string> {
+  createSession(action: BillingAction, acceptRecurringTerms = false): Observable<string> {
+    const body = action === 'checkout' && acceptRecurringTerms
+      ? { acceptRecurringTerms: true }
+      : {};
     return this.http
-      .post<{ url: string }>(`${this.billingUrl}/${action}`, {}, { withCredentials: true })
+      .post<{ url: string }>(`${this.billingUrl}/${action}`, body, { withCredentials: true })
       .pipe(
         map(({ url }) => {
           const destination = new URL(url);

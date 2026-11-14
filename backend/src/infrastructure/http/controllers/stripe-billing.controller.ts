@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   Header,
@@ -33,8 +34,13 @@ export class StripeBillingController {
   checkout(
     @CurrentUser() user: AuthenticatedUser,
     @Headers('origin') origin: string | undefined,
+    @Body() body: { acceptRecurringTerms?: boolean } | undefined,
   ) {
-    return this.billing.checkout(user.userId, origin);
+    return this.billing.checkout(
+      user.userId,
+      origin,
+      body?.acceptRecurringTerms === true,
+    );
   }
 
   @Post('portal')
