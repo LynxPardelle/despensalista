@@ -438,6 +438,19 @@ test('the protected runtime boundary permits reading only the explicit stage Str
   }
 });
 
+test('an externally updated Stripe Billing boundary leaves the production Cognito template unchanged', () => {
+  const synthesize = (overrides: Record<string, string> = {}) => {
+    const app = new cdk.App({ context: { stage: 'prod', ...overrides } });
+    return Template.fromStack(new DespensaListaCognitoStack(app, 'despensalista-prod-cognito')).toJSON();
+  };
+
+  assert.deepEqual(synthesize({
+    enableStripeBilling: 'true',
+    enableStripeBillingBoundary: 'true',
+    externalStripeBillingBoundary: 'true',
+  }), synthesize());
+});
+
 test('CloudFormation execution may read only the exact protected delivery roles', () => {
   const app = new cdk.App({ context: { stage: 'dev' } });
   const template = Template.fromStack(new DespensaListaCognitoStack(app, 'Cognito-execution-role-read')).toJSON();
