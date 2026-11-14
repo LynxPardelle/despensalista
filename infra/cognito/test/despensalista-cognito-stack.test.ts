@@ -412,9 +412,9 @@ test('runtime boundary permits CodeDeploy to inspect and move only stage aliases
   assert.doesNotMatch(JSON.stringify(statement.Resource), /function:\*/);
 });
 
-test('the protected runtime boundary permits reading only the explicit dev Stripe configuration', () => {
-  function synthesizeBoundary(stage: string, enableStripeBilling = 'false') {
-    const app = new cdk.App({ context: { stage, enableStripeBilling } });
+test('the protected runtime boundary permits reading only the explicit stage Stripe configuration', () => {
+  function synthesizeBoundary(stage: string, context: Record<string, string> = {}) {
+    const app = new cdk.App({ context: { stage, ...context } });
     const template = Template.fromStack(new DespensaListaCognitoStack(app, `Billing-boundary-${stage}`));
     return Object.values(template.findResources('AWS::IAM::ManagedPolicy'))
       .find((resource) => resource.Properties.ManagedPolicyName === `despensalista-${stage}-runtime-boundary`)
@@ -424,11 +424,18 @@ test('the protected runtime boundary permits reading only the explicit dev Strip
   for (const stage of ['dev', 'tst', 'prod']) {
     assert.doesNotMatch(JSON.stringify(synthesizeBoundary(stage)), /ssm:GetParameter|billing\/stripe/);
   }
-  const statements = synthesizeBoundary('dev', 'true').filter((statement: { Action: string }) => statement.Action === 'ssm:GetParameter');
-  assert.equal(statements.length, 1);
-  assert.equal(statements[0].Effect, 'Allow');
-  assert.match(JSON.stringify(statements[0].Resource), /:parameter\/despensalista\/dev\/billing\/stripe"/);
-  assert.doesNotMatch(JSON.stringify(statements[0].Resource), /\*/);
+  for (const stage of ['dev', 'prod'] as const) {
+    const context: Record<string, string> = stage === 'dev'
+      ? { enableStripeBilling: 'true' }
+      : { enableStripeBillingBoundary: 'true' };
+    const statements = synthesizeBoundary(stage, context)
+      .filter((statement: { Action: string }) => statement.Action === 'ssm:GetParameter');
+    assert.equal(statements.length, 1);
+    assert.equal(statements[0].Effect, 'Allow');
+    const resource = JSON.stringify(statements[0].Resource);
+    assert.ok(resource.includes(`:parameter/despensalista/${stage}/billing/stripe"`));
+    assert.doesNotMatch(resource, /\*/);
+  }
 });
 
 test('CloudFormation execution may read only the exact protected delivery roles', () => {

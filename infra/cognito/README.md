@@ -277,12 +277,48 @@ Set GitHub environment `dev` variable `ENABLE_STRIPE_BILLING` to `true`, then
 run the dev release workflow. It provisions the on-demand billing table and
 supplies the parameter name and return origin to the backend. Confirm dev
 Checkout, webhook delivery, and Customer Portal with a Stripe test card.
+Set `ENABLE_STRIPE_BILLING_CHECKOUT=false` in `dev` to exercise closing new
+Checkout sessions while leaving the portal and webhook available.
 
 Use the normal dev release rollback to switch application versions. The
 billing table survives stack removal after its creation succeeds. If the
 feature is deliberately deprovisioned, use an administrator change set to
 remove the boundary permission, then clear the GitHub variable and deploy.
 Re-enabling after deprovisioning requires importing the retained table.
+
+## Stripe Billing in production
+
+Production uses `https://despensalista.com` for Checkout, Customer Portal and
+the Stripe event destination `/api/billing/webhook`. Keep the existing
+production CloudFront aliases and Cognito URLs. Production billing requires
+`ENABLE_PUBLIC_PRODUCTION_DOMAIN=true` in the GitHub `prod` environment.
+
+1. An administrator prepares the protected production Cognito stack with a
+   change set that adds `ssm:GetParameter` for
+   `/despensalista/prod/billing/stripe` to the runtime boundary. CDK models this
+   with `--context enableStripeBillingBoundary=true`. Review that the change set
+   touches only the boundary statement. Set `ENABLE_STRIPE_BILLING_BOUNDARY=true`
+   in the GitHub `prod` environment once that change is applied. Keep this
+   variable set on subsequent deployments.
+2. Create a Standard `SecureString` at `/despensalista/prod/billing/stripe` in
+   `us-east-1` using the AWS-managed SSM key. The JSON uses `accountId`,
+   `productId`, `priceId`, `portalConfigurationId`, `apiKey` and
+   `webhookSigningSecret` for the live DespensaLista integration. Use a
+   restricted live key and the portal configuration dedicated to
+   DespensaLista. Enter secret values directly in Parameter Store.
+3. Set `ENABLE_STRIPE_BILLING=true` and leave
+   `ENABLE_STRIPE_BILLING_CHECKOUT=false` to deploy billing with new purchases
+   closed. The normal production workflow creates the retained on-demand
+   table and grants the backend access to that table and exact parameter.
+   Verify the production event destination and portal configuration, and
+   complete the payment and cancellation checks in the sandbox.
+4. Set `ENABLE_STRIPE_BILLING_CHECKOUT=true` and redeploy when the offer and
+   its price are ready. To close new purchases while serving existing
+   subscribers, set that variable to `false` and keep the billing integration
+   enabled so the portal, webhook and account deletion remain available. After
+   the production billing table is deployed, delivery rejects disabling the
+   integration. Use only published versions with Stripe Billing when rolling
+   back a production release with subscribers.
 
 ## Useful Outputs
 

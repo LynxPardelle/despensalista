@@ -25,7 +25,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { applyRuntimeBoundary, deliveryInventory, googleMfaEnabled, requireGoogleMfaOrigin, stripeBillingParameter } from './stage-delivery';
+import { applyRuntimeBoundary, deliveryInventory, googleMfaEnabled, requireGoogleMfaOrigin, stripeBillingDeployment } from './stage-delivery';
 import { PublicProductionDomain, publicProductionDomain } from './public-production-domain';
 
 interface DespensaListaServerlessBackendStackProps extends cdk.StackProps {
@@ -87,9 +87,14 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       this.readContext('productionFrontendBaseUrl', frontendBaseUrl) !== googleMfaOrigin)) {
       throw new Error('Google MFA requires the same frontend origin for Cognito, WebAuthn and the app domain.');
     }
-    const stripeParameter = stripeBillingParameter(this, projectName, stage);
-    const stripeBillingOrigin = 'https://dev.despensalista.lynxpardelle.com';
-    if (stripeParameter && (frontendBaseUrl !== stripeBillingOrigin || `https://${domainName}` !== stripeBillingOrigin)) {
+    const stripeBilling = stripeBillingDeployment(this, projectName, stage);
+    const devBillingOrigin = 'https://dev.despensalista.lynxpardelle.com';
+    const stripeBillingOrigin = isProduction ? publicDomain?.origin : devBillingOrigin;
+    if (stripeBilling.enabled && isProduction && !stripeBillingOrigin) {
+      throw new Error('Live Stripe Billing requires the public production domain.');
+    }
+    if (stripeBilling.enabled && !isProduction &&
+        (frontendBaseUrl !== devBillingOrigin || `https://${domainName}` !== devBillingOrigin)) {
       throw new Error('Sandbox Stripe Billing requires the dev frontend origin.');
     }
     const tables = this.createTables(projectName, stage);
@@ -104,7 +109,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: resourceRemovalPolicy,
     }) : undefined;
-    const stripeBillingTable = stripeParameter ? new dynamodb.Table(this, 'StripeBillingTable', {
+    const stripeBillingTable = stripeBilling.enabled ? new dynamodb.Table(this, 'StripeBillingTable', {
       tableName: `${projectName}-${stage}-billing`,
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
       timeToLiveAttribute: 'expiresAt',
@@ -181,10 +186,12 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
           GOOGLE_MFA_ORIGIN: googleMfaOrigin,
           GOOGLE_MFA_PROOF_VERSION: '2',
         }),
-        ...(stripeBillingTable && stripeParameter && {
+        ...(stripeBillingTable && stripeBillingOrigin && {
           STRIPE_BILLING_TABLE: stripeBillingTable.tableName,
           STRIPE_BILLING_ORIGIN: stripeBillingOrigin,
-          STRIPE_BILLING_CONFIG_PARAMETER: stripeParameter.name,
+          STRIPE_BILLING_CONFIG_PARAMETER: stripeBilling.parameterName,
+          STRIPE_BILLING_MODE: stripeBilling.mode,
+          STRIPE_BILLING_CHECKOUT_ENABLED: String(stripeBilling.checkoutEnabled),
         }),
         HELMET_ENABLED: 'true',
         RATE_LIMIT_ENABLED: 'true',
@@ -203,14 +210,14 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         resources: [googleMfaTable.tableArn],
       }));
     }
-    if (stripeBillingTable && stripeParameter) {
+    if (stripeBillingTable) {
       apiFunction.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+        actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:DeleteItem', 'dynamodb:ConditionCheckItem'],
         resources: [stripeBillingTable.tableArn],
       }));
       apiFunction.addToRolePolicy(new iam.PolicyStatement({
         actions: ['ssm:GetParameter'],
-        resources: [stripeParameter.arn],
+        resources: [stripeBilling.parameterArn],
       }));
     }
     apiFunction.addToRolePolicy(
@@ -490,6 +497,9 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'DeploymentReleaseId', { value: releaseId });
     new cdk.CfnOutput(this, 'PantryQuotaSchemaVersion', { value: '2' });
+    if (stripeBillingTable) {
+      new cdk.CfnOutput(this, 'StripeBillingTableName', { value: stripeBillingTable.tableName });
+    }
     new cdk.CfnOutput(this, 'BackendDataContractVersion', {
       value: BACKEND_DATA_CONTRACT_VERSION,
     });

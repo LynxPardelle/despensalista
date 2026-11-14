@@ -11,6 +11,52 @@ import { DeletePantryDataUseCase } from './delete-pantry-data.use-case';
 import { DeleteAccountUseCase } from './delete-account.use-case';
 
 describe('DeleteAccountUseCase', () => {
+  it('stops owner renewals before deleting any account contents', async () => {
+    const fixture = makeUseCase({
+      membership: makeMembership('user-1', 'owner'),
+    });
+    await fixture.useCase.execute({
+      userId: 'user-1',
+      confirmationText: 'ELIMINAR CUENTA',
+    });
+    expect(fixture.stopRenewals).toHaveBeenCalledWith('household-1');
+    expect(fixture.stopRenewals.mock.invocationCallOrder[0]).toBeLessThan(
+      fixture.deletePantryDataUseCase.execute.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('keeps the durable deletion job intact if stopping billing fails', async () => {
+    const fixture = makeUseCase({
+      membership: makeMembership('user-1', 'owner'),
+    });
+    fixture.stopRenewals.mockRejectedValueOnce(new Error('Stripe unavailable'));
+    const command = { userId: 'user-1', confirmationText: 'ELIMINAR CUENTA' };
+    await expect(fixture.useCase.execute(command)).rejects.toThrow(
+      'Stripe unavailable',
+    );
+    expect(fixture.beginAccountDeletion).toHaveBeenCalledTimes(1);
+    expect(fixture.deletePantryDataUseCase.execute).not.toHaveBeenCalled();
+    expect(fixture.userDao.delete).not.toHaveBeenCalled();
+    expect(
+      fixture.householdRepository.cancelHouseholdDeletion,
+    ).not.toHaveBeenCalled();
+    await fixture.useCase.resume(
+      await fixture.beginAccountDeletion.mock.results[0].value,
+    );
+    expect(fixture.stopRenewals).toHaveBeenCalledTimes(2);
+    expect(fixture.userDao.delete).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cancel household billing when a member removes their account', async () => {
+    const fixture = makeUseCase({
+      membership: makeMembership('user-1', 'editor'),
+    });
+    await fixture.useCase.execute({
+      userId: 'user-1',
+      confirmationText: 'ELIMINAR CUENTA',
+    });
+    expect(fixture.stopRenewals).not.toHaveBeenCalled();
+  });
   it('requires explicit account deletion confirmation', async () => {
     const { useCase, userDao } = makeUseCase();
 
@@ -365,12 +411,14 @@ function makeUseCase(
   const userDeviceRepository = {
     deleteByUserId: jest.fn().mockResolvedValue(2),
   } as unknown as jest.Mocked<UserDeviceRepository>;
+  const stopRenewals = jest.fn().mockResolvedValue(undefined);
   const useCase = new DeleteAccountUseCase(
     userDao,
     householdRepository,
     cognitoUserAdmin,
     userDeviceRepository,
     deletePantryDataUseCase,
+    { stopRenewals },
   );
 
   return {
@@ -380,6 +428,7 @@ function makeUseCase(
     cognitoUserAdmin,
     userDeviceRepository,
     deletePantryDataUseCase,
+    stopRenewals,
     beginHouseholdDeletion,
     beginAccountDeletion,
     deleteAccountHouseholdReferences,

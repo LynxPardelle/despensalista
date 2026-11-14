@@ -6,8 +6,10 @@ import {
 } from '@nestjs/common';
 import { CognitoUserAdmin } from '../ports/cognito-auth.port';
 import { AccountDeletionJob, UserDao } from '../ports/daos';
+import type { HouseholdBilling } from '../ports/household-billing.port';
 import {
   COGNITO_USER_ADMIN,
+  HOUSEHOLD_BILLING,
   HOUSEHOLD_REPOSITORY,
   USER_DAO,
   USER_DEVICE_REPOSITORY,
@@ -43,6 +45,8 @@ export class DeleteAccountUseCase {
     @Inject(USER_DEVICE_REPOSITORY)
     private readonly userDeviceRepository: UserDeviceRepository,
     private readonly deletePantryDataUseCase: DeletePantryDataUseCase,
+    @Inject(HOUSEHOLD_BILLING)
+    private readonly billing: HouseholdBilling,
   ) {}
 
   async execute(command: {
@@ -99,6 +103,9 @@ export class DeleteAccountUseCase {
   }
 
   async resume(job: AccountDeletionJob): Promise<DeleteAccountResult> {
+    if (job.householdId && job.householdRole === 'owner') {
+      await this.billing.stopRenewals(job.householdId);
+    }
     const userId = UserId.fromString(job.userId);
     const pantryResult = await this.deletePantryDataUseCase.execute({
       userId: job.userId,
