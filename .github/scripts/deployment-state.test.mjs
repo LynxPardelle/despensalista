@@ -1149,6 +1149,32 @@ test('manual rollback rejects a pre-contract release before mutating AWS', async
   ), false);
 });
 
+test('manual production rollback preserves cancellation after billing is deployed', async () => {
+  const { recordPublishedRelease, restoreRelease } = await load();
+  const artifact = await releaseArtifact();
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-receipt-'));
+  const deploymentSha = 'b'.repeat(40);
+  const codeSha256 = createHash('sha256').update('zip-bytes').digest('base64');
+  const env = { AWS_REGION: 'us-east-1' };
+  const calls = [];
+  const underlyingAws = deploymentAws({ aliasVersion: '12', stackVersion: '12', codeSha256, calls });
+  await recordPublishedRelease({ stage: 'prod', artifact, directory, deploymentSha, aws: underlyingAws, env });
+  const aws = args => {
+    const response = underlyingAws(args);
+    if (args.includes('despensalista-prod-serverless-backend')) {
+      response.Stacks[0].Outputs.push({ OutputKey: 'StripeBillingTable', OutputValue: 'despensalista-prod-billing' });
+    }
+    return response;
+  };
+
+  await assert.rejects(restoreRelease({
+    stage: 'prod', artifact,
+    receipt: path.join(directory, 'deployment-receipt.json'),
+    deploymentSha, aws, env,
+  }), /preserve Stripe Billing/i);
+  assert.equal(calls.some(args => args.includes('update-alias') || args.includes('put-function-concurrency')), false);
+});
+
 test('manual rollback accepts only a receipt and artifact on the current data contract', async () => {
   const { recordPublishedRelease, restoreRelease } = await load();
   const artifact = await releaseArtifact({ backendDataContractVersion: 1 });

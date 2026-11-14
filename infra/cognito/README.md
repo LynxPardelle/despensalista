@@ -315,7 +315,10 @@ production CloudFront aliases and Cognito URLs. Production billing requires
 4. Set `ENABLE_STRIPE_BILLING_CHECKOUT=true` and redeploy when the offer and
    its price are ready. To close new purchases while serving existing
    subscribers, set that variable to `false` and keep the billing integration
-   enabled so the portal and webhook remain available.
+   enabled so the portal, webhook and account deletion remain available. After
+   the production billing table is deployed, delivery rejects disabling the
+   integration. Use only published versions with Stripe Billing when rolling
+   back a production release with subscribers.
 
 ## Useful Outputs
 

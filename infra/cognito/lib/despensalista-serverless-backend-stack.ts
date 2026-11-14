@@ -497,6 +497,9 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'DeploymentReleaseId', { value: releaseId });
     new cdk.CfnOutput(this, 'PantryQuotaSchemaVersion', { value: '2' });
+    if (stripeBillingTable) {
+      new cdk.CfnOutput(this, 'StripeBillingTable', { value: stripeBillingTable.tableName });
+    }
     new cdk.CfnOutput(this, 'BackendDataContractVersion', {
       value: BACKEND_DATA_CONTRACT_VERSION,
     });

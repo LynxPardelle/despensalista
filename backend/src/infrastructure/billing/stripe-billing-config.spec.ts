@@ -81,16 +81,34 @@ describe('StripeBillingConfig environments', () => {
     expect(retrieve).not.toHaveBeenCalled();
   });
 
-  it('does not load prod config without live mode or from a mismatched origin', async () => {
+  it('leaves billing absent when no environment configuration is provided', async () => {
+    await expect(
+      loader({ PERSISTENCE_PROVIDER: 'dynamodb' }).get(),
+    ).resolves.toBeUndefined();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('rejects partial billing configuration instead of allowing deletion to skip it', async () => {
+    await expect(
+      loader({
+        PERSISTENCE_PROVIDER: 'dynamodb',
+        STRIPE_BILLING_CONFIG_PARAMETER:
+          liveEnv.STRIPE_BILLING_CONFIG_PARAMETER,
+      }).get(),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('rejects prod config without live mode or from a mismatched origin', async () => {
     await expect(
       loader({ ...liveEnv, STRIPE_BILLING_MODE: 'test' }).get(),
-    ).resolves.toBeUndefined();
+    ).rejects.toMatchObject({ status: 503 });
     await expect(
       loader({
         ...liveEnv,
         COGNITO_SECONDARY_WEB_ORIGIN: 'https://other.example',
       }).get(),
-    ).resolves.toBeUndefined();
+    ).rejects.toMatchObject({ status: 503 });
     expect(send).not.toHaveBeenCalled();
   });
 
