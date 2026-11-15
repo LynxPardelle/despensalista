@@ -8,4 +8,4 @@ El recurso y la regla programada se habilitan en dev mediante la configuración 
 
 La cola registra cada intento para evitar reenvíos ante reintentos o respuestas inciertas de SES. Consultar [el runbook](../../operations/production-runbook.md) antes de habilitar el servicio para clientes reales.
 
-Para diagnosticar rechazos en dev, el transporte registra solamente una categoría de error de una lista fija y, si existe, el código HTTP. Se descartan la excepción completa, destinatarios, contenido y metadatos de la solicitud. El registro no habilita nuevos envíos ni cambia cuándo se permite reintentar un aviso.
+Para diagnosticar rechazos en dev, el transporte registra una categoría de error de una lista fija, el código HTTP y una etiqueta fija si SES identifica la identidad del remitente o del dominio. Se descartan la excepción completa, direcciones, ARN, contenido y metadatos de la solicitud. El registro no habilita nuevos envíos ni cambia cuándo se permite reintentar un aviso.

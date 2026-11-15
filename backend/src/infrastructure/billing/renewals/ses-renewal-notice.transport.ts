@@ -6,8 +6,10 @@ import type {
   RenewalNoticeTransport,
 } from './renewal-notice.types';
 
-const sender = 'no-reply@despensalista.lynxpardelle.com';
+const senderDomain = 'despensalista.lynxpardelle.com';
+const sender = `no-reply@${senderDomain}`;
 const knownErrors = new Set([
+  'AccessDenied',
   'AccessDeniedException',
   'BadRequestException',
   'CredentialsProviderError',
@@ -59,6 +61,7 @@ export class SesRenewalNoticeTransport implements RenewalNoticeTransport {
       .catch((error: unknown) => {
         const info = error as {
           name?: unknown;
+          message?: unknown;
           $metadata?: { httpStatusCode?: unknown };
         } | null;
         const name = info?.name;
@@ -74,7 +77,21 @@ export class SesRenewalNoticeTransport implements RenewalNoticeTransport {
           status < 600
             ? ` (HTTP ${status})`
             : '';
-        this.logger.warn(`SES SendEmail failed: ${label}${http}`);
+        let identityHint = '';
+        if (
+          (label === 'AccessDeniedException' || label === 'AccessDenied') &&
+          typeof info?.message === 'string'
+        ) {
+          const identity =
+            /arn:aws:ses:us-east-1:\d{12}:identity\/([a-z0-9@._-]+)/i.exec(
+              info.message,
+            )?.[1];
+          if (identity === sender) identityHint = ' sender identity';
+          if (identity === senderDomain) identityHint = ' domain identity';
+        }
+        this.logger.warn(
+          `SES SendEmail failed: ${label}${identityHint}${http}`,
+        );
         throw error;
       });
     if (!sent.MessageId) {
