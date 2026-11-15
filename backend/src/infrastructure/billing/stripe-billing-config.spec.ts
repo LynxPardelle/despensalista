@@ -137,4 +137,50 @@ describe('StripeBillingConfig environments', () => {
       WithDecryption: true,
     });
   });
+
+  it('requires a valid pilot or explicit public approval for live purchases', async () => {
+    settings(live);
+    const enabled = { ...liveEnv, STRIPE_BILLING_CHECKOUT_ENABLED: 'true' };
+    const pilotHouseholdId = '37bfb36a-0c8c-4383-a96d-168f82991446';
+    const publicEnv = {
+      ...enabled,
+      STRIPE_BILLING_PUBLIC_CHECKOUT: 'true',
+      RENEWAL_NOTICE_STAGE: 'prod',
+      RENEWAL_NOTICE_TABLE: 'despensalista-prod-renewal-notices',
+      RENEWAL_NOTICE_MODE: 'ses',
+    };
+    await expect(loader(enabled).get()).resolves.toMatchObject({
+      checkoutEnabled: false,
+    });
+    await expect(
+      loader({
+        ...enabled,
+        STRIPE_BILLING_PILOT_HOUSEHOLD_ID: pilotHouseholdId,
+      }).get(),
+    ).resolves.toMatchObject({ checkoutEnabled: true, pilotHouseholdId });
+    await expect(
+      loader({ ...enabled, STRIPE_BILLING_PUBLIC_CHECKOUT: 'true' }).get(),
+    ).resolves.toMatchObject({ checkoutEnabled: false });
+    await expect(loader(publicEnv).get()).resolves.toMatchObject({
+      checkoutEnabled: true,
+    });
+    await expect(
+      loader({
+        ...publicEnv,
+        STRIPE_BILLING_PILOT_HOUSEHOLD_ID: pilotHouseholdId,
+      }).get(),
+    ).resolves.toMatchObject({
+      checkoutEnabled: false,
+      portalConfigurationId: live.portalConfigurationId,
+    });
+    await expect(
+      loader({
+        ...enabled,
+        STRIPE_BILLING_PILOT_HOUSEHOLD_ID: 'invalid',
+      }).get(),
+    ).resolves.toMatchObject({
+      checkoutEnabled: false,
+      webhookSigningSecret: live.webhookSigningSecret,
+    });
+  });
 });

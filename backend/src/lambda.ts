@@ -8,6 +8,8 @@ import type { InjectOptions } from 'light-my-request';
 import { AppModule } from './app.module';
 import { configureApp } from './app.setup';
 import { ResumeAccountDeletionsUseCase } from './application/use-cases/resume-account-deletions.use-case';
+import { renewalNoticeConfig } from './infrastructure/billing/renewals/renewal-notice.config';
+import { RenewalNoticeDispatcher } from './infrastructure/billing/renewals/renewal-notice.dispatcher';
 
 interface ApiGatewayHttpEvent {
   body?: string;
@@ -29,6 +31,21 @@ interface AccountDeletionWorkerEvent {
   source: 'despensalista.account-deletion-worker';
   'detail-type': 'resume';
 }
+
+interface RenewalNoticeWorkerEvent {
+  source: 'despensalista.renewal-notice-worker';
+  'detail-type': 'dispatch';
+  referenceTime?: string;
+  testNoticeId?: string;
+}
+
+type RenewalDispatchResult = Awaited<
+  ReturnType<RenewalNoticeDispatcher['dispatch']>
+>;
+type LambdaEvent =
+  | ApiGatewayHttpEvent
+  | AccountDeletionWorkerEvent
+  | RenewalNoticeWorkerEvent;
 
 interface LambdaContext {
   callbackWaitsForEmptyEventLoop?: boolean;
@@ -56,10 +73,16 @@ export function handler(
   event: AccountDeletionWorkerEvent,
   context?: LambdaContext,
 ): Promise<{ processed: number }>;
-export async function handler(
-  event: ApiGatewayHttpEvent | AccountDeletionWorkerEvent,
+export function handler(
+  event: RenewalNoticeWorkerEvent,
   context?: LambdaContext,
-): Promise<ApiGatewayHttpResponse | { processed: number }> {
+): Promise<RenewalDispatchResult>;
+export async function handler(
+  event: LambdaEvent,
+  context?: LambdaContext,
+): Promise<
+  ApiGatewayHttpResponse | { processed: number } | RenewalDispatchResult
+> {
   if (context) {
     context.callbackWaitsForEmptyEventLoop = false;
   }
@@ -67,6 +90,31 @@ export async function handler(
   const app = await getApp();
   if (isAccountDeletionWorkerEvent(event)) {
     return app.get(ResumeAccountDeletionsUseCase).execute();
+  }
+  if (isRenewalNoticeWorkerEvent(event)) {
+    const settings = renewalNoticeConfig(app.get(ConfigService));
+    if (!settings) {
+      throw new Error('Renewal notice worker is unavailable');
+    }
+    if (event.referenceTime === undefined && event.testNoticeId === undefined) {
+      return app.get(RenewalNoticeDispatcher).dispatch();
+    }
+    const referenceTime =
+      typeof event.referenceTime === 'string'
+        ? new Date(event.referenceTime)
+        : undefined;
+    if (
+      settings.stage !== 'dev' ||
+      !referenceTime ||
+      !Number.isFinite(referenceTime.getTime()) ||
+      typeof event.testNoticeId !== 'string' ||
+      !/^renewal-[a-f0-9]{64}$/.test(event.testNoticeId)
+    ) {
+      throw new Error('Invalid targeted renewal notice test');
+    }
+    return app
+      .get(RenewalNoticeDispatcher)
+      .dispatch(referenceTime, event.testNoticeId);
   }
   const response = await app
     .getHttpAdapter()
@@ -77,12 +125,22 @@ export async function handler(
 }
 
 function isAccountDeletionWorkerEvent(
-  event: ApiGatewayHttpEvent | AccountDeletionWorkerEvent,
+  event: LambdaEvent,
 ): event is AccountDeletionWorkerEvent {
   return (
     'source' in event &&
     event.source === 'despensalista.account-deletion-worker' &&
     event['detail-type'] === 'resume'
+  );
+}
+
+function isRenewalNoticeWorkerEvent(
+  event: LambdaEvent,
+): event is RenewalNoticeWorkerEvent {
+  return (
+    'source' in event &&
+    event.source === 'despensalista.renewal-notice-worker' &&
+    event['detail-type'] === 'dispatch'
   );
 }
 

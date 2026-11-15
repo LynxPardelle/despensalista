@@ -29,6 +29,7 @@ function synthesizeTemplate(
     cognitoDomain: 'https://auth.example',
     cognitoUserPoolClientId: 'client-id',
     cognitoUserPoolId: 'us-east-1_example',
+    ...(extraContext.renewalNoticeMode === 'ses' && { env: { region: 'us-east-1' } }),
   });
 
   return Template.fromStack(stack);
@@ -71,6 +72,101 @@ test('feedback provisions isolated expiring inboxes and protects production cont
     });
     template.hasOutput('FeedbackTableName', { Value: { Ref: tableId } });
   }
+});
+
+test('dev renewal notices keep a single SES test destination', () => {
+  const noNotices = JSON.stringify(productionTemplate.toJSON());
+  assert.doesNotMatch(noNotices, /RENEWAL_NOTICE_TABLE|PlusRenewalNoticeRule|ses:SendEmail/);
+  assert.throws(() => synthesizeTemplate('tst', { renewalNoticeMode: 'dry-run' }), /only run in dev/);
+  const dev = synthesizeTemplate('dev', {
+    enableStripeBilling: 'true',
+    serverlessFrontendBaseUrl: 'https://dev.despensalista.lynxpardelle.com',
+    appDomainName: 'dev.despensalista.lynxpardelle.com',
+    renewalNoticeMode: 'ses',
+    renewalNoticeTestTo: 'mailbox@example.com',
+  });
+  dev.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'despensalista-dev-renewal-notices',
+    BillingMode: 'PAY_PER_REQUEST',
+    TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
+    GlobalSecondaryIndexes: [Match.objectLike({ IndexName: 'RenewalNoticeDueIndex' })],
+  });
+  dev.hasResourceProperties('AWS::Events::Rule', {
+    Name: 'despensalista-dev-plus-renewal-notices',
+    ScheduleExpression: 'rate(1 hour)',
+  });
+  dev.hasResourceProperties('AWS::IAM::Policy', {
+    PolicyDocument: { Statement: Match.arrayWith([Match.objectLike({
+      Action: 'ses:SendEmail',
+      Resource: '*',
+      Condition: {
+        StringEquals: {
+          'aws:RequestedRegion': 'us-east-1',
+          'ses:FromAddress': 'no-reply@despensalista.lynxpardelle.com',
+        },
+        'ForAllValues:StringEquals': { 'ses:Recipients': ['mailbox@example.com'] },
+        Null: { 'ses:Recipients': 'false' },
+      },
+    })]) },
+  });
+});
+
+test('production can dry run notices without authorizing SES and requires production access to send', () => {
+  const billing = {
+    enablePublicProductionDomain: 'true',
+    publicProductionCertificateArn: 'arn:aws:acm:us-east-1:123456789012:certificate/01234567-89ab-cdef-0123-456789abcdef',
+    serverlessFrontendBaseUrl: 'https://despensalista.lynxpardelle.com',
+    appDomainName: 'despensalista.lynxpardelle.com',
+    enableStripeBillingBoundary: 'true',
+    enableStripeBilling: 'true',
+  };
+  const dryRun = synthesizeTemplate('prod', { ...billing, renewalNoticeMode: 'dry-run' });
+  const dryRunJson = JSON.stringify(dryRun.toJSON());
+  assert.match(dryRunJson, /despensalista-prod-renewal-notices/);
+  assert.doesNotMatch(dryRunJson, /ses:SendEmail|RENEWAL_NOTICE_SES_TEST_TO/);
+  assert.throws(() => synthesizeTemplate('prod', { ...billing, renewalNoticeMode: 'ses' }), /require SES production access/);
+  assert.throws(() => synthesizeTemplate('prod', {
+    ...billing,
+    renewalNoticeMode: 'ses',
+    renewalNoticeSesProductionAccess: 'true',
+    renewalNoticeTestTo: 'test@example.com',
+  }), /cannot use a test recipient/);
+
+  const production = synthesizeTemplate('prod', {
+    ...billing,
+    renewalNoticeMode: 'ses',
+    renewalNoticeSesProductionAccess: 'true',
+  });
+  production.hasResourceProperties('AWS::Lambda::Function', {
+    FunctionName: 'despensalista-prod-backend-api',
+    Environment: { Variables: { RENEWAL_NOTICE_STAGE: 'prod', RENEWAL_NOTICE_MODE: 'ses' } },
+  });
+  production.hasResourceProperties('AWS::Events::Rule', {
+    Name: 'despensalista-prod-plus-renewal-notices',
+    ScheduleExpression: 'rate(15 minutes)',
+  });
+  production.hasResourceProperties('AWS::IAM::Policy', {
+    PolicyDocument: { Statement: Match.arrayWith([
+      {
+        Effect: 'Allow',
+        Action: 'ses:SendEmail',
+        Resource: '*',
+        Condition: {
+          StringEquals: {
+            'aws:RequestedRegion': 'us-east-1',
+            'ses:FromAddress': 'no-reply@despensalista.lynxpardelle.com',
+          },
+          Null: { 'ses:Recipients': 'false' },
+        },
+      },
+      {
+        Effect: 'Allow',
+        Action: 'ses:GetAccount',
+        Resource: '*',
+        Condition: { StringEquals: { 'aws:RequestedRegion': 'us-east-1' } },
+      },
+    ]) },
+  });
 });
 
 test('public production domain preserves the legacy site and stamps the trusted viewer host', () => {
@@ -264,10 +360,15 @@ test('Stripe Billing requires the canonical public origin and separate opt-ins i
     enableStripeBillingBoundary: 'true',
     enableStripeBilling: 'true',
   };
+  const pilotHouseholdId = '07888b9f-cffd-4ca7-9a5a-44e9125f78f5';
   const onlyBoundary = synthesizeTemplate('prod', { ...publicContext, enableStripeBillingBoundary: 'true' });
   assert.doesNotMatch(JSON.stringify(onlyBoundary.toJSON()), /STRIPE_BILLING_|StripeBillingTable|billing\/stripe/);
 
-  const template = synthesizeTemplate('prod', enabled);
+  const template = synthesizeTemplate('prod', {
+    ...enabled,
+    enableStripeBillingCheckout: 'false',
+    stripeBillingPilotHouseholdId: pilotHouseholdId,
+  });
   const [tableId] = Object.keys(template.findResources('AWS::DynamoDB::Table', {
     Properties: { TableName: 'despensalista-prod-billing' },
   }));
@@ -283,6 +384,8 @@ test('Stripe Billing requires the canonical public origin and separate opt-ins i
         STRIPE_BILLING_CONFIG_PARAMETER: '/despensalista/prod/billing/stripe',
         STRIPE_BILLING_MODE: 'live',
         STRIPE_BILLING_CHECKOUT_ENABLED: 'false',
+        STRIPE_BILLING_PILOT_HOUSEHOLD_ID: Match.absent(),
+        STRIPE_BILLING_PUBLIC_CHECKOUT: 'false',
       },
     },
   });
@@ -299,11 +402,38 @@ test('Stripe Billing requires the canonical public origin and separate opt-ins i
     Effect: 'Allow',
     Resource: tableArn,
   }]);
-  const checkoutEnabled = synthesizeTemplate('prod', { ...enabled, enableStripeBillingCheckout: 'true' });
-  checkoutEnabled.hasResourceProperties('AWS::Lambda::Function', {
-    FunctionName: 'despensalista-prod-backend-api',
-    Environment: { Variables: { STRIPE_BILLING_CHECKOUT_ENABLED: 'true' } },
+  const pilot = synthesizeTemplate('prod', {
+    ...enabled,
+    enableStripeBillingCheckout: 'true',
+    stripeBillingPilotHouseholdId: pilotHouseholdId,
   });
+  pilot.hasResourceProperties('AWS::Lambda::Function', {
+    FunctionName: 'despensalista-prod-backend-api',
+    Environment: { Variables: {
+      STRIPE_BILLING_CHECKOUT_ENABLED: 'true',
+      STRIPE_BILLING_PILOT_HOUSEHOLD_ID: pilotHouseholdId,
+      STRIPE_BILLING_PUBLIC_CHECKOUT: 'false',
+    } },
+  });
+  const publicCheckout = synthesizeTemplate('prod', {
+    ...enabled,
+    enableStripeBillingCheckout: 'true',
+    enablePublicStripeBillingCheckout: 'true',
+  });
+  publicCheckout.hasResourceProperties('AWS::Lambda::Function', {
+    FunctionName: 'despensalista-prod-backend-api',
+    Environment: { Variables: { STRIPE_BILLING_PUBLIC_CHECKOUT: 'true' } },
+  });
+  assert.throws(() => synthesizeTemplate('prod', {
+    ...enabled, enableStripeBillingCheckout: 'true',
+  }), /exactly one production Checkout audience/);
+  assert.throws(() => synthesizeTemplate('prod', {
+    ...enabled, enableStripeBillingCheckout: 'true', stripeBillingPilotHouseholdId: pilotHouseholdId,
+    enablePublicStripeBillingCheckout: 'true',
+  }), /exactly one production Checkout audience/);
+  assert.throws(() => synthesizeTemplate('prod', {
+    ...enabled, enableStripeBillingCheckout: 'true', stripeBillingPilotHouseholdId: 'any-household',
+  }), /household UUID/);
 
   assert.throws(() => synthesizeTemplate('prod', { ...publicContext, enableStripeBilling: 'true' }), /runtime boundary/);
   assert.throws(() => synthesizeTemplate('prod', { ...enabled, enablePublicProductionDomain: 'false' }), /public production domain/);

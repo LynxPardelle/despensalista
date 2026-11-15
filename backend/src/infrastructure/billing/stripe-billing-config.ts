@@ -3,6 +3,7 @@ import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- The Stripe CommonJS package exports its constructor directly.
 import Stripe = require('stripe');
+import { renewalNoticeConfig } from './renewals/renewal-notice.config';
 
 const devOrigin = 'https://dev.despensalista.lynxpardelle.com';
 const devTable = 'despensalista-dev-billing';
@@ -10,11 +11,14 @@ const devParameter = '/despensalista/dev/billing/stripe';
 const productionOrigin = 'https://despensalista.com';
 const productionTable = 'despensalista-prod-billing';
 const productionParameter = '/despensalista/prod/billing/stripe';
+const householdIdFormat =
+  /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 
 export interface StripeBillingSettings {
   mode: 'test' | 'live';
   stage: 'dev' | 'prod';
   checkoutEnabled: boolean;
+  pilotHouseholdId?: string;
   origin: string;
   table: string;
   accountId?: string;
@@ -27,7 +31,7 @@ export interface StripeBillingSettings {
 
 type StripeBillingLocation = Pick<
   StripeBillingSettings,
-  'mode' | 'stage' | 'origin' | 'table' | 'checkoutEnabled'
+  'mode' | 'stage' | 'origin' | 'table' | 'checkoutEnabled' | 'pilotHouseholdId'
 >;
 
 @Injectable()
@@ -85,17 +89,45 @@ export class StripeBillingConfig {
       throw new ServiceUnavailableException('Billing is unavailable');
     }
 
+    const pilot = isProduction
+      ? this.config.get<string>('STRIPE_BILLING_PILOT_HOUSEHOLD_ID')
+      : undefined;
+    const pilotHouseholdId =
+      pilot && householdIdFormat.test(pilot) ? pilot : undefined;
+    const checkoutEnabled = isDev
+      ? checkoutFlag === 'true' || checkoutFlag === undefined
+      : checkoutFlag === 'true' &&
+        this.liveEnrollmentAllowed(pilot, pilotHouseholdId);
+
     return {
       base: {
         mode,
         stage: isProduction ? 'prod' : 'dev',
         origin,
         table,
-        checkoutEnabled:
-          checkoutFlag === 'true' || (checkoutFlag === undefined && isDev),
+        checkoutEnabled,
+        ...(pilotHouseholdId && { pilotHouseholdId }),
       },
       parameter,
     };
+  }
+
+  private liveEnrollmentAllowed(
+    rawPilot: string | undefined,
+    pilotHouseholdId: string | undefined,
+  ): boolean {
+    const publicCheckout = this.config.get<string>(
+      'STRIPE_BILLING_PUBLIC_CHECKOUT',
+    );
+    if (rawPilot !== undefined) {
+      return (
+        Boolean(pilotHouseholdId) &&
+        (publicCheckout === undefined || publicCheckout === 'false')
+      );
+    }
+    if (publicCheckout !== 'true') return false;
+    const notices = renewalNoticeConfig(this.config);
+    return notices?.stage === 'prod' && notices.mode === 'ses';
   }
 
   async get(): Promise<StripeBillingSettings | undefined> {

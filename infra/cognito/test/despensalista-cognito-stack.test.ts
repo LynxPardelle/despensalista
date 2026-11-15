@@ -195,6 +195,55 @@ test('deployment OIDC trust is exact repository and environment, with no bootstr
   template.hasResourceProperties('AWS::Cognito::UserPool', { MfaConfiguration: 'ON' });
 });
 
+test('production renewal bootstrap gives send access to runtime only and constrains its rule', () => {
+  const app = new cdk.App({ context: {
+    stage: 'prod',
+    enableStripeBilling: 'true',
+    enableStripeBillingBoundary: 'true',
+    renewalNoticeMode: 'ses',
+    renewalNoticeSesProductionAccess: 'true',
+  } });
+  const template = Template.fromStack(new DespensaListaCognitoStack(app, 'Cognito-prod-renewal', {
+    env: { account: '123456789012', region: 'us-east-1' },
+  }));
+  const [boundary] = Object.values(template.findResources('AWS::IAM::ManagedPolicy', {
+    Properties: { ManagedPolicyName: 'despensalista-prod-runtime-boundary' },
+  }));
+  const runtimeStatements = boundary.Properties.PolicyDocument.Statement;
+  const send = runtimeStatements.find((statement: any) => statement.Action === 'ses:SendEmail');
+  assert.deepEqual(send, {
+    Action: 'ses:SendEmail', Effect: 'Allow', Resource: '*',
+    Condition: {
+      StringEquals: {
+        'aws:RequestedRegion': 'us-east-1',
+        'ses:FromAddress': 'no-reply@despensalista.lynxpardelle.com',
+      },
+      Null: { 'ses:Recipients': 'false' },
+    },
+  });
+  const roles = Object.values(template.findResources('AWS::IAM::Policy'));
+  const githubStatements = roles
+    .filter((policy) => JSON.stringify(policy.Properties.Roles).includes('GitHubDeploymentRole'))
+    .flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+  const readAccess = githubStatements.find((statement: any) => statement.Action === 'ses:GetAccount');
+  assert.deepEqual(readAccess.Condition, { StringEquals: { 'aws:RequestedRegion': 'us-east-1' } });
+  const readIdentity = githubStatements.find((statement: any) => statement.Action === 'ses:GetEmailIdentity');
+  assert.match(JSON.stringify(readIdentity.Resource), /identity\/despensalista\.lynxpardelle\.com/);
+  assert.doesNotMatch(JSON.stringify(githubStatements), /ses:SendEmail/);
+  const executionStatements = [
+    ...roles,
+    ...Object.values(template.findResources('AWS::IAM::ManagedPolicy')),
+  ]
+    .filter((policy) => JSON.stringify(policy.Properties.Roles ?? []).includes('StageCloudFormationExecutionRole'))
+    .flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+  const eventRules = executionStatements.find((statement: any) =>
+    Array.isArray(statement.Action) && statement.Action.includes('events:PutRule'),
+  );
+  assert.equal(eventRules.Resource.length, 2);
+  assert.match(JSON.stringify(eventRules.Resource), /rule\/despensalista-prod-account-deletion-resume/);
+  assert.match(JSON.stringify(eventRules.Resource), /rule\/despensalista-prod-plus-renewal-notices/);
+});
+
 test('GitHub delivery drains only its exact backend and only production deletes quota keys', () => {
   const statementsFor = (stage: 'dev' | 'tst' | 'prod') => {
     const app = new cdk.App({ context: { stage } });
