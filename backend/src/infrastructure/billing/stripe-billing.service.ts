@@ -6,8 +6,10 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type Stripe from 'stripe';
 import { HOUSEHOLD_REPOSITORY } from '../../application/tokens';
 import { ResolveHouseholdPantryAccessUseCase } from '../../application/use-cases/household.use-cases';
@@ -16,8 +18,15 @@ import {
   StripeBillingConfig,
   type StripeBillingSettings,
 } from './stripe-billing-config';
-import { StripeBillingStore, type BillingRecord } from './stripe-billing.store';
+import {
+  StripeBillingStore,
+  type BillingRecord,
+  type CheckoutConsent,
+} from './stripe-billing.store';
 import { paidPlusThrough } from './stripe-household-plan';
+import { renewalNoticeConfig } from './renewals/renewal-notice.config';
+import { RenewalNoticeStore } from './renewals/renewal-notice.store';
+import type { RenewalNoticeCandidate } from './renewals/renewal-notice.types';
 
 const householdMetadata = 'despensalistaHouseholdId';
 const checkoutMetadata = 'despensalistaCheckoutToken';
@@ -26,6 +35,8 @@ const checkoutDuration = 2 * 60 * 60;
 const checkoutMinimumRemaining = 31 * 60;
 const customerIdempotencyWindow = 23 * 60 * 60;
 const maxConcurrentRetries = 6;
+// Keep in sync with the version displayed on the frontend's Plus Hogar terms page.
+const termsVersion = '2026-11-15';
 
 function epochSeconds(): number {
   return Math.floor(Date.now() / 1000);
@@ -39,6 +50,8 @@ export class StripeBillingService {
     @Inject(HOUSEHOLD_REPOSITORY)
     private readonly households: HouseholdRepository,
     private readonly access: ResolveHouseholdPantryAccessUseCase,
+    private readonly renewalNotices: RenewalNoticeStore,
+    @Optional() private readonly noticeConfig?: ConfigService,
   ) {}
 
   async status(userId: string) {
@@ -57,29 +70,44 @@ export class StripeBillingService {
       this.getPrice(settings),
       household ? this.store.read(settings.table, household.id) : undefined,
     ]);
+    const pendingCheckout =
+      record?.checkout && record.checkout.expiresAt > epochSeconds();
     const status =
       record?.status && !isFinished(record.status)
         ? record.status
-        : record?.checkout && record.checkout.expiresAt > epochSeconds()
+        : pendingCheckout
           ? 'pending'
           : (record?.status ?? 'none');
+    const paid = paidPlusThrough(record);
+    const canCheckout =
+      settings.checkoutEnabled &&
+      price.active &&
+      canManage &&
+      (!settings.pilotHouseholdId ||
+        household?.id === settings.pilotHouseholdId) &&
+      !record?.closed &&
+      (settings.mode !== 'live' ||
+        !pendingCheckout ||
+        record.checkout?.termsVersion === termsVersion) &&
+      (status === 'none' ||
+        (status === 'pending' && record?.status !== 'pending') ||
+        isFinished(status));
     return {
       available: true,
       mode: settings.mode,
-      hasPlus: paidPlusThrough(record) !== undefined,
+      hasPlus: paid !== undefined,
       ...(record?.paidThrough && {
         currentPeriodEnd: new Date(record.paidThrough * 1000).toISOString(),
         cancelAtPeriodEnd: record.cancelAtPeriodEnd === true,
       }),
+      ...(paid !== undefined &&
+        record?.renewalAt === paid &&
+        !record.cancelAtPeriodEnd && {
+          nextRenewalAt: new Date(paid * 1000).toISOString(),
+        }),
       canManage,
-      canCheckout:
-        settings.checkoutEnabled &&
-        price.active &&
-        canManage &&
-        !record?.closed &&
-        (status === 'none' ||
-          (status === 'pending' && record?.status !== 'pending') ||
-          isFinished(status)),
+      canCheckout,
+      ...(canCheckout && settings.mode === 'live' && { termsVersion }),
       canOpenPortal:
         canManage &&
         !record?.closed &&
@@ -98,6 +126,7 @@ export class StripeBillingService {
     userId: string,
     origin: string | undefined,
     acceptRecurringTerms = false,
+    acceptedTermsVersion?: unknown,
   ): Promise<{ url: string }> {
     const settings = await this.settingsForOrigin(origin);
     if (!settings.checkoutEnabled) {
@@ -105,13 +134,33 @@ export class StripeBillingService {
         'New subscriptions are unavailable',
       );
     }
-    if (settings.mode === 'live' && !acceptRecurringTerms) {
+    if (
+      settings.mode === 'live' &&
+      (!acceptRecurringTerms || acceptedTermsVersion !== termsVersion)
+    ) {
       throw new BadRequestException('Recurring payment terms must be accepted');
     }
+    if (
+      settings.pilotHouseholdId &&
+      (await this.households.findMembershipByUserId(userId))?.householdId !==
+        settings.pilotHouseholdId
+    ) {
+      throw new ForbiddenException(
+        'Checkout is unavailable for this household',
+      );
+    }
     const access = await this.access.executeOwner(userId);
-    if (access.pantryOwnerUserId !== userId) {
+    if (
+      access.pantryOwnerUserId !== userId ||
+      (settings.pilotHouseholdId &&
+        access.householdId !== settings.pilotHouseholdId)
+    ) {
       throw new ForbiddenException('Only household owners can manage billing');
     }
+    const consent =
+      settings.mode === 'live'
+        ? { termsVersion, acceptedAt: new Date().toISOString() }
+        : undefined;
     await this.getPrice(settings, true);
     const { householdId } = access;
     const lease = await this.store.beginCheckout(settings.table, householdId);
@@ -119,7 +168,7 @@ export class StripeBillingService {
       throw new ConflictException('Checkout is busy, please retry');
     }
     try {
-      return await this.createCheckout(settings, householdId);
+      return await this.createCheckout(settings, householdId, consent);
     } finally {
       await this.store.endCheckout(settings.table, householdId, lease);
     }
@@ -128,6 +177,7 @@ export class StripeBillingService {
   private async createCheckout(
     settings: StripeBillingSettings,
     householdId: string,
+    consent?: CheckoutConsent,
   ): Promise<{ url: string }> {
     for (let retry = 0; retry < maxConcurrentRetries; retry++) {
       const record = await this.ensureCustomer(settings, householdId);
@@ -140,6 +190,8 @@ export class StripeBillingService {
 
       const open = record.checkout;
       const now = epochSeconds();
+      const currentConsent =
+        !consent || open?.termsVersion === consent.termsVersion;
       const sessionId = open?.stripeSessionId;
       if (sessionId) {
         const session = await stripeRequest(() =>
@@ -147,6 +199,11 @@ export class StripeBillingService {
         );
         this.assertSession(settings, session, record);
         if (session.status === 'open') {
+          if (!currentConsent) {
+            throw new ConflictException(
+              'Previous Checkout is awaiting expiration',
+            );
+          }
           return { url: stripeUrl(session.url, 'checkout.stripe.com') };
         }
         if (
@@ -158,16 +215,26 @@ export class StripeBillingService {
       }
 
       const reuse = open && !open.stripeSessionId && open.expiresAt > now;
+      if (reuse && !currentConsent) {
+        throw new ConflictException('Previous Checkout is awaiting expiration');
+      }
       const attempt = reuse
         ? open
-        : { token: randomUUID(), expiresAt: now + checkoutDuration };
+        : {
+            token: randomUUID(),
+            expiresAt: now + checkoutDuration,
+            ...(consent && { termsVersion: consent.termsVersion }),
+          };
       if (attempt.expiresAt < now + checkoutMinimumRemaining) {
         throw new ConflictException('Checkout is awaiting expiration');
       }
       const reserved = reuse
         ? record
         : { ...record, revision: record.revision + 1, checkout: attempt };
-      if (!reuse && !(await this.store.save(reserved, settings.table))) {
+      if (
+        !reuse &&
+        !(await this.store.save(reserved, settings.table, consent))
+      ) {
         continue;
       }
       const metadata = this.metadata(settings, householdId);
@@ -307,6 +374,7 @@ export class StripeBillingService {
     ) {
       return;
     }
+    const renewalTable = this.getRenewalTable(settings);
     for (let retry = 0; retry < maxConcurrentRetries; retry++) {
       const record = await this.store.read(settings.table, householdId);
       if (!record || record.closed || record.customerId !== customer.id) {
@@ -326,6 +394,12 @@ export class StripeBillingService {
         subscription,
         event.type,
       );
+      const paidUntil = paidThrough(settings, subscription, customer.id);
+      const renewal = renewalCandidate(record, subscription, paidUntil);
+      const renewalWrite =
+        renewalTable && renewal
+          ? await this.renewalNotices.prepareEnqueue(renewalTable, renewal)
+          : undefined;
       const saved = await this.store.applyEvent(
         {
           ...record,
@@ -338,7 +412,8 @@ export class StripeBillingService {
               ? 'pending'
               : subscriptionStatus(subscription),
           subscriptionId: subscription?.id,
-          paidThrough: paidThrough(settings, subscription, customer.id),
+          paidThrough: paidUntil,
+          renewalAt: renewal?.renewalAt,
           cancelAtPeriodEnd:
             subscription?.cancel_at_period_end === true ||
             (subscription?.cancel_at != null &&
@@ -347,6 +422,7 @@ export class StripeBillingService {
         },
         settings.table,
         event.id,
+        renewalWrite,
       );
       if (saved) {
         return;
@@ -355,6 +431,36 @@ export class StripeBillingService {
     throw new ServiceUnavailableException(
       'Billing reconciliation is busy, please retry',
     );
+  }
+
+  async getUpcomingRenewal(
+    householdId: string,
+  ): Promise<RenewalNoticeCandidate | undefined> {
+    if (!this.noticeConfig || !renewalNoticeConfig(this.noticeConfig)) {
+      return undefined;
+    }
+    const settings = await this.config.get();
+    if (!settings || !this.getRenewalTable(settings)) return undefined;
+
+    const record = await this.store.read(settings.table, householdId);
+    if (!record?.customerId || record.closed) return undefined;
+    const subscription = await this.currentSubscription(settings, record);
+    return renewalCandidate(
+      record,
+      subscription,
+      paidThrough(settings, subscription, record.customerId),
+    );
+  }
+
+  private getRenewalTable(settings: StripeBillingSettings): string | undefined {
+    const notices = this.noticeConfig && renewalNoticeConfig(this.noticeConfig);
+    if (
+      notices?.stage !== settings.stage ||
+      settings.mode !== (notices.stage === 'dev' ? 'test' : 'live')
+    ) {
+      return undefined;
+    }
+    return notices.table;
   }
 
   private async settingsForOrigin(
@@ -674,6 +780,50 @@ function paidThrough(
   return line && Number.isSafeInteger(item.current_period_end)
     ? item.current_period_end
     : undefined;
+}
+
+function renewalCandidate(
+  record: BillingRecord,
+  subscription: Stripe.Subscription | undefined,
+  paidUntil: number | undefined,
+): RenewalNoticeCandidate | undefined {
+  if (
+    !subscription ||
+    paidUntil === undefined ||
+    paidUntil <= epochSeconds() ||
+    stripeId(subscription.customer) !== record.customerId ||
+    subscription.collection_method !== 'charge_automatically' ||
+    subscription.cancel_at_period_end ||
+    subscription.cancel_at != null ||
+    subscription.pause_collection != null ||
+    subscription.pending_update != null ||
+    subscription.schedule != null ||
+    subscription.billing_thresholds != null
+  ) {
+    return undefined;
+  }
+  const item = subscription.items.data[0];
+  const price = item.price;
+  const amountMinor = price.unit_amount;
+  if (
+    item.billing_thresholds != null ||
+    price.currency !== 'mxn' ||
+    price.recurring?.interval !== 'month' ||
+    price.recurring.interval_count !== 1 ||
+    price.recurring.usage_type !== 'licensed' ||
+    amountMinor === null ||
+    !Number.isSafeInteger(amountMinor) ||
+    amountMinor <= 0
+  ) {
+    return undefined;
+  }
+  return {
+    householdId: record.householdId,
+    subscriptionId: subscription.id,
+    renewalAt: paidUntil,
+    amountMinor,
+    currency: 'mxn',
+  };
 }
 
 function billingSignal(event: Stripe.Event) {

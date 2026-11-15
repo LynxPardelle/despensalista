@@ -1,5 +1,6 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- Match the backend's Stripe CommonJS import.
 import Stripe = require('stripe');
+import type { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import {
   FastifyAdapter,
@@ -12,6 +13,8 @@ import { AccessTokenGuard } from '../http/auth/access-token.guard';
 import type { StripeBillingConfig } from './stripe-billing-config';
 import { StripeBillingService } from './stripe-billing.service';
 import type { BillingRecord, StripeBillingStore } from './stripe-billing.store';
+import type { DynamoDbDocumentClientService } from '../database/dynamodb/dynamodb-document-client.service';
+import { RenewalNoticeStore } from './renewals/renewal-notice.store';
 
 describe('StripeBillingService', () => {
   const secret = 'whsec_unit_test_secret';
@@ -56,9 +59,14 @@ describe('StripeBillingService', () => {
   let customerMapping: jest.Mock;
   let beginCheckout: jest.Mock;
   let endCheckout: jest.Mock;
+  let saveRecord: jest.Mock;
+  let noticeValues: Record<string, string>;
+  let noticeRead: jest.Mock;
 
   beforeEach(() => {
     record = undefined;
+    noticeValues = {};
+    noticeRead = jest.fn().mockResolvedValue({});
     exists = jest.fn().mockResolvedValue(false);
     settings = jest.fn().mockResolvedValue(billing);
     customerMapping = jest.fn().mockResolvedValue(undefined);
@@ -68,15 +76,16 @@ describe('StripeBillingService', () => {
       record = next;
       return Promise.resolve(true);
     });
+    saveRecord = jest.fn().mockImplementation((next: BillingRecord) => {
+      if (next.revision !== (record?.revision ?? 0) + 1) {
+        return Promise.resolve(false);
+      }
+      record = next;
+      return Promise.resolve(true);
+    });
     const store = {
       read: jest.fn().mockImplementation(() => Promise.resolve(record)),
-      save: jest.fn().mockImplementation((next: BillingRecord) => {
-        if (next.revision !== (record?.revision ?? 0) + 1) {
-          return Promise.resolve(false);
-        }
-        record = next;
-        return Promise.resolve(true);
-      }),
+      save: saveRecord,
       hasEvent: exists,
       readHouseholdByCustomer: customerMapping,
       beginCheckout,
@@ -102,6 +111,10 @@ describe('StripeBillingService', () => {
       {
         executeOwner: permissions,
       } as unknown as ResolveHouseholdPantryAccessUseCase,
+      new RenewalNoticeStore({
+        send: noticeRead,
+      } as unknown as DynamoDbDocumentClientService),
+      { get: (key: string) => noticeValues[key] } as ConfigService,
     );
     jest.spyOn(stripe.prices, 'retrieve').mockResolvedValue({
       id: 'price_test',
@@ -148,6 +161,173 @@ describe('StripeBillingService', () => {
     );
   });
 
+  it('enqueues only an eligible verified dev renewal and reconfirms fresh cancellation', async () => {
+    noticeValues = {
+      RENEWAL_NOTICE_TABLE: 'despensalista-dev-renewal-notices',
+      RENEWAL_NOTICE_MODE: 'dry-run',
+      STRIPE_BILLING_MODE: 'test',
+    };
+    record = {
+      householdId: 'household-1',
+      customerId: 'cus_test',
+      revision: 1,
+    };
+    const renewalAt = Math.floor(Date.now() / 1000) + 30 * 86_400;
+    const subscription = {
+      id: 'sub_test',
+      customer: 'cus_test',
+      livemode: false,
+      metadata: session.metadata,
+      status: 'active',
+      collection_method: 'charge_automatically',
+      cancel_at_period_end: false,
+      cancel_at: null as number | null,
+      items: {
+        has_more: false,
+        data: [
+          {
+            id: 'si_test',
+            quantity: 1,
+            current_period_end: renewalAt,
+            price: {
+              id: billing.priceId,
+              currency: 'mxn',
+              unit_amount: 5900,
+              recurring: {
+                interval: 'month',
+                interval_count: 1,
+                usage_type: 'licensed',
+              },
+            },
+          },
+        ],
+      },
+      latest_invoice: {
+        status: 'paid',
+        amount_paid: 5900,
+        currency: 'mxn',
+        customer: 'cus_test',
+        livemode: false,
+        parent: { subscription_details: { subscription: 'sub_test' } },
+        lines: {
+          data: [
+            {
+              currency: 'mxn',
+              amount: 5900,
+              period: { end: renewalAt },
+              parent: {
+                subscription_item_details: { subscription_item: 'si_test' },
+              },
+              pricing: { price_details: { price: billing.priceId } },
+            },
+          ],
+        },
+      },
+    };
+    jest.mocked(stripe.subscriptions.list).mockResolvedValue({
+      data: [subscription],
+      has_more: false,
+    } as unknown as Stripe.Response<Stripe.ApiList<Stripe.Subscription>>);
+    const deliver = (id: string) => {
+      const payload = JSON.stringify({
+        id,
+        type: 'invoice.paid',
+        livemode: false,
+        data: { object: { customer: 'cus_test' } },
+      });
+      return service.webhook(
+        Buffer.from(payload),
+        stripe.webhooks.generateTestHeaderString({ payload, secret }),
+      );
+    };
+
+    await deliver('evt_eligible_notice');
+    expect(commit).toHaveBeenLastCalledWith(
+      expect.objectContaining({ paidThrough: renewalAt }),
+      billing.table,
+      'evt_eligible_notice',
+      {
+        Update: expect.objectContaining({
+          TableName: noticeValues.RENEWAL_NOTICE_TABLE,
+          ExpressionAttributeValues: expect.objectContaining({
+            ':householdId': 'household-1',
+            ':subscriptionId': 'sub_test',
+            ':renewalAt': renewalAt,
+            ':amountMinor': 5900,
+          }),
+        }),
+      },
+    );
+    await expect(service.getUpcomingRenewal('household-1')).resolves.toEqual({
+      householdId: 'household-1',
+      subscriptionId: 'sub_test',
+      renewalAt,
+      amountMinor: 5900,
+      currency: 'mxn',
+    });
+
+    const previous = {
+      householdId: 'household-1',
+      subscriptionId: 'sub_test',
+      renewalAt,
+      generation: 'older-generation',
+    };
+    noticeRead
+      .mockResolvedValueOnce({ Item: { ...previous, state: 'queued' } })
+      .mockResolvedValueOnce({
+        Item: { ...previous, state: 'skipped', result: 'nonrenewing' },
+      });
+    commit.mockResolvedValueOnce(false);
+    await deliver('evt_resume_after_worker_conflict');
+    expect(commit).toHaveBeenCalledTimes(3);
+    expect(commit).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      billing.table,
+      'evt_resume_after_worker_conflict',
+      {
+        Update: expect.objectContaining({
+          UpdateExpression: 'SET #generation = :generation',
+        }),
+      },
+    );
+    expect(commit).toHaveBeenLastCalledWith(
+      expect.anything(),
+      billing.table,
+      'evt_resume_after_worker_conflict',
+      {
+        Update: expect.objectContaining({
+          ConditionExpression: expect.stringContaining(
+            '#state = :skipped AND #result = :nonrenewing',
+          ),
+        }),
+      },
+    );
+
+    // A fresh Stripe state can become nonrenewing before its webhook arrives.
+    subscription.cancel_at = renewalAt;
+    await expect(
+      service.getUpcomingRenewal('household-1'),
+    ).resolves.toBeUndefined();
+    await deliver('evt_canceled_notice');
+    expect(commit).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        paidThrough: renewalAt,
+        cancelAtPeriodEnd: true,
+      }),
+      billing.table,
+      'evt_canceled_notice',
+      undefined,
+    );
+
+    settings.mockResolvedValue(production);
+    jest.mocked(stripe.subscriptions.list).mockClear();
+    await expect(
+      service.getUpcomingRenewal('household-1'),
+    ).resolves.toBeUndefined();
+    expect(stripe.subscriptions.list).not.toHaveBeenCalled();
+  });
+
   afterEach(() => jest.restoreAllMocks());
 
   it('keeps closed live enrollment separate from existing subscriptions', async () => {
@@ -187,6 +367,144 @@ describe('StripeBillingService', () => {
     ).rejects.toMatchObject({ status: 400 });
     expect(permissions).not.toHaveBeenCalled();
     expect(stripe.customers.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unversioned live consent before touching the household or Stripe', async () => {
+    settings.mockResolvedValue({ ...production, checkoutEnabled: true });
+    permissions.mockRejectedValue({ status: 403 });
+    await expect(
+      service.checkout('owner-1', production.origin, true),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(permissions).not.toHaveBeenCalled();
+    expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
+  });
+
+  it('keeps Checkout hidden for another household while allowing its existing portal', async () => {
+    settings.mockResolvedValue({
+      ...production,
+      checkoutEnabled: true,
+      pilotHouseholdId: 'pilot-household',
+    });
+    membership.mockResolvedValue({ householdId: 'household-1', role: 'owner' });
+    const testPrice = await stripe.prices.retrieve(billing.priceId);
+    jest.mocked(stripe.prices.retrieve).mockResolvedValue({
+      ...testPrice,
+      livemode: true,
+      product: production.productId,
+    });
+
+    await expect(service.status('owner-1')).resolves.toMatchObject({
+      canCheckout: false,
+    });
+    await expect(
+      service.checkout('owner-1', production.origin, true, '2026-11-15'),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(permissions).not.toHaveBeenCalled();
+    expect(beginCheckout).not.toHaveBeenCalled();
+    record = {
+      householdId: 'household-1',
+      revision: 1,
+      customerId: 'cus_live',
+      subscriptionId: 'sub_live',
+      status: 'active',
+    };
+    await expect(service.status('owner-1')).resolves.toMatchObject({
+      canCheckout: false,
+      canOpenPortal: true,
+    });
+  });
+
+  it('records a pilot owner’s first live consent before Stripe creation and reuses it unchanged', async () => {
+    settings.mockResolvedValue({
+      ...production,
+      checkoutEnabled: true,
+      pilotHouseholdId: 'household-1',
+    });
+    membership.mockResolvedValue({ householdId: 'household-1', role: 'owner' });
+    record = {
+      householdId: 'household-1',
+      revision: 1,
+      customerId: 'cus_live',
+    };
+    const metadata = {
+      ...session.metadata,
+      integration: 'despensalista',
+      stage: 'prod',
+    };
+    const liveSession = {
+      ...session,
+      id: 'cs_live_valid',
+      customer: 'cus_live',
+      livemode: true,
+    };
+    const price = await stripe.prices.retrieve(billing.priceId);
+    jest.mocked(stripe.prices.retrieve).mockResolvedValue({
+      ...price,
+      livemode: true,
+      product: production.productId,
+    });
+    jest.spyOn(stripe.products, 'retrieve').mockResolvedValue({
+      id: production.productId,
+      active: true,
+      livemode: true,
+      metadata,
+    } as unknown as Stripe.Response<Stripe.Product>);
+    jest.mocked(stripe.customers.retrieve).mockResolvedValue({
+      id: 'cus_live',
+      livemode: true,
+      metadata,
+    } as unknown as Stripe.Response<Stripe.Customer>);
+    jest.mocked(stripe.checkout.sessions.create).mockImplementation((params) =>
+      Promise.resolve({
+        ...liveSession,
+        metadata: params?.metadata,
+      } as unknown as Stripe.Response<Stripe.Checkout.Session>),
+    );
+    jest.mocked(stripe.checkout.sessions.retrieve).mockImplementation(() =>
+      Promise.resolve({
+        ...liveSession,
+        metadata: {
+          ...metadata,
+          despensalistaCheckoutToken: record?.checkout?.token,
+        },
+      } as unknown as Stripe.Response<Stripe.Checkout.Session>),
+    );
+
+    await expect(service.status('owner-1')).resolves.toMatchObject({
+      canCheckout: true,
+      termsVersion: '2026-11-15',
+    });
+    await expect(
+      service.checkout('owner-1', production.origin, true, '2026-11-14'),
+    ).rejects.toMatchObject({ status: 400 });
+    const invoke = () =>
+      service.checkout('owner-1', production.origin, true, '2026-11-15');
+    const first = await invoke();
+    await expect(invoke()).resolves.toEqual(first);
+    expect(saveRecord).toHaveBeenCalledTimes(2);
+    expect(saveRecord.mock.calls[0]).toEqual([
+      expect.objectContaining({
+        checkout: expect.objectContaining({ termsVersion: '2026-11-15' }),
+      }),
+      production.table,
+      {
+        termsVersion: '2026-11-15',
+        acceptedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T.*Z$/),
+      },
+    ]);
+    expect(saveRecord.mock.invocationCallOrder[0]).toBeLessThan(
+      jest.mocked(stripe.checkout.sessions.create).mock.invocationCallOrder[0],
+    );
+    expect(saveRecord.mock.calls[1]).toHaveLength(2);
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledTimes(1);
+
+    if (!record?.checkout) throw new Error('Expected a saved Checkout attempt');
+    delete record.checkout.termsVersion;
+    await expect(service.status('owner-1')).resolves.toMatchObject({
+      canCheckout: false,
+    });
+    await expect(invoke()).rejects.toMatchObject({ status: 409 });
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledTimes(1);
   });
 
   it('does not start billing changes while the household checkout is locked', async () => {
@@ -252,6 +570,12 @@ describe('StripeBillingService', () => {
 
   it('grants live Plus only after a paid invoice for the present item period', async () => {
     settings.mockResolvedValue(production);
+    noticeValues = {
+      RENEWAL_NOTICE_STAGE: 'prod',
+      RENEWAL_NOTICE_TABLE: 'despensalista-prod-renewal-notices',
+      RENEWAL_NOTICE_MODE: 'dry-run',
+      STRIPE_BILLING_MODE: 'live',
+    };
     membership.mockResolvedValue({ householdId: 'household-1', role: 'owner' });
     customerMapping.mockResolvedValue('household-1');
     record = {
@@ -276,6 +600,7 @@ describe('StripeBillingService', () => {
       customer: 'cus_live',
       livemode: true,
       metadata,
+      collection_method: 'charge_automatically',
       cancel_at_period_end: true,
       items: {
         has_more: false,
@@ -283,7 +608,17 @@ describe('StripeBillingService', () => {
           {
             id: 'si_live',
             quantity: 1,
-            price: { id: production.priceId, product: production.productId },
+            price: {
+              id: production.priceId,
+              product: production.productId,
+              currency: 'mxn',
+              unit_amount: 5900,
+              recurring: {
+                interval: 'month',
+                interval_count: 1,
+                usage_type: 'licensed',
+              },
+            },
             current_period_end: currentPeriodEnd,
           },
         ],
@@ -335,7 +670,7 @@ describe('StripeBillingService', () => {
     await sendPaidEvent('evt_current_period');
     expect(record?.paidThrough).toBe(currentPeriodEnd);
     const testPrice = await stripe.prices.retrieve(billing.priceId);
-    jest.mocked(stripe.prices.retrieve).mockResolvedValueOnce({
+    jest.mocked(stripe.prices.retrieve).mockResolvedValue({
       ...testPrice,
       livemode: true,
       product: production.productId,
@@ -346,6 +681,33 @@ describe('StripeBillingService', () => {
       canCheckout: false,
       cancelAtPeriodEnd: true,
       currentPeriodEnd: new Date(currentPeriodEnd * 1000).toISOString(),
+    });
+    await expect(
+      service.getUpcomingRenewal('household-1'),
+    ).resolves.toBeUndefined();
+
+    subscription.cancel_at_period_end = false;
+    await sendPaidEvent('evt_resumed_renewal');
+    expect(commit).toHaveBeenLastCalledWith(
+      expect.objectContaining({ renewalAt: currentPeriodEnd }),
+      production.table,
+      'evt_resumed_renewal',
+      {
+        Update: expect.objectContaining({
+          TableName: noticeValues.RENEWAL_NOTICE_TABLE,
+        }),
+      },
+    );
+    await expect(
+      service.getUpcomingRenewal('household-1'),
+    ).resolves.toMatchObject({
+      subscriptionId: 'sub_live',
+      renewalAt: currentPeriodEnd,
+      amountMinor: 5900,
+    });
+    await expect(service.status('owner-1')).resolves.toMatchObject({
+      canCheckout: false,
+      nextRenewalAt: new Date(currentPeriodEnd * 1000).toISOString(),
     });
   });
 

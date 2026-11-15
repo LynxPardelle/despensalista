@@ -153,6 +153,14 @@ import { AccessTokenGuard } from './infrastructure/http/auth/access-token.guard'
 import { StripeBillingConfig } from './infrastructure/billing/stripe-billing-config';
 import { StripeBillingService } from './infrastructure/billing/stripe-billing.service';
 import { StripeBillingStore } from './infrastructure/billing/stripe-billing.store';
+import { RenewalNoticeDispatcher } from './infrastructure/billing/renewals/renewal-notice.dispatcher';
+import { RenewalNoticeStore } from './infrastructure/billing/renewals/renewal-notice.store';
+import {
+  RENEWAL_NOTICE_RECIPIENT,
+  RENEWAL_NOTICE_TRANSPORT,
+} from './infrastructure/billing/renewals/renewal-notice.types';
+import { SesRenewalNoticeTransport } from './infrastructure/billing/renewals/ses-renewal-notice.transport';
+import { StripeRenewalNoticeRecipient } from './infrastructure/billing/renewals/stripe-renewal-notice-recipient';
 import { StripeHouseholdBilling } from './infrastructure/billing/stripe-household-billing';
 import { StripeHouseholdPlan } from './infrastructure/billing/stripe-household-plan';
 import { HOUSEHOLD_PLAN_READER } from './application/ports/household-plan-reader';
@@ -464,6 +472,9 @@ const wasteEventRepositoryProvider = useDynamoDb
           .optional(),
         STRIPE_BILLING_TABLE: Joi.string().optional(),
         STRIPE_BILLING_CONFIG_PARAMETER: Joi.string().optional(),
+        RENEWAL_NOTICE_TABLE: Joi.string().optional(),
+        RENEWAL_NOTICE_MODE: Joi.string().valid('dry-run', 'ses').optional(),
+        RENEWAL_NOTICE_SES_TEST_TO: Joi.string().email().optional(),
         COGNITO_AUTH_TRANSACTION_TTL_SECONDS: Joi.number()
           .integer()
           .positive()
@@ -509,6 +520,13 @@ const wasteEventRepositoryProvider = useDynamoDb
     StripeBillingConfig,
     StripeBillingService,
     StripeBillingStore,
+    RenewalNoticeStore,
+    RenewalNoticeDispatcher,
+    {
+      provide: RENEWAL_NOTICE_RECIPIENT,
+      useClass: StripeRenewalNoticeRecipient,
+    },
+    { provide: RENEWAL_NOTICE_TRANSPORT, useClass: SesRenewalNoticeTransport },
     { provide: HOUSEHOLD_BILLING, useClass: StripeHouseholdBilling },
     { provide: HOUSEHOLD_PLAN_READER, useClass: StripeHouseholdPlan },
     {

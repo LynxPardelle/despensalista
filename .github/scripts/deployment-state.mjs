@@ -534,14 +534,7 @@ export async function restoreRelease({
   if (!selected) throw new Error('Recorded Lambda version is unavailable or does not match the release');
   assertGoogleMfaRollbackTarget(state, recorded.version, aws);
   if (stage === 'prod' && state.stripeBillingTable) {
-    const { Environment } = aws([
-      'lambda', 'get-function-configuration', '--function-name', state.functionName,
-      '--qualifier', recorded.version,
-    ]);
-    if (Environment?.Variables?.STRIPE_BILLING_MODE !== 'live' ||
-        Environment.Variables.STRIPE_BILLING_TABLE !== state.stripeBillingTable) {
-      throw new Error('Production rollback must preserve Stripe Billing and subscription cancellation');
-    }
+    assertProductionBillingRollback(state, recorded.version, aws);
   }
   const reservedConcurrency = normalizedReservedConcurrency(
     recorded.reservedConcurrency,
@@ -556,6 +549,61 @@ export async function restoreRelease({
     aws,
     wait,
   );
+}
+
+function assertProductionBillingRollback(state, targetVersion, aws) {
+  const variablesFor = version => aws([
+    'lambda', 'get-function-configuration', '--function-name', state.functionName,
+    '--qualifier', version,
+  ]).Environment?.Variables;
+  const targetVariables = variablesFor(targetVersion);
+  if (targetVariables?.STRIPE_BILLING_MODE !== 'live' ||
+      targetVariables.STRIPE_BILLING_TABLE !== state.stripeBillingTable) {
+    throw new Error('Production rollback must preserve Stripe Billing and subscription cancellation');
+  }
+  const target = productionCheckoutAudience(targetVariables);
+  if (target === 'closed') return;
+  if (target === undefined) {
+    throw new Error('Production rollback Checkout target has an unsafe audience');
+  }
+
+  // The CloudFormation version can differ from the serving alias after a rollback.
+  const live = aws(['lambda', 'get-alias', '--function-name', state.functionName, '--name', state.alias]);
+  if (!/^\d+$/.test(live.FunctionVersion ?? '') ||
+      Object.keys(live.RoutingConfig?.AdditionalVersionWeights ?? {}).length) {
+    throw new Error('Production rollback Checkout source has an unsafe alias');
+  }
+  const currentVariables = live.FunctionVersion === targetVersion
+    ? targetVariables : variablesFor(live.FunctionVersion);
+  const current = currentVariables?.STRIPE_BILLING_MODE === 'live' &&
+    currentVariables.STRIPE_BILLING_TABLE === state.stripeBillingTable
+    ? productionCheckoutAudience(currentVariables)
+    : undefined;
+  if (current !== 'public' && current !== target) {
+    throw new Error('Production rollback Checkout audience cannot widen beyond the current live alias');
+  }
+}
+
+function productionCheckoutAudience(variables) {
+  const checkout = variables.STRIPE_BILLING_CHECKOUT_ENABLED;
+  if (checkout === undefined || checkout === 'false') return 'closed';
+  if (checkout !== 'true') return undefined;
+
+  const pilot = variables.STRIPE_BILLING_PILOT_HOUSEHOLD_ID;
+  const isPublic = variables.STRIPE_BILLING_PUBLIC_CHECKOUT;
+  if (pilot && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(pilot) &&
+      (isPublic === 'false' || isPublic === undefined)) {
+    return pilot;
+  }
+  if (pilot === undefined && isPublic === 'true' &&
+      variables.RENEWAL_NOTICE_STAGE === 'prod' &&
+      variables.RENEWAL_NOTICE_MODE === 'ses' &&
+      variables.RENEWAL_NOTICE_TABLE === 'despensalista-prod-renewal-notices' &&
+      !variables.RENEWAL_NOTICE_SES_TEST_TO?.trim()) {
+    return 'public';
+  }
+  // Older builds can enable Checkout without an explicit audience.
+  return undefined;
 }
 
 function publishOrReuseLatestVersion(functionName, aws) {

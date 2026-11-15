@@ -52,6 +52,9 @@ export function stripeBillingDeployment(stack: cdk.Stack, project: string, stage
   const boundaryEnabled = readFlag('enableStripeBillingBoundary') ?? false;
   const externalBoundary = readFlag('externalStripeBillingBoundary') ?? false;
   const checkoutEnabled = readFlag('enableStripeBillingCheckout') ?? (stage === 'dev' && enabled);
+  const publicCheckout = checkoutEnabled && (readFlag('enablePublicStripeBillingCheckout') ?? false);
+  const pilotContext: unknown = checkoutEnabled ? stack.node.tryGetContext('stripeBillingPilotHouseholdId') : undefined;
+  const pilotHouseholdId = pilotContext === '' ? undefined : pilotContext;
   if ((enabled || boundaryEnabled || checkoutEnabled) &&
       (project !== 'despensalista' || !['dev', 'prod'].includes(stage))) {
     throw new Error('Stripe Billing may be enabled only in dev and prod for DespensaLista.');
@@ -65,6 +68,16 @@ export function stripeBillingDeployment(stack: cdk.Stack, project: string, stage
   if (checkoutEnabled && !enabled) {
     throw new Error('Stripe Checkout requires Stripe Billing to be enabled.');
   }
+  if (pilotHouseholdId !== undefined && (typeof pilotHouseholdId !== 'string' ||
+    !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(pilotHouseholdId))) {
+    throw new Error('Stripe Checkout pilot requires a lowercase household UUID v4.');
+  }
+  if ((publicCheckout || pilotHouseholdId) && stage !== 'prod') {
+    throw new Error('A Stripe Checkout audience requires Checkout to be enabled in production.');
+  }
+  if (stage === 'prod' && checkoutEnabled && Boolean(pilotHouseholdId) === publicCheckout) {
+    throw new Error('Stripe Checkout requires exactly one production Checkout audience.');
+  }
   if (enabled && stage === 'prod' && !boundaryEnabled) {
     throw new Error('Production Stripe Billing requires the administrator-managed runtime boundary grant.');
   }
@@ -72,12 +85,73 @@ export function stripeBillingDeployment(stack: cdk.Stack, project: string, stage
   return {
     enabled,
     checkoutEnabled,
+    publicCheckout,
+    pilotHouseholdId,
     boundaryEnabled: stage === 'dev' ? enabled : boundaryEnabled,
     externalBoundary,
     mode: stage === 'prod' ? 'live' : 'test',
     parameterName: `/${resourceName}`,
     parameterArn: stack.formatArn({ service: 'ssm', resource: 'parameter', resourceName }),
   };
+}
+
+const renewalNoticeSenderDomain = 'despensalista.lynxpardelle.com';
+export const renewalNoticeSender = `no-reply@${renewalNoticeSenderDomain}`;
+
+export function renewalNoticeDeployment(stack: cdk.Stack, project: string, stage: string) {
+  const mode: unknown = stack.node.tryGetContext('renewalNoticeMode') ?? 'off';
+  if (mode === 'off') return undefined;
+  if (project !== 'despensalista' || (stage !== 'dev' && stage !== 'prod')) {
+    throw new Error('Renewal notices may only run in dev and prod for DespensaLista.');
+  }
+  if (mode !== 'dry-run' && mode !== 'ses') throw new Error('Invalid renewal notice mode.');
+  if (!stripeBillingDeployment(stack, project, stage).enabled) {
+    throw new Error('Renewal notices require Stripe Billing for the same environment.');
+  }
+  const testRecipient: unknown = stack.node.tryGetContext('renewalNoticeTestTo');
+  if (stage === 'prod') {
+    if (testRecipient) throw new Error('Production renewal notices cannot use a test recipient.');
+    if (mode === 'ses' && (
+      stack.region !== 'us-east-1' ||
+      !['true', true].includes(stack.node.tryGetContext('renewalNoticeSesProductionAccess'))
+    )) {
+      throw new Error('Production renewal notices require SES production access in us-east-1.');
+    }
+    return { stage, mode, testRecipient: undefined };
+  }
+  if (mode === 'ses' && (
+    stack.region !== 'us-east-1' || typeof testRecipient !== 'string' ||
+    testRecipient.length > 254 || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(testRecipient) ||
+    testRecipient !== testRecipient.toLowerCase()
+  )) {
+    throw new Error('SES renewal notices require one lowercase dev address in us-east-1.');
+  }
+  return { stage, mode, testRecipient: mode === 'ses' ? testRecipient as string : undefined };
+}
+
+export function renewalNoticeSesAccountPolicy(stack: cdk.Stack): iam.PolicyStatement {
+  return new iam.PolicyStatement({
+    actions: ['ses:GetAccount'],
+    resources: ['*'],
+    conditions: { StringEquals: { 'aws:RequestedRegion': stack.region } },
+  });
+}
+
+export function renewalNoticeSesPolicy(stack: cdk.Stack, testRecipient?: string): iam.PolicyStatement {
+  return new iam.PolicyStatement({
+    actions: ['ses:SendEmail'],
+    // SES rejected both identity ARNs in dev. Keep region and sender exact;
+    // dev has a fixed recipient and production resolves its verified owner.
+    resources: ['*'],
+    conditions: {
+      StringEquals: {
+        'aws:RequestedRegion': stack.region,
+        'ses:FromAddress': renewalNoticeSender,
+      },
+      ...(testRecipient && { 'ForAllValues:StringEquals': { 'ses:Recipients': [testRecipient] } }),
+      Null: { 'ses:Recipients': 'false' },
+    },
+  });
 }
 
 export function stageSynthesizer(project: string, stage: string, administrativeBootstrap = false): cdk.DefaultStackSynthesizer {
@@ -106,6 +180,7 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
   const prefix = `${project}-${stage}`;
   const inventory = deliveryInventory(stage);
   const stripeBilling = stripeBillingDeployment(stack, project, stage);
+  const renewalNotice = renewalNoticeDeployment(stack, project, stage);
   const arn = (service: string, resource: string, resourceName: string, region = stack.region) =>
     stack.formatArn({ service, region, resource, resourceName });
   const roleArn = (name: string) => arn('iam', 'role', name, '');
@@ -157,6 +232,13 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
   // An administrator-provisioned grant is verified by the production workflow.
   if (stripeBilling.boundaryEnabled && !stripeBilling.externalBoundary) {
     runtimeStatements.push(scoped(['ssm:GetParameter'], [stripeBilling.parameterArn]));
+  }
+  if (renewalNotice) {
+    runtimeStatements.push(scoped(['cognito-idp:AdminGetUser'], [userPoolArn], userPoolConditions));
+    if (renewalNotice.mode === 'ses') {
+      runtimeStatements.push(renewalNoticeSesPolicy(stack, renewalNotice.testRecipient));
+      if (renewalNotice.stage === 'prod') runtimeStatements.push(renewalNoticeSesAccountPolicy(stack));
+    }
   }
   const boundary = new iam.ManagedPolicy(stack, 'RuntimePermissionsBoundary', {
     managedPolicyName: `${prefix}-runtime-boundary`, statements: runtimeStatements,
@@ -254,7 +336,11 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
     'ForAllValues:StringEquals': { 'route53:ChangeResourceRecordSetsRecordTypes': ['A', 'AAAA', 'CNAME'], 'route53:ChangeResourceRecordSetsActions': ['CREATE', 'UPSERT', 'DELETE'] },
   }));
   if (stage === 'prod') execution.addToPolicy(scoped(['ses:GetEmailIdentity', 'ses:PutEmailIdentityDkimSigningAttributes', 'ses:PutEmailIdentityFeedbackAttributes', 'ses:PutEmailIdentityMailFromAttributes', 'ses:TagResource', 'ses:UntagResource', 'ses:ListTagsForResource'], [arn('ses', 'identity', domain)]));
-  if (stage === 'prod') execution.addToPolicy(scoped([
+  const workerRuleNames = [
+    ...(stage === 'prod' ? [`${prefix}-account-deletion-resume`] : []),
+    ...(renewalNotice ? [`${prefix}-plus-renewal-notices`] : []),
+  ];
+  if (workerRuleNames.length) execution.addToPolicy(scoped([
     'events:PutRule',
     'events:DescribeRule',
     'events:ListTargetsByRule',
@@ -264,7 +350,7 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
     'events:RemoveTargets',
     'events:TagResource',
     'events:UntagResource',
-  ], [arn('events', 'rule', `${prefix}-account-deletion-resume`)]));
+  ], workerRuleNames.map((name) => arn('events', 'rule', name))));
 
   const oidc = iam.OpenIdConnectProvider.fromOpenIdConnectProviderArn(stack, 'GitHubOidcProvider', arn('iam', 'oidc-provider', 'token.actions.githubusercontent.com', ''));
   const github = new iam.Role(stack, 'GitHubDeploymentRole', {
@@ -292,6 +378,10 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
     'lambda:DeleteFunctionConcurrency',
   ], [backendFunctionArn, `${backendFunctionArn}:*`]));
   if (stage === 'prod') {
+    if (renewalNotice?.mode === 'ses') {
+      github.addToPolicy(renewalNoticeSesAccountPolicy(stack));
+      github.addToPolicy(scoped(['ses:GetEmailIdentity'], [arn('ses', 'identity', renewalNoticeSenderDomain)]));
+    }
     const usersTableArn = arn('dynamodb', 'table', `${prefix}-users`);
     github.addToPolicy(scoped([
       'ssm:GetParameter',

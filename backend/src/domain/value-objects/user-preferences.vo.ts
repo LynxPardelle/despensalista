@@ -31,9 +31,12 @@ export class UserPreferences {
   }
 
   patch(input: UserPreferencesPatch): UserPreferences {
+    const updates = Object.fromEntries(
+      Object.entries(input).filter(([, value]) => value !== undefined),
+    );
     return UserPreferences.resolve({
       ...this.preferences,
-      ...input,
+      ...updates,
     });
   }
 

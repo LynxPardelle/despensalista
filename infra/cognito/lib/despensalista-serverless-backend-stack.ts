@@ -25,7 +25,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { applyRuntimeBoundary, deliveryInventory, googleMfaEnabled, requireGoogleMfaOrigin, stripeBillingDeployment } from './stage-delivery';
+import { applyRuntimeBoundary, deliveryInventory, googleMfaEnabled, requireGoogleMfaOrigin, renewalNoticeDeployment, renewalNoticeSesAccountPolicy, renewalNoticeSesPolicy, stripeBillingDeployment } from './stage-delivery';
 import { PublicProductionDomain, publicProductionDomain } from './public-production-domain';
 
 interface DespensaListaServerlessBackendStackProps extends cdk.StackProps {
@@ -88,6 +88,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       throw new Error('Google MFA requires the same frontend origin for Cognito, WebAuthn and the app domain.');
     }
     const stripeBilling = stripeBillingDeployment(this, projectName, stage);
+    const renewalNotice = renewalNoticeDeployment(this, projectName, stage);
     const devBillingOrigin = 'https://dev.despensalista.lynxpardelle.com';
     const stripeBillingOrigin = isProduction ? publicDomain?.origin : devBillingOrigin;
     if (stripeBilling.enabled && isProduction && !stripeBillingOrigin) {
@@ -132,6 +133,22 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
     }) : undefined;
+    // The production queue stays managed by this stack across notice mode changes.
+    const provisionRenewalTable = renewalNotice !== undefined || (isProduction && stripeBilling.enabled);
+    const renewalNoticeTable = provisionRenewalTable ? new dynamodb.Table(this, 'RenewalNoticeTable', {
+      tableName: `${projectName}-${stage}-renewal-notices`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expiresAt',
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      deletionProtection: stage === 'prod',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    }) : undefined;
+    renewalNoticeTable?.addGlobalSecondaryIndex({
+      indexName: 'RenewalNoticeDueIndex',
+      partitionKey: { name: 'queue', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'nextDay', type: dynamodb.AttributeType.NUMBER },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
     const originVerifyHeaderName = 'x-despensalista-origin-verify';
     const originSecretName = `${projectName}/${stage}/cloudfront-origin-verification`;
     const originVerifySecret = new secretsmanager.Secret(
@@ -209,6 +226,18 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
           STRIPE_BILLING_CONFIG_PARAMETER: stripeBilling.parameterName,
           STRIPE_BILLING_MODE: stripeBilling.mode,
           STRIPE_BILLING_CHECKOUT_ENABLED: String(stripeBilling.checkoutEnabled),
+          ...(stripeBilling.mode === 'live' && {
+            STRIPE_BILLING_PUBLIC_CHECKOUT: String(stripeBilling.publicCheckout),
+            ...(stripeBilling.pilotHouseholdId && {
+              STRIPE_BILLING_PILOT_HOUSEHOLD_ID: stripeBilling.pilotHouseholdId,
+            }),
+          }),
+        }),
+        ...(renewalNotice && renewalNoticeTable && {
+          RENEWAL_NOTICE_TABLE: renewalNoticeTable.tableName,
+          RENEWAL_NOTICE_STAGE: renewalNotice.stage,
+          RENEWAL_NOTICE_MODE: renewalNotice.mode,
+          ...(renewalNotice.testRecipient && { RENEWAL_NOTICE_SES_TEST_TO: renewalNotice.testRecipient }),
         }),
         HELMET_ENABLED: 'true',
         RATE_LIMIT_ENABLED: 'true',
@@ -248,6 +277,24 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         resources: [stripeBilling.parameterArn],
       }));
     }
+    if (renewalNotice && renewalNoticeTable) {
+      apiFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem', 'dynamodb:TransactWriteItems'],
+        resources: [renewalNoticeTable.tableArn],
+      }));
+      apiFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [`${renewalNoticeTable.tableArn}/index/RenewalNoticeDueIndex`],
+      }));
+      apiFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['cognito-idp:AdminGetUser'],
+        resources: [this.formatArn({ service: 'cognito-idp', resource: 'userpool', resourceName: props.cognitoUserPoolId })],
+      }));
+      if (renewalNotice.mode === 'ses') {
+        apiFunction.addToRolePolicy(renewalNoticeSesPolicy(this, renewalNotice.testRecipient));
+        if (renewalNotice.stage === 'prod') apiFunction.addToRolePolicy(renewalNoticeSesAccountPolicy(this));
+      }
+    }
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
@@ -278,6 +325,20 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       description: 'Stable production traffic target and rollback pointer.',
       version: publishedVersion,
     });
+    if (renewalNotice) {
+      new events.Rule(this, 'PlusRenewalNoticeRule', {
+        ruleName: `${projectName}-${stage}-plus-renewal-notices`,
+        schedule: events.Schedule.rate(stage === 'prod' ? cdk.Duration.minutes(15) : cdk.Duration.hours(1)),
+        targets: [new eventTargets.LambdaFunction(liveAlias, {
+          event: events.RuleTargetInput.fromObject({
+            source: 'despensalista.renewal-notice-worker',
+            'detail-type': 'dispatch',
+          }),
+          maxEventAge: cdk.Duration.minutes(5),
+          retryAttempts: 0,
+        })],
+      });
+    }
     if (isProduction) {
       new events.Rule(this, 'AccountDeletionResumeRule', {
         ruleName: `${projectName}-${stage}-account-deletion-resume`,

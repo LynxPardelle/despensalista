@@ -23,6 +23,7 @@ import {
   BillingAction,
   BillingPlan,
   BillingService,
+  plusHogarTermsVersion,
   SubscriptionStatus,
 } from '../../core/services/billing.service';
 import { PantryService } from '../../core/services/pantry.service';
@@ -112,6 +113,7 @@ export class ProfilePageComponent implements OnInit {
   protected readonly billingAction = signal<BillingAction | null>(null);
   protected readonly billingActionError = signal<string | null>(null);
   protected readonly recurringTermsAccepted = signal(false);
+  protected readonly currentPlusHogarTermsVersion = plusHogarTermsVersion;
   private billingStatusRequest?: Subscription;
 
   profile: UserProfile | null = null;
@@ -363,13 +365,13 @@ export class ProfilePageComponent implements OnInit {
     if (live && !this.canOpenLiveBillingHere) return;
     if (action === 'checkout' && (
       !billing.canCheckout || this.billingStatusError() || this.awaitingBillingConfirmation ||
-      (live && !this.recurringTermsAccepted())
+      (live && (!this.recurringTermsAccepted() || billing.termsVersion !== plusHogarTermsVersion))
     )) return;
     if (action === 'portal' && !billing.canOpenPortal) return;
 
     this.billingAction.set(action);
     this.billingActionError.set(null);
-    this.billingService.createSession(action, live && action === 'checkout' && this.recurringTermsAccepted())
+    this.billingService.createSession(action, live && action === 'checkout' ? plusHogarTermsVersion : undefined)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (url) => this.document.location.assign(url),

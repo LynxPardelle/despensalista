@@ -172,6 +172,8 @@
         @let liveBilling = subscription.mode === 'live';
         @let canOpenSessions = !liveBilling || canOpenLiveBillingHere;
         @let periodEnd = formatBillingDate(subscription.currentPeriodEnd);
+        @let nextRenewal = formatBillingDate(subscription.nextRenewalAt);
+        @let canAcceptTerms = !liveBilling || subscription.termsVersion === currentPlusHogarTermsVersion;
         <section class="panel monetization-panel" aria-labelledby="subscription-title">
           @if (liveBilling) {
             <h2 id="subscription-title">Plus Hogar</h2>
@@ -194,7 +196,12 @@
                 {{ subscriptionDisplayLabel(subscription) }}
               </dd>
             </div>
-            @if (periodEnd && !billingStatusError()) {
+            @if (liveBilling && nextRenewal && !subscription.cancelAtPeriodEnd && !billingStatusError()) {
+              <div>
+                <dt>Próximo cargo programado</dt>
+                <dd>{{ nextRenewal }}</dd>
+              </div>
+            } @else if (periodEnd && !billingStatusError()) {
               <div>
                 <dt>Fin del periodo pagado</dt>
                 <dd>{{ periodEnd }}</dd>
@@ -235,26 +242,30 @@
           }
 
           @if (liveBilling && canOpenSessions && subscription.canManage && subscription.canCheckout && !awaitingBillingConfirmation) {
-            <p class="helper-copy" id="plus-checkout-details">
-              El primer cargo se hace al confirmar el pago en Stripe. Luego se cobra
-              {{ formatPlanPrice(subscription.plan) }} hasta que canceles. En tu perfil puedes consultar el
-              periodo y cancelar la renovación.
-            </p>
-            <label class="billing-consent">
-              <input
-                #recurringConsent
-                type="checkbox"
-                [checked]="recurringTermsAccepted()"
-                [disabled]="billingAction() !== null || billingLoading() || billingStatusError()"
-                aria-describedby="plus-checkout-details"
-                (change)="recurringTermsAccepted.set(recurringConsent.checked)"
-              />
-              <span>Acepto las condiciones y autorizo el cobro recurrente.</span>
-            </label>
+            @if (canAcceptTerms) {
+              <p class="helper-copy" id="plus-checkout-details">
+                El primer cargo se hace al confirmar el pago en Stripe. Luego se cobra
+                {{ formatPlanPrice(subscription.plan) }} hasta que canceles. Aquí verás la fecha del
+                próximo cargo cuando Stripe confirme tu suscripción.
+              </p>
+              <label class="billing-consent">
+                <input
+                  #recurringConsent
+                  type="checkbox"
+                  [checked]="recurringTermsAccepted()"
+                  [disabled]="billingAction() !== null || billingLoading() || billingStatusError()"
+                  aria-describedby="plus-checkout-details"
+                  (change)="recurringTermsAccepted.set(recurringConsent.checked)"
+                />
+                <span>Acepto las condiciones y autorizo el cobro recurrente.</span>
+              </label>
+            } @else {
+              <p class="helper-copy">Actualiza la página para revisar las condiciones vigentes de Plus Hogar.</p>
+            }
           }
 
           <div class="billing-actions">
-            @if (canOpenSessions && subscription.canManage && subscription.canCheckout && !awaitingBillingConfirmation) {
+            @if (canOpenSessions && subscription.canManage && subscription.canCheckout && canAcceptTerms && !awaitingBillingConfirmation) {
               <button
                 class="secondary-button"
                 type="button"
