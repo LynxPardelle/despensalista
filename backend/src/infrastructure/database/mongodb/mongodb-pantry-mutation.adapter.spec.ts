@@ -774,7 +774,7 @@ describe('MongoPantryMutationAdapter', () => {
     });
   });
 
-  it('rebuilds quota before aborting a failed normal reset', async () => {
+  it('rebuilds quota and retains purchase totals on an aborted normal reset', async () => {
     const runtimeAdapter = adapter as unknown as {
       beginPantryDeletion: (
         ownerUserId: string,
@@ -787,6 +787,14 @@ describe('MongoPantryMutationAdapter', () => {
     };
     const type = makeProductType('remaining');
     await adapter.createProductType(type);
+    await connection
+      .collection('pantry_quotas')
+      .updateOne(
+        { _id: 'user-1' as never },
+        {
+          $set: { 'purchaseAmount_2026-11': 2500, 'purchasePriced_2026-11': 1 },
+        },
+      );
     await runtimeAdapter.beginPantryDeletion('user-1', {
       deletionToken: 'owner-token',
     });
@@ -801,6 +809,12 @@ describe('MongoPantryMutationAdapter', () => {
       deleting: false,
       mutationEpoch: 1,
       activeProductTypes: 1,
+    });
+    await expect(
+      adapter.getMonthlyPurchaseSpend('user-1', '2026-11'),
+    ).resolves.toMatchObject({
+      amountMinor: 2500,
+      pricedItemCount: 1,
     });
     await expect(
       adapter.createProductType(makeProductType('after-abort')),

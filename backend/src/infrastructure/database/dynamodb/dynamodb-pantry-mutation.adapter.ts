@@ -14,6 +14,7 @@ import {
   purchaseSpendFields,
   purchaseSpendIncrements,
   readMonthlyPurchaseSpend,
+  retainedPurchaseSpendFields,
   type MonthlyPurchaseSpend,
   type MonthlyPurchaseSpendReader,
 } from '../../../application/ports/monthly-purchase-spend-reader';
@@ -1051,7 +1052,7 @@ export class DynamoDbPantryMutationAdapter
       await this.dynamoDb.send(
         new PutCommand({
           TableName: this.usersTable,
-          Item: quota,
+          Item: { ...quota, ...retainedPurchaseSpendFields(fence) },
           ConditionExpression:
             'deleting = :deleting AND quotaSchemaVersion = :quotaSchemaVersion AND mutationEpoch = :mutationEpoch AND deletionToken = :deletionToken AND retainFence = :retainFence',
           ExpressionAttributeValues: {

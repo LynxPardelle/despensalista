@@ -8,6 +8,7 @@ import {
   purchaseSpendFields,
   purchaseSpendIncrements,
   readMonthlyPurchaseSpend,
+  retainedPurchaseSpendFields,
   type MonthlyPurchaseSpend,
   type MonthlyPurchaseSpendReader,
 } from '../../../application/ports/monthly-purchase-spend-reader';
@@ -912,6 +913,7 @@ export class MongoPantryMutationAdapter
       },
       {
         ...quota,
+        ...retainedPurchaseSpendFields({ ...fence }),
         mutationEpoch: fence.mutationEpoch,
       },
     );

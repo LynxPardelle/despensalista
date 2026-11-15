@@ -35,6 +35,18 @@ export function purchaseSpendIncrements(
   };
 }
 
+export function retainedPurchaseSpendFields(
+  quota: Record<string, unknown>,
+): Record<string, number> {
+  return Object.fromEntries(
+    Object.entries(quota).filter(
+      (entry): entry is [string, number] =>
+        /^purchase(?:Amount|Priced|Unpriced)_\d{4}-\d{2}$/.test(entry[0]) &&
+        typeof entry[1] === 'number',
+    ),
+  );
+}
+
 export function readMonthlyPurchaseSpend(
   row: Record<string, unknown> | undefined | null,
   month: string,
