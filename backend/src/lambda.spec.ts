@@ -108,6 +108,15 @@ describe('lambda handler', () => {
     expect(resume).toHaveBeenCalledTimes(1);
   });
 
+  it('rejects the renewal worker when dev billing and its notice table are unavailable', async () => {
+    await expect(
+      lambda.handler({
+        source: 'despensalista.renewal-notice-worker',
+        'detail-type': 'dispatch',
+      }),
+    ).rejects.toThrow('Renewal notice worker is unavailable');
+  });
+
   it('returns fresh session cookies with the Google WebAuthn 403 response', async () => {
     const refresh = jest
       .spyOn(CognitoTokenClientService.prototype, 'refresh')

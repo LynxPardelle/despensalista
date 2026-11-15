@@ -379,6 +379,21 @@ Price references: [CloudFront](https://aws.amazon.com/cloudfront/pricing/),
 
 ## SES approval blocker
 
+Plus Hogar renewal notices currently run only in the dev Stripe sandbox. The
+dev deployment uses `PLUS_RENEWAL_NOTICE_MODE` and the environment secret
+`PLUS_RENEWAL_NOTICE_TEST_TO`. The allowed SES address must be verified before
+using `ses` mode. The dev Cognito delivery stack needs the matching bootstrap
+policy for the exact verified recipient and the daily EventBridge rule. The
+rule invokes the dev Lambda alias at 15:00 UTC. The worker calculates the due
+date using the Mexico City calendar and remains independent of Stripe's
+account-wide reminder settings. The `dry-run` mode preserves pending notices.
+
+To check delivery, use a disposable test subscription, verify the calendar
+gates at eight and seven days before renewal, and confirm the message ID and
+mailbox receipt. Direct Lambda clock overrides require a single exact notice
+ID and are accepted only in dev. Treat an `unknown` SES attempt as potentially
+accepted and reconcile it before sending again.
+
 On 2026-09-25 the domain `despensalista.lynxpardelle.com` and RSA-2048 Easy DKIM
 were verified `SUCCESS`. Future intended SES sender:
 `DespensaLista <no-reply@despensalista.lynxpardelle.com>`.

@@ -29,6 +29,7 @@ function synthesizeTemplate(
     cognitoDomain: 'https://auth.example',
     cognitoUserPoolClientId: 'client-id',
     cognitoUserPoolId: 'us-east-1_example',
+    ...(extraContext.renewalNoticeMode === 'ses' && { env: { region: 'us-east-1' } }),
   });
 
   return Template.fromStack(stack);
@@ -71,6 +72,41 @@ test('feedback provisions isolated expiring inboxes and protects production cont
     });
     template.hasOutput('FeedbackTableName', { Value: { Ref: tableId } });
   }
+});
+
+test('renewal notices deploy only in dev with one scoped SES destination', () => {
+  const noNotices = JSON.stringify(productionTemplate.toJSON());
+  assert.doesNotMatch(noNotices, /RENEWAL_NOTICE_TABLE|PlusRenewalNoticeRule|ses:SendEmail/);
+  for (const stage of ['tst', 'prod'] as const) {
+    assert.throws(() => synthesizeTemplate(stage, { renewalNoticeMode: 'dry-run' }), /only run in dev/);
+  }
+  const dev = synthesizeTemplate('dev', {
+    enableStripeBilling: 'true',
+    serverlessFrontendBaseUrl: 'https://dev.despensalista.lynxpardelle.com',
+    appDomainName: 'dev.despensalista.lynxpardelle.com',
+    renewalNoticeMode: 'ses',
+    renewalNoticeTestTo: 'mailbox@example.com',
+  });
+  dev.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'despensalista-dev-renewal-notices',
+    BillingMode: 'PAY_PER_REQUEST',
+    TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
+    GlobalSecondaryIndexes: [Match.objectLike({ IndexName: 'RenewalNoticeDueIndex' })],
+  });
+  dev.hasResourceProperties('AWS::Events::Rule', {
+    Name: 'despensalista-dev-plus-renewal-notices',
+    ScheduleExpression: 'cron(0 15 * * ? *)',
+  });
+  dev.hasResourceProperties('AWS::IAM::Policy', {
+    PolicyDocument: { Statement: Match.arrayWith([Match.objectLike({
+      Action: 'ses:SendEmail',
+      Condition: {
+        StringEquals: { 'ses:FromAddress': 'no-reply@despensalista.lynxpardelle.com' },
+        'ForAllValues:StringEquals': { 'ses:Recipients': ['mailbox@example.com'] },
+        Null: { 'ses:Recipients': 'false' },
+      },
+    })]) },
+  });
 });
 
 test('public production domain preserves the legacy site and stamps the trusted viewer host', () => {

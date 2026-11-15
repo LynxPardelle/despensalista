@@ -132,6 +132,8 @@ jobs:
     env:
       STRIPE_BILLING_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING || 'false' }}
       STRIPE_BILLING_CHECKOUT_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING_CHECKOUT || vars.ENABLE_STRIPE_BILLING || 'false' }}
+      PLUS_RENEWAL_NOTICE_MODE: ${{ vars.PLUS_RENEWAL_NOTICE_MODE || 'off' }}
+      PLUS_RENEWAL_NOTICE_TEST_TO: ${{ secrets.PLUS_RENEWAL_NOTICE_TEST_TO }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -178,6 +180,16 @@ jobs:
             false) ;;
             *) echo "ENABLE_STRIPE_BILLING_CHECKOUT must be true or false" >&2; exit 1 ;;
           esac
+          case "$PLUS_RENEWAL_NOTICE_MODE" in
+            off) ;;
+            dry-run) test "$STRIPE_BILLING_ENABLED" = true ;;
+            ses)
+              test "$STRIPE_BILLING_ENABLED" = true
+              test "$AWS_REGION" = us-east-1
+              test -n "$PLUS_RENEWAL_NOTICE_TEST_TO"
+              ;;
+            *) echo "PLUS_RENEWAL_NOTICE_MODE must be off, dry-run or ses" >&2; exit 1 ;;
+          esac
 
       - uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
         with:
@@ -221,6 +233,8 @@ jobs:
             --context enableGoogleMfa=true \
             --context enableStripeBilling="$STRIPE_BILLING_ENABLED" \
             --context enableStripeBillingCheckout="$STRIPE_BILLING_CHECKOUT_ENABLED" \
+            --context renewalNoticeMode="$PLUS_RENEWAL_NOTICE_MODE" \
+            --context renewalNoticeTestTo="$PLUS_RENEWAL_NOTICE_TEST_TO" \
             --context externallyManagedSocialProviders=Google
 
       - name: Activate exact published release

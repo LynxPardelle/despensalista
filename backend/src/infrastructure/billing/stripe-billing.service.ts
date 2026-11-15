@@ -6,8 +6,10 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type Stripe from 'stripe';
 import { HOUSEHOLD_REPOSITORY } from '../../application/tokens';
 import { ResolveHouseholdPantryAccessUseCase } from '../../application/use-cases/household.use-cases';
@@ -18,6 +20,9 @@ import {
 } from './stripe-billing-config';
 import { StripeBillingStore, type BillingRecord } from './stripe-billing.store';
 import { paidPlusThrough } from './stripe-household-plan';
+import { renewalNoticeConfig } from './renewals/renewal-notice.config';
+import { buildRenewalNoticeEnqueue } from './renewals/renewal-notice.store';
+import type { RenewalNoticeCandidate } from './renewals/renewal-notice.types';
 
 const householdMetadata = 'despensalistaHouseholdId';
 const checkoutMetadata = 'despensalistaCheckoutToken';
@@ -39,6 +44,7 @@ export class StripeBillingService {
     @Inject(HOUSEHOLD_REPOSITORY)
     private readonly households: HouseholdRepository,
     private readonly access: ResolveHouseholdPantryAccessUseCase,
+    @Optional() private readonly noticeConfig?: ConfigService,
   ) {}
 
   async status(userId: string) {
@@ -307,6 +313,7 @@ export class StripeBillingService {
     ) {
       return;
     }
+    const renewalTable = this.getRenewalTable(settings);
     for (let retry = 0; retry < maxConcurrentRetries; retry++) {
       const record = await this.store.read(settings.table, householdId);
       if (!record || record.closed || record.customerId !== customer.id) {
@@ -326,6 +333,10 @@ export class StripeBillingService {
         subscription,
         event.type,
       );
+      const paidUntil = paidThrough(settings, subscription, customer.id);
+      const renewal = renewalTable
+        ? renewalCandidate(record, subscription, paidUntil)
+        : undefined;
       const saved = await this.store.applyEvent(
         {
           ...record,
@@ -338,7 +349,7 @@ export class StripeBillingService {
               ? 'pending'
               : subscriptionStatus(subscription),
           subscriptionId: subscription?.id,
-          paidThrough: paidThrough(settings, subscription, customer.id),
+          paidThrough: paidUntil,
           cancelAtPeriodEnd:
             subscription?.cancel_at_period_end === true ||
             (subscription?.cancel_at != null &&
@@ -347,6 +358,9 @@ export class StripeBillingService {
         },
         settings.table,
         event.id,
+        renewalTable && renewal
+          ? buildRenewalNoticeEnqueue(renewalTable, renewal)
+          : undefined,
       );
       if (saved) {
         return;
@@ -355,6 +369,33 @@ export class StripeBillingService {
     throw new ServiceUnavailableException(
       'Billing reconciliation is busy, please retry',
     );
+  }
+
+  async getUpcomingRenewal(
+    householdId: string,
+  ): Promise<RenewalNoticeCandidate | undefined> {
+    if (!this.noticeConfig || !renewalNoticeConfig(this.noticeConfig)) {
+      return undefined;
+    }
+    const settings = await this.config.get();
+    if (settings?.stage !== 'dev' || settings.mode !== 'test') return undefined;
+
+    const record = await this.store.read(settings.table, householdId);
+    if (!record?.customerId || record.closed) return undefined;
+    const subscription = await this.currentSubscription(settings, record);
+    return renewalCandidate(
+      record,
+      subscription,
+      paidThrough(settings, subscription, record.customerId),
+    );
+  }
+
+  private getRenewalTable(settings: StripeBillingSettings): string | undefined {
+    return settings.stage === 'dev' &&
+      settings.mode === 'test' &&
+      this.noticeConfig
+      ? renewalNoticeConfig(this.noticeConfig)?.table
+      : undefined;
   }
 
   private async settingsForOrigin(
@@ -674,6 +715,50 @@ function paidThrough(
   return line && Number.isSafeInteger(item.current_period_end)
     ? item.current_period_end
     : undefined;
+}
+
+function renewalCandidate(
+  record: BillingRecord,
+  subscription: Stripe.Subscription | undefined,
+  paidUntil: number | undefined,
+): RenewalNoticeCandidate | undefined {
+  if (
+    !subscription ||
+    paidUntil === undefined ||
+    paidUntil <= epochSeconds() ||
+    stripeId(subscription.customer) !== record.customerId ||
+    subscription.collection_method !== 'charge_automatically' ||
+    subscription.cancel_at_period_end ||
+    subscription.cancel_at != null ||
+    subscription.pause_collection != null ||
+    subscription.pending_update != null ||
+    subscription.schedule != null ||
+    subscription.billing_thresholds != null
+  ) {
+    return undefined;
+  }
+  const item = subscription.items.data[0];
+  const price = item.price;
+  const amountMinor = price.unit_amount;
+  if (
+    item.billing_thresholds != null ||
+    price.currency !== 'mxn' ||
+    price.recurring?.interval !== 'month' ||
+    price.recurring.interval_count !== 1 ||
+    price.recurring.usage_type !== 'licensed' ||
+    amountMinor === null ||
+    !Number.isSafeInteger(amountMinor) ||
+    amountMinor <= 0
+  ) {
+    return undefined;
+  }
+  return {
+    householdId: record.householdId,
+    subscriptionId: subscription.id,
+    renewalAt: paidUntil,
+    amountMinor,
+    currency: 'mxn',
+  };
 }
 
 function billingSignal(event: Stripe.Event) {

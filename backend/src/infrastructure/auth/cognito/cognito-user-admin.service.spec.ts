@@ -1,5 +1,6 @@
 import {
   AdminDeleteUserCommand,
+  AdminGetUserCommand,
   AdminUserGlobalSignOutCommand,
   CognitoIdentityProviderClient,
   ListUsersCommand,
@@ -21,6 +22,44 @@ function createService(): CognitoUserAdminService {
 
 describe('CognitoUserAdminService account administration', () => {
   afterEach(() => jest.restoreAllMocks());
+
+  it('returns only the currently verified email of the same enabled Cognito user', async () => {
+    const user = {
+      Enabled: true,
+      UserStatus: 'EXTERNAL_PROVIDER',
+      UserAttributes: [
+        { Name: 'sub', Value: 'subject-1' },
+        { Name: 'email', Value: 'Owner@example.com' },
+        { Name: 'email_verified', Value: 'true' },
+      ],
+    };
+    const send = jest
+      .spyOn(CognitoIdentityProviderClient.prototype, 'send')
+      .mockResolvedValue(user as never);
+    const service = createService();
+
+    await expect(
+      service.getVerifiedEmailBySubjectId('subject-1', 'Google_owner'),
+    ).resolves.toBe('owner@example.com');
+    const command = send.mock.calls[0]?.[0] as AdminGetUserCommand;
+    expect(command).toBeInstanceOf(AdminGetUserCommand);
+    expect(command.input).toEqual({
+      UserPoolId: 'pool',
+      Username: 'Google_owner',
+    });
+    await expect(
+      service.getVerifiedEmailBySubjectId('different-subject', 'Google_owner'),
+    ).resolves.toBeUndefined();
+    user.UserAttributes[2].Value = 'false';
+    await expect(
+      service.getVerifiedEmailBySubjectId('subject-1', 'Google_owner'),
+    ).resolves.toBeUndefined();
+    user.UserAttributes[2].Value = 'true';
+    user.Enabled = false;
+    await expect(
+      service.getVerifiedEmailBySubjectId('subject-1', 'Google_owner'),
+    ).resolves.toBeUndefined();
+  });
 
   it('resolves each deduplicated subject to its Cognito username before deletion', async () => {
     const send = jest
