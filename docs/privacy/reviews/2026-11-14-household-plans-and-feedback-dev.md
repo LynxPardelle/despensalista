@@ -1,6 +1,6 @@
-# Revisión de privacidad de Gratis, Plus Hogar y reportes en dev
+# Revisión de privacidad de Gratis, Plus Hogar y reportes
 
-El alcance de esta entrega es el entorno dev. La prueba de Checkout usa el sandbox de Stripe de DespensaLista y cuentas de prueba desechables. Las ventas de producción permanecen cerradas.
+La promoción utiliza el mismo artefacto en dev, tst y producción. La prueba de Checkout usa el sandbox exclusivo de DespensaLista en dev y una cuenta desechable. En tst se verifican los cupos y el formulario sin conexión a Stripe. En producción se conserva la facturación existente y Checkout permanece cerrado.
 
 ## Planes y resumen
 
@@ -10,6 +10,6 @@ El alcance de esta entrega es el entorno dev. La prueba de Checkout usa el sandb
 
 ## Reportes de bugs, quejas y sugerencias
 
-- El formulario de dev requiere iniciar sesión y protege la escritura contra solicitudes de otro origen. Pide categoría y texto breve. Indica que se eviten contraseñas, datos bancarios y datos personales. Guarda folio y fecha, sin correo, IP, identificadores de dispositivo ni archivos adjuntos. Usa una partición seudónima por cuenta para límites y borrado.
+- El formulario requiere iniciar sesión y protege la escritura contra solicitudes de otro origen. Pide categoría y texto breve. Indica que se eviten contraseñas, datos bancarios y datos personales. Guarda folio y fecha, sin correo, IP, identificadores de dispositivo ni archivos adjuntos. Usa una partición seudónima por cuenta para límites y borrado.
 - El límite es de cinco reportes por cuenta y día UTC. El contador vence en 48 horas y los reportes en 90 días a través de TTL de DynamoDB. DynamoDB elimina registros vencidos de forma asíncrona. La consulta de operación excluye los vencidos y muestra únicamente folio, fecha, categoría y texto.
-- El borrado de cuenta elimina los reportes y contadores de esa cuenta en el flujo de borrado existente. Un fallo conserva el trabajo pendiente para que operación pueda reanudarlo en dev. Solamente personal con permisos de AWS accede a la bandeja. [Consulta de la bandeja de reportes](../../operations/dev-feedback-inbox.md)
+- Cada entorno tiene una bandeja y permisos de escritura propios. Solamente personal con permisos de AWS accede a la bandeja del entorno correspondiente. El borrado de cuenta elimina reportes y contadores. El flujo durable de producción reintenta un fallo de almacenamiento. [Consulta de la bandeja de reportes](../../operations/dev-feedback-inbox.md)

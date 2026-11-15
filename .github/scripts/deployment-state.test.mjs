@@ -518,18 +518,18 @@ test('smoke-pending hard death rolls back instead of adopting the reconciled rel
   assert.equal(JSON.parse(marker).active, false);
 });
 
-test('smoke-pending recovery refuses a pre-contract rollback before mutating AWS', async () => {
+test('smoke-pending recovery refuses a version 1 rollback after version 2 opened writers', async () => {
   const { recoverProductionDrain } = await load();
   const calls = [];
   const marker = JSON.stringify(drainMarker({
     phase: 'smoke_pending', verifiedVersion: '13', reservedConcurrency: 7,
-    backendDataContractVersion: 0,
+    backendDataContractVersion: 1,
   }));
   const aws = args => {
     calls.push(args);
     if (args.includes('get-parameter')) return { Parameter: { Value: marker } };
     if (args[0] === 'cloudformation') {
-      return backendStack('13', 'a'.repeat(12), 1);
+      return backendStack('13', 'a'.repeat(12), 2);
     }
     if (args.includes('get-function-concurrency')) {
       return { ReservedConcurrentExecutions: 7 };
@@ -555,7 +555,7 @@ test('reopening recovery permits a cross-contract rollback only while writers re
   let reservedConcurrency = 0;
   let marker = JSON.stringify(drainMarker({
     phase: 'reopening', verifiedVersion: '13', reservedConcurrency: 7,
-    backendDataContractVersion: 0,
+    backendDataContractVersion: 1,
   }));
   const aws = args => {
     calls.push(args);
@@ -565,7 +565,7 @@ test('reopening recovery permits a cross-contract rollback only while writers re
       return {};
     }
     if (args[0] === 'cloudformation') {
-      return backendStack('13', 'a'.repeat(12), 1);
+      return backendStack('13', 'a'.repeat(12), 2);
     }
     if (args.includes('get-function-concurrency')) {
       return { ReservedConcurrentExecutions: reservedConcurrency };
@@ -1114,9 +1114,9 @@ test('manual rollback uses the recorded stage version when a newer version has t
   assert.equal(aliasUpdate[aliasUpdate.indexOf('--function-version') + 1], '12');
 });
 
-test('manual rollback rejects a pre-contract release before mutating AWS', async () => {
+test('manual rollback from contract version 2 rejects version 1 before mutating AWS', async () => {
   const { recordPublishedRelease, restoreRelease } = await load();
-  const artifact = await releaseArtifact();
+  const artifact = await releaseArtifact({ backendDataContractVersion: 1 });
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-receipt-'));
   const deploymentSha = 'b'.repeat(40);
   const codeSha256 = createHash('sha256').update('zip-bytes').digest('base64');
@@ -1124,7 +1124,7 @@ test('manual rollback rejects a pre-contract release before mutating AWS', async
 
   await recordPublishedRelease({
     stage: 'prod', artifact, directory, deploymentSha,
-    aws: deploymentAws({ aliasVersion: '12', stackVersion: '12', codeSha256 }),
+    aws: deploymentAws({ aliasVersion: '12', stackVersion: '12', codeSha256, backendDataContractVersion: 1 }),
     env,
   });
 
@@ -1136,7 +1136,7 @@ test('manual rollback rejects a pre-contract release before mutating AWS', async
       deploymentSha,
       aws: deploymentAws({
         aliasVersion: '12', stackVersion: '12', codeSha256, calls,
-        backendDataContractVersion: 1,
+        backendDataContractVersion: 2,
       }),
       env,
     }),
@@ -1177,7 +1177,7 @@ test('manual production rollback preserves cancellation after billing is deploye
 
 test('manual rollback accepts only a receipt and artifact on the current data contract', async () => {
   const { recordPublishedRelease, restoreRelease } = await load();
-  const artifact = await releaseArtifact({ backendDataContractVersion: 1 });
+  const artifact = await releaseArtifact({ backendDataContractVersion: 2 });
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-receipt-'));
   const deploymentSha = 'b'.repeat(40);
   const codeSha256 = createHash('sha256').update('zip-bytes').digest('base64');
@@ -1185,7 +1185,7 @@ test('manual rollback accepts only a receipt and artifact on the current data co
   const env = { AWS_REGION: 'us-east-1' };
   const aws = deploymentAws({
     aliasVersion: '12', stackVersion: '12', codeSha256, calls,
-    backendDataContractVersion: 1,
+    backendDataContractVersion: 2,
   });
 
   await recordPublishedRelease({
@@ -1193,7 +1193,7 @@ test('manual rollback accepts only a receipt and artifact on the current data co
   });
   const receiptPath = path.join(directory, 'deployment-receipt.json');
   const receipt = JSON.parse(await readFile(receiptPath, 'utf8'));
-  assert.equal(receipt.backendDataContractVersion, 1);
+  assert.equal(receipt.backendDataContractVersion, 2);
 
   await restoreRelease({
     stage: 'prod', artifact, receipt: receiptPath, deploymentSha, aws, env,
@@ -1203,7 +1203,7 @@ test('manual rollback accepts only a receipt and artifact on the current data co
 
   await writeFile(receiptPath, JSON.stringify({
     ...receipt,
-    backendDataContractVersion: 0,
+    backendDataContractVersion: 1,
   }));
   const callsBeforeMismatch = calls.length;
   await assert.rejects(

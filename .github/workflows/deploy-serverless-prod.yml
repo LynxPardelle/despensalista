@@ -214,6 +214,7 @@ jobs:
           set -euo pipefail
           live_version="$(jq -r '.version // empty' .rollback/state.json)"
           published_version="$(jq -r '.deploymentVersion // empty' .rollback/state.json)"
+          live_data_contract_version="$(jq -er '.backendDataContractVersion // 0' .rollback/state.json)"
           function_name="$(jq -r '.functionName // empty' .rollback/state.json)"
           if test -z "$function_name"; then
             echo "armed=false" >> "$GITHUB_OUTPUT"
@@ -223,8 +224,11 @@ jobs:
             --stack-name despensalista-prod-serverless-backend \
             --query "Stacks[0].Outputs[?OutputKey=='PantryQuotaSchemaVersion'].OutputValue | [0]" \
             --output text)"
-          if test "$quota_schema_version" = "2" && \
-            test "$live_version" = "$published_version"; then
+          # Every versioned data contract already uses pantry quota schema 2.
+          # A compatible rollback can leave the live alias behind the stack version.
+          if test "$quota_schema_version" = "2" &&
+            { test "$live_version" = "$published_version" ||
+              test "$live_data_contract_version" -ge 1; }; then
             exit 0
           fi
           users_table="$(aws cloudformation describe-stacks \
@@ -324,7 +328,11 @@ jobs:
           APP_DOMAIN_NAME: ${{ vars.APP_DOMAIN_NAME || 'despensalista.lynxpardelle.com' }}
         run: |
           set -euo pipefail
-          node .github/scripts/smoke.mjs --base-url "https://$APP_DOMAIN_NAME" --attempts 18 --delay-ms 10000
+          feedback_table="$(aws lambda get-function-configuration \
+            --function-name despensalista-prod-backend-api --qualifier live \
+            --query 'Environment.Variables.FEEDBACK_TABLE' --output text)"
+          test "$feedback_table" = despensalista-prod-feedback
+          node .github/scripts/smoke.mjs --base-url "https://$APP_DOMAIN_NAME" --attempts 18 --delay-ms 10000 --verify-feedback true
           if [[ "$STRIPE_BILLING_ENABLED" == true ]]; then
             # An unsigned delivery must be rejected after loading the protected settings.
             status="$(curl --silent --show-error --max-time 15 \
