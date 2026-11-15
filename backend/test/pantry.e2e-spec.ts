@@ -184,4 +184,30 @@ describe('Pantry production contracts (HTTP + Mongo transactions)', () => {
       0,
     );
   }, 30_000);
+
+  it('persists a partial preferences patch without resetting omitted values', async () => {
+    const patchPreferences = () =>
+      request(app.getHttpServer())
+        .patch('/api/profile/preferences')
+        .set('Cookie', 'XSRF-TOKEN=pantry-test')
+        .set('X-XSRF-TOKEN', 'pantry-test');
+    const initial = {
+      expirationWarningDays: 13,
+      showExpiredEntryAlert: false,
+      depletionWarningThresholdRatio: 1.6,
+      shoppingPlanLeadDays: 6,
+      showGuidanceTips: false,
+    };
+    await patchPreferences().send(initial).expect(200).expect(initial);
+
+    const updated = { ...initial, expirationWarningDays: 11 };
+    await patchPreferences()
+      .send({ expirationWarningDays: 11 })
+      .expect(200)
+      .expect(updated);
+    const profile = await request(app.getHttpServer())
+      .get('/api/profile')
+      .expect(200);
+    expect(profile.body).toMatchObject({ preferences: updated });
+  });
 });

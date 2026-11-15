@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component } from '@angular/core';
 import { RouterLink } from '@angular/router';
+import { plusHogarTermsVersion } from '../../core/services/billing.service';
 
 @Component({
   selector: 'app-plus-hogar-terms-page',
@@ -10,6 +11,7 @@ import { RouterLink } from '@angular/router';
     <main class="legal-page" aria-labelledby="plus-terms-title">
       <article>
         <h1 id="plus-terms-title">Condiciones de Plus Hogar</h1>
+        <p>Versión {{ termsVersion }}</p>
 
         <h2>Precio y renovación</h2>
         <p>
@@ -74,4 +76,6 @@ import { RouterLink } from '@angular/router';
     }
   `,
 })
-export class PlusHogarTermsPageComponent {}
+export class PlusHogarTermsPageComponent {
+  protected readonly termsVersion = plusHogarTermsVersion;
+}

@@ -33,5 +33,6 @@ export interface RenewalNoticeMessage {
 }
 
 export interface RenewalNoticeTransport {
+  assertProductionAccess(): Promise<void>;
   send(message: RenewalNoticeMessage): Promise<{ messageId: string }>;
 }

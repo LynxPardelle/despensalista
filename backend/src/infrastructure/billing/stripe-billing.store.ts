@@ -22,6 +22,12 @@ export interface CheckoutAttempt {
   token: string;
   expiresAt: number;
   stripeSessionId?: string;
+  termsVersion?: string;
+}
+
+export interface CheckoutConsent {
+  termsVersion: string;
+  acceptedAt: string;
 }
 
 export interface BillingRecord {
@@ -33,6 +39,7 @@ export interface BillingRecord {
   status?: Stripe.Subscription.Status | 'pending';
   subscriptionId?: string;
   paidThrough?: number;
+  renewalAt?: number;
   cancelAtPeriodEnd?: boolean;
   closed?: boolean;
 }
@@ -57,7 +64,22 @@ export class StripeBillingStore {
     return row.Item as BillingRecord | undefined;
   }
 
-  async save(next: BillingRecord, table: string): Promise<boolean> {
+  async save(
+    next: BillingRecord,
+    table: string,
+    consent?: CheckoutConsent,
+  ): Promise<boolean> {
+    const attempt = next.checkout;
+    if (
+      consent &&
+      (!next.customerId ||
+        !attempt ||
+        attempt.termsVersion !== consent.termsVersion)
+    ) {
+      throw new ServiceUnavailableException(
+        'Checkout consent requires its reserved attempt',
+      );
+    }
     try {
       if (next.customerId) {
         await this.db.send(
@@ -76,6 +98,20 @@ export class StripeBillingStore {
                   ExpressionAttributeValues: { ':household': next.householdId },
                 },
               },
+              ...(consent && attempt
+                ? [
+                    {
+                      Put: {
+                        TableName: table,
+                        Item: {
+                          pk: `checkout-consent:${attempt.token}`,
+                          ...consent,
+                        },
+                        ConditionExpression: 'attribute_not_exists(pk)',
+                      },
+                    },
+                  ]
+                : []),
             ],
           }),
         );

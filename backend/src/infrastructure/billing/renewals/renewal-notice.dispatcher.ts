@@ -1,6 +1,7 @@
 import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  isRenewalRecipient,
   renewalNoticeConfig,
   sesSuccessSimulator,
   type RenewalNoticeSettings,
@@ -59,6 +60,8 @@ export class RenewalNoticeDispatcher {
     const today = now ?? new Date();
     if (
       !Number.isFinite(today.getTime()) ||
+      (settings.stage === 'prod' &&
+        (now !== undefined || onlyNoticeId !== undefined)) ||
       (onlyNoticeId !== undefined && !noticeIdPattern.test(onlyNoticeId))
     ) {
       throw new BadRequestException('Invalid renewal notice target');
@@ -79,6 +82,10 @@ export class RenewalNoticeDispatcher {
       settings.table,
       mexicoDay(today),
     );
+    if (settings.stage === 'prod' && settings.mode === 'ses' && jobs.length) {
+      // Keep the queue intact if the account is sandboxed or sending has paused.
+      await this.transport.assertProductionAccess();
+    }
     const concurrency = settings.mode === 'dry-run' ? dryRunConcurrency : 1;
     let processed = 0;
     while (processed < jobs.length && performance.now() < admissionDeadline) {
@@ -92,6 +99,17 @@ export class RenewalNoticeDispatcher {
       // The sandbox can accept one message per second. Leave further rows
       // queued for another poll after a possible delivery.
       if (settings.mode === 'ses' && (counts.accepted || counts.unknown)) break;
+    }
+    if (
+      settings.stage === 'prod' &&
+      settings.mode === 'ses' &&
+      (counts.late || counts.blocked || counts.unknown)
+    ) {
+      // The existing Lambda Errors alarm reports terminal cases. All writes
+      // already committed, so a retry cannot redeliver an uncertain message.
+      throw new Error(
+        `Renewal notices need attention (late=${counts.late}, blocked=${counts.blocked}, unknown=${counts.unknown})`,
+      );
     }
     return {
       enabled: true,
@@ -134,7 +152,7 @@ export class RenewalNoticeDispatcher {
     if (job.nextDay > currentDay) return 'early';
     const initialWindow = noticeWindow(job, calendarNow());
     if (initialWindow === 'early') return 'early';
-    if (initialWindow === 'late')
+    if (initialWindow === 'late' && settings.stage === 'dev')
       return finish('late', 'notice_window_elapsed');
 
     let resolution: RenewalRecipientResolution;
@@ -159,15 +177,28 @@ export class RenewalNoticeDispatcher {
     if (noticeWindow(job, calendarNow()) === 'late') {
       return finish('late', 'notice_window_elapsed');
     }
+    const verifiedAddress = resolution.recipient.trim().toLowerCase();
+    if (
+      settings.stage === 'prod' &&
+      (!isRenewalRecipient(verifiedAddress) ||
+        verifiedAddress.endsWith('@simulator.amazonses.com'))
+    ) {
+      return finish('blocked', 'invalid_production_recipient');
+    }
     if (settings.mode === 'dry-run') return 'wouldSend';
 
     if (
+      settings.stage === 'dev' &&
       settings.testRecipient !== sesSuccessSimulator &&
-      settings.testRecipient !== resolution.recipient.trim().toLowerCase()
+      settings.testRecipient !== verifiedAddress
     ) {
       return finish('blocked', 'recipient_outside_dev_allowlist');
     }
-    const message = renewalNoticeMessage(job, settings.testRecipient);
+    const message = renewalNoticeMessage(
+      job,
+      settings.stage === 'prod' ? verifiedAddress : settings.testRecipient,
+      settings.stage,
+    );
     const claimed = await this.store.claim(settings.table, job, wallSeconds());
     if (!claimed) return 'busy';
 

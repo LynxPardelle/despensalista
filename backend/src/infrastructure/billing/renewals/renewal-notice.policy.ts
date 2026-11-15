@@ -47,6 +47,7 @@ export function renewalNoticeKey(candidate: RenewalNoticeCandidate): string {
 export function renewalNoticeMessage(
   candidate: RenewalNoticeCandidate,
   recipient: string,
+  stage: 'dev' | 'prod' = 'dev',
 ): RenewalNoticeMessage {
   const date = mexicoDateLabel.format(new Date(candidate.renewalAt * 1000));
   const amount = new Intl.NumberFormat('es-MX', {
@@ -57,13 +58,22 @@ export function renewalNoticeMessage(
   return {
     recipient,
     noticeId: renewalNoticeKey(candidate),
-    subject: '[Prueba de DespensaLista] Aviso de renovación de Plus Hogar',
+    subject:
+      stage === 'prod'
+        ? 'Aviso de renovación de Plus Hogar'
+        : '[Prueba de DespensaLista] Aviso de renovación de Plus Hogar',
     text: [
       `La próxima renovación de tu plan Plus Hogar está programada para el ${date} (hora de Ciudad de México).`,
       `El precio mensual de tu plan es ${amount}.`,
       'Puedes revisar tu suscripción y cancelar la renovación sin penalización desde Perfil.',
-      'https://dev.despensalista.lynxpardelle.com/profile',
-      'Este mensaje es una prueba de DespensaLista. No se realizará un cobro real.',
+      stage === 'prod'
+        ? 'https://despensalista.com/profile'
+        : 'https://dev.despensalista.lynxpardelle.com/profile',
+      ...(stage === 'dev'
+        ? [
+            'Este mensaje es una prueba de DespensaLista. No se realizará un cobro real.',
+          ]
+        : []),
     ].join('\n\n'),
   };
 }

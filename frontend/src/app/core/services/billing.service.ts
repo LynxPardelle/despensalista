@@ -5,6 +5,7 @@ import { map } from 'rxjs/operators';
 import { environment } from '../../../environments/environment';
 
 export type BillingAction = 'checkout' | 'portal';
+export const plusHogarTermsVersion = '2026-11-15';
 
 export type SubscriptionStatus =
   | 'none'
@@ -36,6 +37,8 @@ export interface AvailableBillingStatus {
   status: SubscriptionStatus;
   cancelAtPeriodEnd?: boolean;
   currentPeriodEnd?: string;
+  nextRenewalAt?: string;
+  termsVersion?: string;
 }
 
 type BillingStatus = { available: false } | AvailableBillingStatus;
@@ -52,9 +55,9 @@ export class BillingService {
     });
   }
 
-  createSession(action: BillingAction, acceptRecurringTerms = false): Observable<string> {
-    const body = action === 'checkout' && acceptRecurringTerms
-      ? { acceptRecurringTerms: true }
+  createSession(action: BillingAction, termsVersion?: string): Observable<string> {
+    const body = action === 'checkout' && termsVersion
+      ? { acceptRecurringTerms: true, termsVersion }
       : {};
     return this.http
       .post<{ url: string }>(`${this.billingUrl}/${action}`, body, { withCredentials: true })

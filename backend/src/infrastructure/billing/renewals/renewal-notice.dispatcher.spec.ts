@@ -46,9 +46,12 @@ describe('renewal notice dispatching', () => {
     reschedule: jest.fn(),
   };
   const recipient: jest.Mocked<RenewalNoticeRecipient> = { resolve: jest.fn() };
-  const transport: jest.Mocked<RenewalNoticeTransport> = { send: jest.fn() };
+  const transport: jest.Mocked<RenewalNoticeTransport> = {
+    send: jest.fn(),
+    assertProductionAccess: jest.fn(),
+  };
 
-  function dispatcher(overrides: Record<string, string> = {}) {
+  function dispatcher(overrides: Record<string, string | undefined> = {}) {
     return new RenewalNoticeDispatcher(
       new ConfigService({
         STRIPE_BILLING_MODE: 'test',
@@ -63,6 +66,16 @@ describe('renewal notice dispatching', () => {
     );
   }
 
+  function production(mode: 'dry-run' | 'ses' = 'ses') {
+    return dispatcher({
+      STRIPE_BILLING_MODE: 'live',
+      RENEWAL_NOTICE_STAGE: 'prod',
+      RENEWAL_NOTICE_TABLE: 'despensalista-prod-renewal-notices',
+      RENEWAL_NOTICE_MODE: mode,
+      RENEWAL_NOTICE_SES_TEST_TO: undefined,
+    });
+  }
+
   beforeEach(() => {
     jest.resetAllMocks();
     store.due.mockResolvedValue({ jobs: [queued], hasMoreDue: false });
@@ -75,6 +88,99 @@ describe('renewal notice dispatching', () => {
       recipient: recipientAddress,
     });
     transport.send.mockResolvedValue({ messageId: 'provider-id' });
+    transport.assertProductionAccess.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => jest.useRealTimers());
+
+  it('checks production access before claiming and sends to the verified customer', async () => {
+    jest.useFakeTimers().setSystemTime(dueAt);
+
+    await expect(production().dispatch()).resolves.toMatchObject({
+      accepted: 1,
+    });
+
+    expect(transport.assertProductionAccess).toHaveBeenCalledTimes(1);
+    expect(
+      transport.assertProductionAccess.mock.invocationCallOrder[0],
+    ).toBeLessThan(store.claim.mock.invocationCallOrder[0]);
+    expect(transport.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recipient: recipientAddress,
+        subject: 'Aviso de renovación de Plus Hogar',
+        text: expect.stringContaining('https://despensalista.com/profile'),
+      }),
+    );
+    expect(transport.send.mock.calls[0][0].text).not.toMatch(
+      /No se realizará un cobro real|https:\/\/dev\./,
+    );
+  });
+
+  it('does not claim or send production jobs while SES is unavailable', async () => {
+    jest.useFakeTimers().setSystemTime(dueAt);
+    transport.assertProductionAccess.mockRejectedValueOnce(
+      new Error('SES unavailable'),
+    );
+
+    await expect(production().dispatch()).rejects.toThrow('SES unavailable');
+
+    expect(store.claim).not.toHaveBeenCalled();
+    expect(store.finish).not.toHaveBeenCalled();
+    expect(transport.send).not.toHaveBeenCalled();
+  });
+
+  it('keeps production dry-run write-free and rejects synthetic production inputs', async () => {
+    jest.useFakeTimers().setSystemTime(dueAt);
+
+    await expect(production('dry-run').dispatch()).resolves.toMatchObject({
+      wouldSend: 1,
+    });
+    await expect(production().dispatch(dueAt, queued.pk)).rejects.toMatchObject(
+      { status: 400 },
+    );
+
+    expect(store.claim).not.toHaveBeenCalled();
+    expect(store.finish).not.toHaveBeenCalled();
+    expect(transport.assertProductionAccess).not.toHaveBeenCalled();
+    expect(transport.send).not.toHaveBeenCalled();
+  });
+
+  it('alarms production using counts after storing an ambiguous attempt', async () => {
+    jest.useFakeTimers().setSystemTime(dueAt);
+    transport.send.mockRejectedValueOnce(
+      new Error('provider response for qa@example.test'),
+    );
+
+    await expect(production().dispatch()).rejects.toThrow(
+      'late=0, blocked=0, unknown=1',
+    );
+
+    expect(store.finish).toHaveBeenCalledWith(
+      'despensalista-prod-renewal-notices',
+      claimed,
+      {
+        state: 'unknown',
+        reason: 'provider_outcome_unknown',
+      },
+      expect.any(Number),
+    );
+    expect(transport.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('alerts for a late renewing customer and skips an expired canceled renewal', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-12-27T08:00:00Z'));
+    await expect(production().dispatch()).rejects.toThrow(
+      'late=1, blocked=0, unknown=0',
+    );
+    recipient.resolve.mockResolvedValueOnce({
+      status: 'skip',
+      reason: 'nonrenewing',
+    });
+    await expect(production().dispatch()).resolves.toMatchObject({
+      skipped: 1,
+    });
+    expect(store.claim).not.toHaveBeenCalled();
+    expect(transport.send).not.toHaveBeenCalled();
   });
 
   it('disables even a valid notice table when Stripe is live', async () => {

@@ -34,12 +34,16 @@ export class StripeBillingController {
   checkout(
     @CurrentUser() user: AuthenticatedUser,
     @Headers('origin') origin: string | undefined,
-    @Body() body: { acceptRecurringTerms?: boolean } | undefined,
+    @Body()
+    body:
+      | { acceptRecurringTerms?: boolean; termsVersion?: unknown }
+      | undefined,
   ) {
     return this.billing.checkout(
       user.userId,
       origin,
       body?.acceptRecurringTerms === true,
+      body?.termsVersion,
     );
   }
 

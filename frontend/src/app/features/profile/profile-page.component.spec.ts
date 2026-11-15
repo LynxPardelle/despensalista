@@ -416,7 +416,7 @@ describe('ProfilePageComponent', () => {
 
   it('requires consent to the recurring live charge before opening Stripe Checkout', () => {
     spyOnProperty(fixture.componentInstance as unknown as { canOpenLiveBillingHere: boolean }, 'canOpenLiveBillingHere').and.returnValue(true);
-    http.expectOne('/api/billing/status').flush({ ...subscription, mode: 'live', hasPlus: false });
+    http.expectOne('/api/billing/status').flush({ ...subscription, mode: 'live', hasPlus: false, termsVersion: '2026-11-15' });
     fixture.detectChanges();
 
     const panel = (fixture.nativeElement as HTMLElement).querySelector('section[aria-labelledby="subscription-title"]')!;
@@ -436,8 +436,34 @@ describe('ProfilePageComponent', () => {
     expect(checkout.disabled).toBeFalse();
     checkout.click();
     const request = http.expectOne({ method: 'POST', url: '/api/billing/checkout' });
-    expect(request.request.body).toEqual({ acceptRecurringTerms: true });
+    expect(request.request.body).toEqual({ acceptRecurringTerms: true, termsVersion: '2026-11-15' });
     request.flush({ url: 'https://example.com/' });
+  });
+
+  it('withholds the live checkout link when the shown terms version is stale', () => {
+    spyOnProperty(fixture.componentInstance as unknown as { canOpenLiveBillingHere: boolean }, 'canOpenLiveBillingHere').and.returnValue(true);
+    http.expectOne('/api/billing/status').flush({ ...subscription, mode: 'live', hasPlus: false, termsVersion: '2026-11-16' });
+    fixture.detectChanges();
+
+    const panel = (fixture.nativeElement as HTMLElement).querySelector('section[aria-labelledby="subscription-title"]')!;
+    expect(panel.textContent).toContain('Actualiza la página para revisar las condiciones vigentes');
+    expect(panel.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(panel.textContent).not.toContain('Suscribirme a Plus Hogar');
+    http.expectNone('/api/billing/checkout');
+  });
+
+  it('labels the verified next renewal date as a scheduled charge for an active subscription', () => {
+    http.expectOne('/api/billing/status').flush({
+      ...subscription, mode: 'live', status: 'active', hasPlus: true,
+      canCheckout: false, canOpenPortal: true,
+      currentPeriodEnd: '2026-12-15T05:00:00.000Z', nextRenewalAt: '2026-12-15T05:00:00.000Z',
+    });
+    fixture.detectChanges();
+
+    const panel = (fixture.nativeElement as HTMLElement).querySelector('section[aria-labelledby="subscription-title"]')!;
+    expect(panel.textContent).toContain('Próximo cargo programado');
+    expect(panel.textContent).toContain('14 de diciembre de 2026');
+    expect(panel.textContent).not.toContain('El primer cargo');
   });
 
   it('shows Plus as active only after the server confirms paid access', () => {
