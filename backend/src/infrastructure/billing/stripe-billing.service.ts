@@ -21,6 +21,7 @@ import {
 import {
   StripeBillingStore,
   type BillingRecord,
+  type CheckoutAttempt,
   type CheckoutConsent,
 } from './stripe-billing.store';
 import { paidPlusThrough } from './stripe-household-plan';
@@ -36,7 +37,11 @@ const checkoutMinimumRemaining = 31 * 60;
 const customerIdempotencyWindow = 23 * 60 * 60;
 const maxConcurrentRetries = 6;
 // Keep in sync with the version displayed on the frontend's Plus Hogar terms page.
-const termsVersion = '2026-11-15';
+const termsVersion = '2026-11-15-iva';
+const plusSubtotalMinor = 5900;
+const vatPercentage = 16;
+
+type CheckoutOffer = ReturnType<typeof billingAmounts> & { vatRateId?: string };
 
 function epochSeconds(): number {
   return Math.floor(Date.now() / 1000);
@@ -66,10 +71,14 @@ export class StripeBillingService {
     const canManage =
       !membership ||
       Boolean(membership.role === 'owner' && household?.ownerUserId === userId);
-    const [price, record] = await Promise.all([
+    const [price, record, vatRateId] = await Promise.all([
       this.getPrice(settings),
       household ? this.store.read(settings.table, household.id) : undefined,
+      settings.checkoutEnabled
+        ? this.getCheckoutVatRate(settings).catch(() => undefined)
+        : undefined,
     ]);
+    const requiresVat = requiresCheckoutVat(settings);
     const pendingCheckout =
       record?.checkout && record.checkout.expiresAt > epochSeconds();
     const status =
@@ -82,13 +91,14 @@ export class StripeBillingService {
     const canCheckout =
       settings.checkoutEnabled &&
       price.active &&
+      (!requiresVat ||
+        Boolean(vatRateId && price.unit_amount === plusSubtotalMinor)) &&
       canManage &&
       (!settings.pilotHouseholdId ||
         household?.id === settings.pilotHouseholdId) &&
       !record?.closed &&
-      (settings.mode !== 'live' ||
-        !pendingCheckout ||
-        record.checkout?.termsVersion === termsVersion) &&
+      (!pendingCheckout ||
+        matchesCheckoutAttempt(settings, record.checkout, vatRateId)) &&
       (status === 'none' ||
         (status === 'pending' && record?.status !== 'pending') ||
         isFinished(status));
@@ -104,6 +114,9 @@ export class StripeBillingService {
         record?.renewalAt === paid &&
         !record.cancelAtPeriodEnd && {
           nextRenewalAt: new Date(paid * 1000).toISOString(),
+          ...(record.renewalAmountMinor !== undefined && {
+            nextRenewalAmountMinor: record.renewalAmountMinor,
+          }),
         }),
       canManage,
       canCheckout,
@@ -115,7 +128,7 @@ export class StripeBillingService {
       status,
       plan: {
         label: 'Plus Hogar',
-        amountMinor: price.unit_amount,
+        ...billingAmounts(price.unit_amount, requiresVat),
         currency: 'mxn',
         interval: 'month',
       },
@@ -161,14 +174,24 @@ export class StripeBillingService {
       settings.mode === 'live'
         ? { termsVersion, acceptedAt: new Date().toISOString() }
         : undefined;
-    await this.getPrice(settings, true);
+    const [price, vatRateId] = await Promise.all([
+      this.getPrice(settings, true),
+      this.getCheckoutVatRate(settings),
+    ]);
+    if (vatRateId && price.unit_amount !== plusSubtotalMinor) {
+      throw new ServiceUnavailableException('Billing plan is unavailable');
+    }
+    const offer = {
+      ...billingAmounts(price.unit_amount, Boolean(vatRateId)),
+      vatRateId,
+    };
     const { householdId } = access;
     const lease = await this.store.beginCheckout(settings.table, householdId);
     if (!lease) {
       throw new ConflictException('Checkout is busy, please retry');
     }
     try {
-      return await this.createCheckout(settings, householdId, consent);
+      return await this.createCheckout(settings, householdId, offer, consent);
     } finally {
       await this.store.endCheckout(settings.table, householdId, lease);
     }
@@ -177,6 +200,7 @@ export class StripeBillingService {
   private async createCheckout(
     settings: StripeBillingSettings,
     householdId: string,
+    offer: CheckoutOffer,
     consent?: CheckoutConsent,
   ): Promise<{ url: string }> {
     for (let retry = 0; retry < maxConcurrentRetries; retry++) {
@@ -190,8 +214,11 @@ export class StripeBillingService {
 
       const open = record.checkout;
       const now = epochSeconds();
-      const currentConsent =
-        !consent || open?.termsVersion === consent.termsVersion;
+      const currentOffer = matchesCheckoutAttempt(
+        settings,
+        open,
+        offer.vatRateId,
+      );
       const sessionId = open?.stripeSessionId;
       if (sessionId) {
         const session = await stripeRequest(() =>
@@ -199,11 +226,12 @@ export class StripeBillingService {
         );
         this.assertSession(settings, session, record);
         if (session.status === 'open') {
-          if (!currentConsent) {
+          if (!currentOffer) {
             throw new ConflictException(
               'Previous Checkout is awaiting expiration',
             );
           }
+          this.assertCheckoutAmount(session, offer);
           return { url: stripeUrl(session.url, 'checkout.stripe.com') };
         }
         if (
@@ -215,7 +243,7 @@ export class StripeBillingService {
       }
 
       const reuse = open && !open.stripeSessionId && open.expiresAt > now;
-      if (reuse && !currentConsent) {
+      if (reuse && !currentOffer) {
         throw new ConflictException('Previous Checkout is awaiting expiration');
       }
       const attempt = reuse
@@ -224,6 +252,7 @@ export class StripeBillingService {
             token: randomUUID(),
             expiresAt: now + checkoutDuration,
             ...(consent && { termsVersion: consent.termsVersion }),
+            ...(offer.vatRateId && { vatRateId: offer.vatRateId }),
           };
       if (attempt.expiresAt < now + checkoutMinimumRemaining) {
         throw new ConflictException('Checkout is awaiting expiration');
@@ -248,7 +277,11 @@ export class StripeBillingService {
             line_items: [{ price: settings.priceId, quantity: 1 }],
             expires_at: attempt.expiresAt,
             metadata: { ...metadata, [checkoutMetadata]: attempt.token },
-            subscription_data: { metadata },
+            subscription_data: {
+              metadata,
+              ...(offer.vatRateId && { default_tax_rates: [offer.vatRateId] }),
+            },
+            ...(offer.vatRateId && { adaptive_pricing: { enabled: false } }),
             success_url: `${settings.origin}/profile?billing=success`,
             cancel_url: `${settings.origin}/profile?billing=cancelled`,
           },
@@ -261,6 +294,7 @@ export class StripeBillingService {
       if (session.status !== 'open') {
         throw new ConflictException('Checkout is awaiting confirmation');
       }
+      this.assertCheckoutAmount(session, offer);
       const url = stripeUrl(session.url, 'checkout.stripe.com');
       const saved = await this.store.save(
         {
@@ -414,6 +448,7 @@ export class StripeBillingService {
           subscriptionId: subscription?.id,
           paidThrough: paidUntil,
           renewalAt: renewal?.renewalAt,
+          renewalAmountMinor: renewal?.amountMinor,
           cancelAtPeriodEnd:
             subscription?.cancel_at_period_end === true ||
             (subscription?.cancel_at != null &&
@@ -510,6 +545,26 @@ export class StripeBillingService {
       }
     }
     return { unit_amount: price.unit_amount, active: price.active };
+  }
+
+  private async getCheckoutVatRate(settings: StripeBillingSettings) {
+    if (!requiresCheckoutVat(settings)) return undefined;
+
+    const { vatRateId } = settings;
+    if (vatRateId && /^txr_[a-zA-Z0-9]+$/.test(vatRateId)) {
+      const rate = await stripeRequest(() =>
+        settings.stripe.taxRates.retrieve(vatRateId),
+      );
+      if (
+        rate.id === vatRateId &&
+        rate.active &&
+        rate.livemode === (settings.mode === 'live') &&
+        isMexicanVat(rate)
+      ) {
+        return rate.id;
+      }
+    }
+    throw new ServiceUnavailableException('VAT rate is unavailable');
   }
 
   private async ensureCustomer(
@@ -676,6 +731,23 @@ export class StripeBillingService {
     }
   }
 
+  private assertCheckoutAmount(
+    session: Stripe.Checkout.Session,
+    offer: CheckoutOffer,
+  ) {
+    if (
+      offer.vatRateId &&
+      (session.currency !== 'mxn' ||
+        session.amount_subtotal !== offer.subtotalMinor ||
+        session.total_details?.amount_tax !== offer.taxMinor ||
+        session.amount_total !== offer.amountMinor)
+    ) {
+      throw new ServiceUnavailableException(
+        'Stripe Checkout amount is unavailable',
+      );
+    }
+  }
+
   private verifyEvent(
     settings: StripeBillingSettings,
     rawBody: Buffer | undefined,
@@ -804,26 +876,73 @@ function renewalCandidate(
   }
   const item = subscription.items.data[0];
   const price = item.price;
-  const amountMinor = price.unit_amount;
+  const subtotalMinor = price.unit_amount;
+  const taxRates = item.tax_rates?.length
+    ? item.tax_rates
+    : (subscription.default_tax_rates ?? []);
   if (
     item.billing_thresholds != null ||
     price.currency !== 'mxn' ||
     price.recurring?.interval !== 'month' ||
     price.recurring.interval_count !== 1 ||
     price.recurring.usage_type !== 'licensed' ||
-    amountMinor === null ||
-    !Number.isSafeInteger(amountMinor) ||
-    amountMinor <= 0
+    subtotalMinor === null ||
+    !Number.isSafeInteger(subtotalMinor) ||
+    subtotalMinor <= 0 ||
+    subscription.automatic_tax?.enabled ||
+    taxRates.length > 1 ||
+    taxRates.some(
+      (rate) => !isMexicanVat(rate) || rate.livemode !== subscription.livemode,
+    )
   ) {
     return undefined;
   }
+  const taxExemption =
+    typeof subscription.latest_invoice === 'object'
+      ? subscription.latest_invoice?.customer_tax_exempt
+      : undefined;
+  const includesVat =
+    taxRates.length === 1 &&
+    taxExemption !== 'exempt' &&
+    taxExemption !== 'reverse';
   return {
     householdId: record.householdId,
     subscriptionId: subscription.id,
     renewalAt: paidUntil,
-    amountMinor,
+    amountMinor: billingAmounts(subtotalMinor, includesVat).amountMinor,
     currency: 'mxn',
   };
+}
+
+function requiresCheckoutVat(settings: StripeBillingSettings): boolean {
+  return settings.mode === 'live' || settings.vatRateId !== undefined;
+}
+
+function matchesCheckoutAttempt(
+  settings: StripeBillingSettings,
+  attempt: CheckoutAttempt | undefined,
+  vatRateId: string | undefined,
+): boolean {
+  return (
+    attempt?.vatRateId === vatRateId &&
+    (settings.mode !== 'live' || attempt?.termsVersion === termsVersion)
+  );
+}
+
+function isMexicanVat(rate: Stripe.TaxRate): boolean {
+  return (
+    rate.country === 'MX' &&
+    rate.tax_type === 'vat' &&
+    rate.inclusive === false &&
+    rate.percentage === vatPercentage
+  );
+}
+
+function billingAmounts(subtotalMinor: number, includesVat: boolean) {
+  const taxMinor = includesVat
+    ? Math.round((subtotalMinor * vatPercentage) / 100)
+    : 0;
+  return { subtotalMinor, taxMinor, amountMinor: subtotalMinor + taxMinor };
 }
 
 function billingSignal(event: Stripe.Event) {

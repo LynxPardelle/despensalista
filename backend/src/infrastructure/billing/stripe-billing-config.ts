@@ -24,6 +24,7 @@ export interface StripeBillingSettings {
   accountId?: string;
   productId?: string;
   priceId: string;
+  vatRateId?: string;
   webhookSigningSecret: string;
   portalConfigurationId?: string;
   stripe: Stripe;
@@ -31,7 +32,13 @@ export interface StripeBillingSettings {
 
 type StripeBillingLocation = Pick<
   StripeBillingSettings,
-  'mode' | 'stage' | 'origin' | 'table' | 'checkoutEnabled' | 'pilotHouseholdId'
+  | 'mode'
+  | 'stage'
+  | 'origin'
+  | 'table'
+  | 'checkoutEnabled'
+  | 'pilotHouseholdId'
+  | 'vatRateId'
 >;
 
 @Injectable()
@@ -94,10 +101,17 @@ export class StripeBillingConfig {
       : undefined;
     const pilotHouseholdId =
       pilot && householdIdFormat.test(pilot) ? pilot : undefined;
-    const checkoutEnabled = isDev
-      ? checkoutFlag === 'true' || checkoutFlag === undefined
-      : checkoutFlag === 'true' &&
-        this.liveEnrollmentAllowed(pilot, pilotHouseholdId);
+    const vatRateId =
+      this.config.get<string>('STRIPE_BILLING_VAT_RATE_ID') || undefined;
+    const vatCanBeConfigured =
+      (isDev && vatRateId === undefined) ||
+      isStripeIdentifier(vatRateId, /^txr_[a-zA-Z0-9]+$/);
+    const checkoutEnabled =
+      vatCanBeConfigured &&
+      (isDev
+        ? checkoutFlag === 'true' || checkoutFlag === undefined
+        : checkoutFlag === 'true' &&
+          this.liveEnrollmentAllowed(pilot, pilotHouseholdId));
 
     return {
       base: {
@@ -107,6 +121,7 @@ export class StripeBillingConfig {
         table,
         checkoutEnabled,
         ...(pilotHouseholdId && { pilotHouseholdId }),
+        ...(vatRateId && { vatRateId }),
       },
       parameter,
     };

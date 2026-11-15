@@ -25,7 +25,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { applyRuntimeBoundary, deliveryInventory, googleMfaEnabled, requireGoogleMfaOrigin, renewalNoticeDeployment, renewalNoticeSesAccountPolicy, renewalNoticeSesPolicy, stripeBillingDeployment } from './stage-delivery';
+import { applyRuntimeBoundary, cfdiRequestDeployment, deliveryInventory, googleMfaEnabled, requireGoogleMfaOrigin, renewalNoticeDeployment, renewalNoticeSesAccountPolicy, renewalNoticeSesPolicy, stripeBillingDeployment } from './stage-delivery';
 import { PublicProductionDomain, publicProductionDomain } from './public-production-domain';
 
 interface DespensaListaServerlessBackendStackProps extends cdk.StackProps {
@@ -88,6 +88,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       throw new Error('Google MFA requires the same frontend origin for Cognito, WebAuthn and the app domain.');
     }
     const stripeBilling = stripeBillingDeployment(this, projectName, stage);
+    const cfdiRequest = cfdiRequestDeployment(this, projectName, stage);
     const renewalNotice = renewalNoticeDeployment(this, projectName, stage);
     const devBillingOrigin = 'https://dev.despensalista.lynxpardelle.com';
     const stripeBillingOrigin = isProduction ? publicDomain?.origin : devBillingOrigin;
@@ -226,12 +227,19 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
           STRIPE_BILLING_CONFIG_PARAMETER: stripeBilling.parameterName,
           STRIPE_BILLING_MODE: stripeBilling.mode,
           STRIPE_BILLING_CHECKOUT_ENABLED: String(stripeBilling.checkoutEnabled),
+          ...(stripeBilling.vatRateId && { STRIPE_BILLING_VAT_RATE_ID: stripeBilling.vatRateId }),
           ...(stripeBilling.mode === 'live' && {
             STRIPE_BILLING_PUBLIC_CHECKOUT: String(stripeBilling.publicCheckout),
             ...(stripeBilling.pilotHouseholdId && {
               STRIPE_BILLING_PILOT_HOUSEHOLD_ID: stripeBilling.pilotHouseholdId,
             }),
           }),
+        }),
+        ...(cfdiRequest && {
+          CFDI_REQUEST_MODE: 'ses',
+          CFDI_REQUEST_STAGE: cfdiRequest.stage,
+          CFDI_REQUEST_FROM: cfdiRequest.from,
+          CFDI_REQUEST_RECIPIENT: cfdiRequest.recipient,
         }),
         ...(renewalNotice && renewalNoticeTable && {
           RENEWAL_NOTICE_TABLE: renewalNoticeTable.tableName,
@@ -275,6 +283,13 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       apiFunction.addToRolePolicy(new iam.PolicyStatement({
         actions: ['ssm:GetParameter'],
         resources: [stripeBilling.parameterArn],
+      }));
+    }
+    if (cfdiRequest && stripeBillingTable) {
+      apiFunction.addToRolePolicy(renewalNoticeSesPolicy(this, cfdiRequest.recipient));
+      apiFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:TransactWriteItems'],
+        resources: [stripeBillingTable.tableArn],
       }));
     }
     if (renewalNotice && renewalNoticeTable) {

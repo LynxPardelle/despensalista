@@ -1,0 +1,218 @@
+<section class="cfdi-panel" aria-labelledby="cfdi-title">
+  <h2 id="cfdi-title">Factura de Plus Hogar</h2>
+  <button
+    class="secondary-button"
+    type="button"
+    aria-controls="cfdi-details"
+    [attr.aria-expanded]="expanded()"
+    [disabled]="sending()"
+    (click)="toggle()"
+  >
+    {{ expanded() ? 'Cerrar solicitud' : 'Solicitar factura' }}
+  </button>
+
+  <div id="cfdi-details" [hidden]="!expanded()">
+    @if (expanded()) {
+      @if (loading()) {
+        <p class="loading-copy" role="status">Consultando pagos…</p>
+      }
+      @if (loadError()) {
+        <p class="field-error" role="alert">No pudimos consultar los pagos. Inténtalo de nuevo.</p>
+      }
+      @if (available() === false) {
+        <p class="helper-copy">La solicitud en línea no está disponible para este hogar.</p>
+      }
+      @if (available() && invoices().length === 0) {
+        <p class="helper-copy">Todavía no hay pagos que puedas facturar desde aquí.</p>
+      }
+      @if (available() && invoices().length > 0) {
+        <div class="cfdi-field">
+          <label for="cfdi-invoice">Pago a facturar</label>
+          <select
+            #payment
+            id="cfdi-invoice"
+            [value]="selectedId()"
+            [disabled]="sending()"
+            (change)="selectInvoice(payment.value)"
+          >
+            <option value="">Elige un pago</option>
+            @for (invoice of invoices(); track invoice.id) {
+              <option [value]="invoice.id">{{ formatInvoice(invoice) }}</option>
+            }
+          </select>
+        </div>
+
+        @if (selectedInvoice()?.request; as receipt) {
+          <div class="cfdi-receipt" role="status">
+            @switch (receipt.status) {
+              @case ('sent') {
+                <p>Solicitud enviada al equipo de facturación.</p>
+                @if (!testMode()) {
+                  <p>Si omitiste el correo de entrega, escribe a facturación con este folio para recibir tu CFDI.</p>
+                }
+              }
+              @case ('delivery_unknown') {
+                <p>La entrega de tu solicitud está por confirmar. Usa el folio si escribes a facturación.</p>
+              }
+              @case ('pending') {
+                @if (receipt.retryable) {
+                  <p>Tu solicitud quedó registrada. Puedes reintentar su envío.</p>
+                } @else {
+                  <p>Tu solicitud se está procesando. Actualiza los pagos para consultar su estado.</p>
+                }
+              }
+            }
+            <p>Folio <strong>{{ receipt.id }}</strong></p>
+          </div>
+        }
+
+        @if (canEnterDetails()) {
+          <form [formGroup]="fiscalForm" (ngSubmit)="submit()" autocomplete="off">
+            @if (testMode()) {
+              <p class="helper-copy" id="cfdi-data-use">Usa datos fiscales ficticios en este entorno de prueba.</p>
+            } @else {
+              <p class="helper-copy" id="cfdi-data-use">
+                Comparte estos datos con el equipo de facturación de ZooBeriah Systems para que emita el CFDI.
+                <a routerLink="/privacidad">Aviso de privacidad</a>
+              </p>
+            }
+            <fieldset [disabled]="loading() || sending()" aria-describedby="cfdi-data-use">
+              <legend>Datos fiscales</legend>
+              <div class="cfdi-field">
+                <label for="cfdi-rfc">RFC</label>
+                <input
+                  id="cfdi-rfc"
+                  formControlName="rfc"
+                  required
+                  maxlength="13"
+                  spellcheck="false"
+                  autocapitalize="characters"
+                  [attr.aria-invalid]="fiscalForm.controls.rfc.invalid && fiscalForm.controls.rfc.touched"
+                  aria-describedby="cfdi-rfc-help"
+                />
+                @if (fiscalForm.controls.rfc.invalid && fiscalForm.controls.rfc.touched) {
+                  <small id="cfdi-rfc-help" class="field-error">Escribe un RFC de 12 o 13 caracteres.</small>
+                } @else {
+                  <small id="cfdi-rfc-help" class="helper-copy">Usa el RFC del receptor de la factura.</small>
+                }
+              </div>
+              <div class="cfdi-field">
+                <label for="cfdi-legal-name">Nombre o razón social</label>
+                <input
+                  id="cfdi-legal-name"
+                  formControlName="legalName"
+                  required
+                  maxlength="254"
+                  spellcheck="false"
+                  [attr.aria-invalid]="fiscalForm.controls.legalName.invalid && fiscalForm.controls.legalName.touched"
+                  aria-describedby="cfdi-legal-name-help"
+                />
+                <small
+                  id="cfdi-legal-name-help"
+                  [class.field-error]="fiscalForm.controls.legalName.invalid && fiscalForm.controls.legalName.touched"
+                  class="helper-copy"
+                >Escríbelo como aparece en tus datos fiscales del SAT.</small>
+              </div>
+              <div class="cfdi-field">
+                <label for="cfdi-postal-code">Código postal fiscal</label>
+                <input
+                  id="cfdi-postal-code"
+                  formControlName="postalCode"
+                  required
+                  inputmode="numeric"
+                  maxlength="5"
+                  [attr.aria-invalid]="fiscalForm.controls.postalCode.invalid && fiscalForm.controls.postalCode.touched"
+                  aria-describedby="cfdi-postal-code-help"
+                />
+                <small
+                  id="cfdi-postal-code-help"
+                  [class.field-error]="fiscalForm.controls.postalCode.invalid && fiscalForm.controls.postalCode.touched"
+                  class="helper-copy"
+                >Escribe los cinco dígitos del código postal registrado ante el SAT.</small>
+              </div>
+              <div class="cfdi-field">
+                <label for="cfdi-tax-regime">Clave del régimen fiscal</label>
+                <input
+                  id="cfdi-tax-regime"
+                  formControlName="taxRegime"
+                  required
+                  inputmode="numeric"
+                  maxlength="3"
+                  [attr.aria-invalid]="fiscalForm.controls.taxRegime.invalid && fiscalForm.controls.taxRegime.touched"
+                  aria-describedby="cfdi-tax-regime-help"
+                />
+                <small
+                  id="cfdi-tax-regime-help"
+                  [class.field-error]="fiscalForm.controls.taxRegime.invalid && fiscalForm.controls.taxRegime.touched"
+                  class="helper-copy"
+                >Escribe la clave de tres dígitos de tu régimen fiscal.</small>
+              </div>
+              <div class="cfdi-field">
+                <label for="cfdi-use">Clave de uso del CFDI</label>
+                <input
+                  id="cfdi-use"
+                  formControlName="cfdiUse"
+                  required
+                  maxlength="4"
+                  spellcheck="false"
+                  autocapitalize="characters"
+                  [attr.aria-invalid]="fiscalForm.controls.cfdiUse.invalid && fiscalForm.controls.cfdiUse.touched"
+                  aria-describedby="cfdi-use-help"
+                />
+                <small
+                  id="cfdi-use-help"
+                  [class.field-error]="fiscalForm.controls.cfdiUse.invalid && fiscalForm.controls.cfdiUse.touched"
+                  class="helper-copy"
+                >Elige un uso permitido para tu régimen fiscal y escribe su clave.</small>
+              </div>
+              <div class="cfdi-field">
+                <label for="cfdi-email">Correo para recibir el CFDI <span>(opcional)</span></label>
+                <input
+                  id="cfdi-email"
+                  type="email"
+                  formControlName="email"
+                  maxlength="254"
+                  spellcheck="false"
+                  [attr.aria-invalid]="fiscalForm.controls.email.invalid && fiscalForm.controls.email.touched"
+                  aria-describedby="cfdi-email-help"
+                />
+                @if (fiscalForm.controls.email.invalid && fiscalForm.controls.email.touched) {
+                  <small id="cfdi-email-help" class="field-error">Revisa el formato del correo.</small>
+                } @else {
+                  <small id="cfdi-email-help" class="helper-copy">Si lo omites, conserva el folio para acordar la entrega con facturación.</small>
+                }
+              </div>
+              <button class="primary-button" type="submit">
+                {{ selectedInvoice()?.request?.retryable ? 'Reintentar envío' : 'Enviar solicitud' }}
+              </button>
+            </fieldset>
+          </form>
+        }
+      }
+
+      @if (sending()) {
+        <p class="loading-copy" role="status">Enviando tu solicitud…</p>
+      }
+      @if (sendError(); as error) {
+        <p class="field-error" role="alert">{{ error }}</p>
+      }
+      @if (available() !== null || loadError()) {
+        <div class="cfdi-actions">
+          <button class="ghost-button" type="button" [disabled]="loading() || sending()" (click)="loadInvoices()">
+            Actualizar pagos
+          </button>
+          @if (nextCursor(); as cursor) {
+            <button class="ghost-button" type="button" [disabled]="loading() || sending()" (click)="loadInvoices(cursor)">
+              Ver pagos anteriores
+            </button>
+          }
+        </div>
+      }
+    }
+  </div>
+  @if (!testMode()) {
+    <p class="helper-copy">
+      También puedes solicitar tu factura en <a href="mailto:facturas@despensalista.com">facturas@despensalista.com</a>.
+    </p>
+  }
+</section>
