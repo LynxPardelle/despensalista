@@ -8,6 +8,7 @@ import type { InjectOptions } from 'light-my-request';
 import { AppModule } from './app.module';
 import { configureApp } from './app.setup';
 import { ResumeAccountDeletionsUseCase } from './application/use-cases/resume-account-deletions.use-case';
+import { renewalNoticeConfig } from './infrastructure/billing/renewals/renewal-notice.config';
 import { RenewalNoticeDispatcher } from './infrastructure/billing/renewals/renewal-notice.dispatcher';
 
 interface ApiGatewayHttpEvent {
@@ -91,11 +92,8 @@ export async function handler(
     return app.get(ResumeAccountDeletionsUseCase).execute();
   }
   if (isRenewalNoticeWorkerEvent(event)) {
-    const config = app.get(ConfigService);
-    if (
-      config.get('STRIPE_BILLING_MODE') !== 'test' ||
-      config.get('RENEWAL_NOTICE_TABLE') !== 'despensalista-dev-renewal-notices'
-    ) {
+    const settings = renewalNoticeConfig(app.get(ConfigService));
+    if (!settings) {
       throw new Error('Renewal notice worker is unavailable');
     }
     if (event.referenceTime === undefined && event.testNoticeId === undefined) {
@@ -106,6 +104,7 @@ export async function handler(
         ? new Date(event.referenceTime)
         : undefined;
     if (
+      settings.stage !== 'dev' ||
       !referenceTime ||
       !Number.isFinite(referenceTime.getTime()) ||
       typeof event.testNoticeId !== 'string' ||

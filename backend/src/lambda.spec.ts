@@ -2,6 +2,7 @@ type LambdaModule = typeof import('./lambda');
 import { ResumeAccountDeletionsUseCase } from './application/use-cases/resume-account-deletions.use-case';
 import { CognitoTokenClientService } from './infrastructure/auth/cognito/cognito-token-client.service';
 import { CognitoTokenVerifierService } from './infrastructure/auth/cognito/cognito-token-verifier.service';
+import { RenewalNoticeDispatcher } from './infrastructure/billing/renewals/renewal-notice.dispatcher';
 
 describe('lambda handler', () => {
   let lambda: LambdaModule;
@@ -115,6 +116,41 @@ describe('lambda handler', () => {
         'detail-type': 'dispatch',
       }),
     ).rejects.toThrow('Renewal notice worker is unavailable');
+  });
+
+  it('allows normal production renewal dispatch but rejects a simulated clock', async () => {
+    const event = {
+      source: 'despensalista.renewal-notice-worker' as const,
+      'detail-type': 'dispatch' as const,
+    };
+    const original = process.env;
+    process.env = {
+      ...original,
+      STRIPE_BILLING_MODE: 'live',
+      RENEWAL_NOTICE_STAGE: 'prod',
+      RENEWAL_NOTICE_TABLE: 'despensalista-prod-renewal-notices',
+      RENEWAL_NOTICE_MODE: 'dry-run',
+    };
+    const dispatch = jest
+      .spyOn(RenewalNoticeDispatcher.prototype, 'dispatch')
+      .mockRejectedValue(new Error('scheduled dispatch reached'));
+    try {
+      await expect(
+        lambda.handler({
+          ...event,
+          referenceTime: '2026-12-07T18:00:00Z',
+          testNoticeId: `renewal-${'a'.repeat(64)}`,
+        }),
+      ).rejects.toThrow('Invalid targeted renewal notice test');
+      expect(dispatch).not.toHaveBeenCalled();
+      await expect(lambda.handler(event)).rejects.toThrow(
+        'scheduled dispatch reached',
+      );
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    } finally {
+      dispatch.mockRestore();
+      process.env = original;
+    }
   });
 
   it('returns fresh session cookies with the Google WebAuthn 403 response', async () => {

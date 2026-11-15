@@ -1175,6 +1175,84 @@ test('manual production rollback preserves cancellation after billing is deploye
   assert.equal(calls.some(args => args.includes('update-alias') || args.includes('put-function-concurrency')), false);
 });
 
+test('manual production rollback cannot widen Checkout beyond the live alias', async (t) => {
+  const { recordPublishedRelease, restoreRelease } = await load();
+  const artifact = await releaseArtifact({ backendDataContractVersion: 2 });
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-receipt-'));
+  const deploymentSha = 'b'.repeat(40);
+  const codeSha256 = createHash('sha256').update('zip-bytes').digest('base64');
+  const env = { AWS_REGION: 'us-east-1' };
+  const stripeBillingTable = 'despensalista-prod-billing';
+  const billing = { STRIPE_BILLING_MODE: 'live', STRIPE_BILLING_TABLE: stripeBillingTable };
+  const closed = { STRIPE_BILLING_CHECKOUT_ENABLED: 'false' };
+  const unscoped = { STRIPE_BILLING_CHECKOUT_ENABLED: 'true' };
+  const pilot = {
+    ...unscoped,
+    STRIPE_BILLING_PUBLIC_CHECKOUT: 'false',
+    STRIPE_BILLING_PILOT_HOUSEHOLD_ID: '07888b9f-cffd-4ca7-9a5a-44e9125f78f5',
+  };
+  const anotherPilot = { ...pilot, STRIPE_BILLING_PILOT_HOUSEHOLD_ID: '1d9799af-aeb1-471e-859b-5df65d95b67c' };
+  const publicCheckout = {
+    ...unscoped,
+    STRIPE_BILLING_PUBLIC_CHECKOUT: 'true',
+    RENEWAL_NOTICE_MODE: 'ses',
+    RENEWAL_NOTICE_STAGE: 'prod',
+    RENEWAL_NOTICE_TABLE: 'despensalista-prod-renewal-notices',
+  };
+  const scopeCases = [
+    ['closed cannot restore a pilot', closed, pilot, false],
+    ['closed cannot restore public enrollment', closed, publicCheckout, false],
+    ['closed can restore a closed release with older flags', closed, {}, true],
+    ['pilot can restore the same household', pilot, pilot, true],
+    ['pilot can close checkout', pilot, closed, true],
+    ['pilot cannot switch to a different household', pilot, anotherPilot, false],
+    ['pilot cannot restore public enrollment', pilot, publicCheckout, false],
+    ['public enrollment can restore a pilot', publicCheckout, pilot, true],
+    ['public enrollment can restore itself', publicCheckout, publicCheckout, true],
+    ['public enrollment cannot restore legacy unscoped Checkout', publicCheckout, unscoped, false],
+    ['legacy unscoped Checkout can close', unscoped, closed, true],
+    ['public flag without SES notices cannot authorize an open target', { ...publicCheckout, RENEWAL_NOTICE_MODE: 'dry-run' }, pilot, false],
+  ];
+
+  await recordPublishedRelease({
+    stage: 'prod', artifact, directory, deploymentSha, env,
+    aws: deploymentAws({ aliasVersion: '12', stackVersion: '12', codeSha256, backendDataContractVersion: 2 }),
+  });
+
+  for (const [description, currentFlags, targetFlags, allowed] of scopeCases) {
+    await t.test(description, async () => {
+      const calls = [];
+      const underlying = deploymentAws({
+        aliasVersion: '14', stackVersion: '15', codeSha256, calls, backendDataContractVersion: 2,
+      });
+      const aws = args => {
+        const response = underlying(args);
+        if (args.includes('despensalista-prod-serverless-backend')) {
+          response.Stacks[0].Outputs.push({ OutputKey: 'StripeBillingTableName', OutputValue: stripeBillingTable });
+        } else if (args.includes('list-versions-by-function')) {
+          response.Versions.push({ Version: '12', CodeSha256: codeSha256 });
+        } else if (args.includes('get-function-configuration') && args.includes('--qualifier')) {
+          const version = args[args.indexOf('--qualifier') + 1];
+          assert.ok(['12', '14'].includes(version), 'read the selected version and the live alias, never the stack default');
+          return { Environment: { Variables: { ...billing, ...(version === '12' ? targetFlags : currentFlags) } } };
+        }
+        return response;
+      };
+      const restore = () => restoreRelease({
+        stage: 'prod', artifact, receipt: path.join(directory, 'deployment-receipt.json'),
+        deploymentSha, aws, env, wait: async () => {},
+      });
+      if (allowed) {
+        await restore();
+        assert.ok(calls.some(args => args.includes('update-alias') && args.includes('12')));
+      } else {
+        await assert.rejects(restore, /rollback.*checkout.*(widen|unsafe)/i);
+        assert.equal(calls.some(args => args.includes('update-alias') || args.includes('put-function-concurrency') || args[0] === 's3'), false);
+      }
+    });
+  }
+});
+
 test('manual rollback accepts only a receipt and artifact on the current data contract', async () => {
   const { recordPublishedRelease, restoreRelease } = await load();
   const artifact = await releaseArtifact({ backendDataContractVersion: 2 });

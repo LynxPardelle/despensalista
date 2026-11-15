@@ -25,7 +25,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { applyRuntimeBoundary, deliveryInventory, googleMfaEnabled, requireGoogleMfaOrigin, renewalNoticeDeployment, renewalNoticeSesPolicy, stripeBillingDeployment } from './stage-delivery';
+import { applyRuntimeBoundary, deliveryInventory, googleMfaEnabled, requireGoogleMfaOrigin, renewalNoticeDeployment, renewalNoticeSesAccountPolicy, renewalNoticeSesPolicy, stripeBillingDeployment } from './stage-delivery';
 import { PublicProductionDomain, publicProductionDomain } from './public-production-domain';
 
 interface DespensaListaServerlessBackendStackProps extends cdk.StackProps {
@@ -138,6 +138,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
       timeToLiveAttribute: 'expiresAt',
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      deletionProtection: stage === 'prod',
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     }) : undefined;
     renewalNoticeTable?.addGlobalSecondaryIndex({
@@ -223,9 +224,16 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
           STRIPE_BILLING_CONFIG_PARAMETER: stripeBilling.parameterName,
           STRIPE_BILLING_MODE: stripeBilling.mode,
           STRIPE_BILLING_CHECKOUT_ENABLED: String(stripeBilling.checkoutEnabled),
+          ...(stripeBilling.mode === 'live' && {
+            STRIPE_BILLING_PUBLIC_CHECKOUT: String(stripeBilling.publicCheckout),
+            ...(stripeBilling.pilotHouseholdId && {
+              STRIPE_BILLING_PILOT_HOUSEHOLD_ID: stripeBilling.pilotHouseholdId,
+            }),
+          }),
         }),
         ...(renewalNotice && renewalNoticeTable && {
           RENEWAL_NOTICE_TABLE: renewalNoticeTable.tableName,
+          RENEWAL_NOTICE_STAGE: renewalNotice.stage,
           RENEWAL_NOTICE_MODE: renewalNotice.mode,
           ...(renewalNotice.testRecipient && { RENEWAL_NOTICE_SES_TEST_TO: renewalNotice.testRecipient }),
         }),
@@ -280,8 +288,9 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         actions: ['cognito-idp:AdminGetUser'],
         resources: [this.formatArn({ service: 'cognito-idp', resource: 'userpool', resourceName: props.cognitoUserPoolId })],
       }));
-      if (renewalNotice.testRecipient) {
+      if (renewalNotice.mode === 'ses') {
         apiFunction.addToRolePolicy(renewalNoticeSesPolicy(this, renewalNotice.testRecipient));
+        if (renewalNotice.stage === 'prod') apiFunction.addToRolePolicy(renewalNoticeSesAccountPolicy(this));
       }
     }
     apiFunction.addToRolePolicy(
@@ -317,7 +326,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     if (renewalNotice) {
       new events.Rule(this, 'PlusRenewalNoticeRule', {
         ruleName: `${projectName}-${stage}-plus-renewal-notices`,
-        schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+        schedule: events.Schedule.rate(stage === 'prod' ? cdk.Duration.minutes(15) : cdk.Duration.hours(1)),
         targets: [new eventTargets.LambdaFunction(liveAlias, {
           event: events.RuleTargetInput.fromObject({
             source: 'despensalista.renewal-notice-worker',

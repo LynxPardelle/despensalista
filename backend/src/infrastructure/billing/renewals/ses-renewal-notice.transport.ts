@@ -1,6 +1,14 @@
-import { SendEmailCommand, SESv2Client } from '@aws-sdk/client-sesv2';
+import {
+  GetAccountCommand,
+  SendEmailCommand,
+  SESv2Client,
+} from '@aws-sdk/client-sesv2';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import {
+  isRenewalRecipient,
+  renewalNoticeConfig,
+} from './renewal-notice.config';
 import type {
   RenewalNoticeMessage,
   RenewalNoticeTransport,
@@ -8,6 +16,7 @@ import type {
 
 const senderDomain = 'despensalista.lynxpardelle.com';
 const sender = `no-reply@${senderDomain}`;
+const productionAccessWindowMs = 15_000;
 const knownErrors = new Set([
   'AccessDenied',
   'AccessDeniedException',
@@ -26,6 +35,7 @@ const knownErrors = new Set([
 @Injectable()
 export class SesRenewalNoticeTransport implements RenewalNoticeTransport {
   private readonly logger = new Logger(SesRenewalNoticeTransport.name);
+  private productionAccessUntil = -1;
   private readonly ses = new SESv2Client({
     region: 'us-east-1',
     maxAttempts: 1,
@@ -33,17 +43,47 @@ export class SesRenewalNoticeTransport implements RenewalNoticeTransport {
 
   constructor(private readonly config: ConfigService) {}
 
-  async send(message: RenewalNoticeMessage): Promise<{ messageId: string }> {
+  async assertProductionAccess(): Promise<void> {
+    const settings = renewalNoticeConfig(this.config);
+    this.productionAccessUntil = -1;
+    if (settings?.stage !== 'prod' || settings.mode !== 'ses') {
+      throw new Error('SES production sending is unavailable');
+    }
+    const account = await this.ses
+      .send(new GetAccountCommand({}), {
+        abortSignal: AbortSignal.timeout(2_000),
+      })
+      .catch(() => {
+        throw new Error('SES production sending is unavailable');
+      });
     if (
-      this.config.get('STRIPE_BILLING_MODE') !== 'test' ||
-      this.config.get('RENEWAL_NOTICE_MODE') !== 'ses' ||
-      this.config.get('RENEWAL_NOTICE_TABLE') !==
-        'despensalista-dev-renewal-notices' ||
-      this.config.get('RENEWAL_NOTICE_SES_TEST_TO') !== message.recipient
+      account.ProductionAccessEnabled !== true ||
+      account.SendingEnabled !== true
     ) {
-      this.logger.warn('SES SendEmail blocked by the dev configuration guard');
+      throw new Error('SES production sending is unavailable');
+    }
+    // The worker checks again on each nonempty poll. This short proof lets it
+    // claim the row after validation and covers at most one Lambda invocation.
+    this.productionAccessUntil = performance.now() + productionAccessWindowMs;
+  }
+
+  async send(message: RenewalNoticeMessage): Promise<{ messageId: string }> {
+    const settings = renewalNoticeConfig(this.config);
+    if (
+      settings?.mode !== 'ses' ||
+      (settings.stage === 'dev' &&
+        settings.testRecipient !== message.recipient) ||
+      (settings.stage === 'prod' &&
+        (performance.now() >= this.productionAccessUntil ||
+          !isRenewalRecipient(message.recipient) ||
+          message.recipient.toLowerCase().endsWith('@simulator.amazonses.com')))
+    ) {
+      this.logger.warn(
+        'SES SendEmail blocked by the renewal configuration guard',
+      );
       throw new Error('Renewal notice transport is unavailable');
     }
+    if (settings.stage === 'prod') this.productionAccessUntil = -1;
 
     const sent = await this.ses
       .send(

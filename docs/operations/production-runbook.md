@@ -377,6 +377,49 @@ Price references: [CloudFront](https://aws.amazon.com/cloudfront/pricing/),
 [SES](https://aws.amazon.com/ses/pricing/), and
 [CodeDeploy](https://aws.amazon.com/codedeploy/pricing/).
 
+## Plus Hogar launch
+
+Promote through dev, tst, and prod with `ENABLE_STRIPE_BILLING_CHECKOUT=false`.
+Verify the published release and run the prelaunch cases before allowing purchases.
+Stripe Billing can stay enabled while sales are closed so paid households can use
+the portal and incoming webhooks can reconcile subscriptions.
+
+For one authorized internal purchase, use a disposable production household and
+record its exact UUID. Set `PLUS_PILOT_HOUSEHOLD_ID` to that UUID,
+`ENABLE_PUBLIC_PLUS_CHECKOUT=false`, and `ENABLE_STRIPE_BILLING_CHECKOUT=true`.
+Deploy and confirm that a different owner can't open Checkout and that the pilot
+can see the final price, the recurrence and the current terms. The pilot owner
+completes one $59 MXN payment with their own payment method. Confirm the signed
+event activates Plus once, and check the associated invoice, fee and subscription
+against the pilot household. Cancel the renewal from Perfil and verify at Stripe
+that there is no upcoming charge. Close new purchases by setting
+`ENABLE_STRIPE_BILLING_CHECKOUT=false` and redeploying. Clear the pilot household
+before the next enrollment, and check the production release and portal after
+closing purchases.
+
+After a close deployment, verify the `live` alias reports Checkout disabled.
+A failed deployment can restore the previous version and its Checkout settings.
+Treat a failed close as an open enrollment incident until the alias confirms
+closure. Manual rollback cannot expand the currently served Checkout audience.
+Stripe sessions already open may accept payment until they expire. During pilot
+closure, confirm the owned Checkout session is complete or expired in Stripe.
+
+Open public sales only after a controlled production renewal notice reaches its
+verified recipient, the consent and cancellation checks pass, and the billing
+owner confirms who issues the CFDI, the final price and VAT treatment, and who
+handles refund and dispute requests. Public sales use
+`ENABLE_PUBLIC_PLUS_CHECKOUT=true`, no pilot household, and production renewal
+notices enabled. The pilot and public settings are mutually exclusive.
+
+For refunds or disputes, reconcile the original Stripe invoice and charge to the
+exact DespensaLista household, product and price before acting. Record the
+approved amount, reason, Stripe reference, and what happens to Plus access in the
+billing reconciliation record. Use Stripe to issue an approved refund and, if the
+agreement requires ending the subscription, cancel it separately. Verify the app
+reflects the resulting subscription state and that Stripe shows the expected
+renewal and refund status. Check with accounting whether a new or corrected CFDI
+is required. Exercise the procedure in Stripe Sandbox before public sales.
+
 ## SES approval blocker
 
 Plus Hogar renewal notices currently run only in the dev Stripe sandbox. The
@@ -401,10 +444,19 @@ were verified `SUCCESS`. Future intended SES sender:
 The account remains in the `us-east-1` SES sandbox. The prior production-access
 case `178199358800446` was denied for Moyra. AWS Support accepted a separate
 [DespensaLista reconsideration, case 179454466900956](https://support.console.aws.amazon.com/support/home#/case/?displayId=179454466900956)
-on November 12 (Mexico City time). On November 14, Support showed the case as
-unassigned with no AWS reply. The submitted scope is account verification and
-recovery; disclose subscription renewal reminders before using SES to send them
-to customers.
+on November 12 (Mexico City time). The November 14 reply added subscription
+renewal notices to the requested transactional scope and summarized the dev
+delivery, duplicate prevention, and cancellation results. Activate production
+sending only after SES reports production access in `us-east-1`.
+
+After the administrative production SES permissions are installed, pause
+delivery by setting `PLUS_RENEWAL_NOTICE_MODE=dry-run` and
+`ENABLE_STRIPE_BILLING_CHECKOUT=false`. Run **Deploy Serverless Prod** on `prod`
+with `backend_only=true` so the deployment preserves the protected Cognito and
+IAM policies. Verify the serving Lambda version has `dry-run` mode, keeps the
+same queue and has Checkout disabled. Resume sending with `ses` after confirming
+SES readiness and resolving any late or uncertain notices. Review the operator
+alarm and the queue before opening public Checkout.
 
 All stages keep Cognito `EmailSendingAccount=COGNITO_DEFAULT` without `From` or
 `SourceArn`, so signup and recovery continue through Cognito's managed sender.

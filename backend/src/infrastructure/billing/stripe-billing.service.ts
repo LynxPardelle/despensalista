@@ -18,7 +18,11 @@ import {
   StripeBillingConfig,
   type StripeBillingSettings,
 } from './stripe-billing-config';
-import { StripeBillingStore, type BillingRecord } from './stripe-billing.store';
+import {
+  StripeBillingStore,
+  type BillingRecord,
+  type CheckoutConsent,
+} from './stripe-billing.store';
 import { paidPlusThrough } from './stripe-household-plan';
 import { renewalNoticeConfig } from './renewals/renewal-notice.config';
 import { buildRenewalNoticeEnqueue } from './renewals/renewal-notice.store';
@@ -31,6 +35,8 @@ const checkoutDuration = 2 * 60 * 60;
 const checkoutMinimumRemaining = 31 * 60;
 const customerIdempotencyWindow = 23 * 60 * 60;
 const maxConcurrentRetries = 6;
+// Keep in sync with the version displayed on the frontend's Plus Hogar terms page.
+const termsVersion = '2026-11-15';
 
 function epochSeconds(): number {
   return Math.floor(Date.now() / 1000);
@@ -63,29 +69,44 @@ export class StripeBillingService {
       this.getPrice(settings),
       household ? this.store.read(settings.table, household.id) : undefined,
     ]);
+    const pendingCheckout =
+      record?.checkout && record.checkout.expiresAt > epochSeconds();
     const status =
       record?.status && !isFinished(record.status)
         ? record.status
-        : record?.checkout && record.checkout.expiresAt > epochSeconds()
+        : pendingCheckout
           ? 'pending'
           : (record?.status ?? 'none');
+    const paid = paidPlusThrough(record);
+    const canCheckout =
+      settings.checkoutEnabled &&
+      price.active &&
+      canManage &&
+      (!settings.pilotHouseholdId ||
+        household?.id === settings.pilotHouseholdId) &&
+      !record?.closed &&
+      (settings.mode !== 'live' ||
+        !pendingCheckout ||
+        record.checkout?.termsVersion === termsVersion) &&
+      (status === 'none' ||
+        (status === 'pending' && record?.status !== 'pending') ||
+        isFinished(status));
     return {
       available: true,
       mode: settings.mode,
-      hasPlus: paidPlusThrough(record) !== undefined,
+      hasPlus: paid !== undefined,
       ...(record?.paidThrough && {
         currentPeriodEnd: new Date(record.paidThrough * 1000).toISOString(),
         cancelAtPeriodEnd: record.cancelAtPeriodEnd === true,
       }),
+      ...(paid !== undefined &&
+        record?.renewalAt === paid &&
+        !record.cancelAtPeriodEnd && {
+          nextRenewalAt: new Date(paid * 1000).toISOString(),
+        }),
       canManage,
-      canCheckout:
-        settings.checkoutEnabled &&
-        price.active &&
-        canManage &&
-        !record?.closed &&
-        (status === 'none' ||
-          (status === 'pending' && record?.status !== 'pending') ||
-          isFinished(status)),
+      canCheckout,
+      ...(canCheckout && settings.mode === 'live' && { termsVersion }),
       canOpenPortal:
         canManage &&
         !record?.closed &&
@@ -104,6 +125,7 @@ export class StripeBillingService {
     userId: string,
     origin: string | undefined,
     acceptRecurringTerms = false,
+    acceptedTermsVersion?: unknown,
   ): Promise<{ url: string }> {
     const settings = await this.settingsForOrigin(origin);
     if (!settings.checkoutEnabled) {
@@ -111,13 +133,33 @@ export class StripeBillingService {
         'New subscriptions are unavailable',
       );
     }
-    if (settings.mode === 'live' && !acceptRecurringTerms) {
+    if (
+      settings.mode === 'live' &&
+      (!acceptRecurringTerms || acceptedTermsVersion !== termsVersion)
+    ) {
       throw new BadRequestException('Recurring payment terms must be accepted');
     }
+    if (
+      settings.pilotHouseholdId &&
+      (await this.households.findMembershipByUserId(userId))?.householdId !==
+        settings.pilotHouseholdId
+    ) {
+      throw new ForbiddenException(
+        'Checkout is unavailable for this household',
+      );
+    }
     const access = await this.access.executeOwner(userId);
-    if (access.pantryOwnerUserId !== userId) {
+    if (
+      access.pantryOwnerUserId !== userId ||
+      (settings.pilotHouseholdId &&
+        access.householdId !== settings.pilotHouseholdId)
+    ) {
       throw new ForbiddenException('Only household owners can manage billing');
     }
+    const consent =
+      settings.mode === 'live'
+        ? { termsVersion, acceptedAt: new Date().toISOString() }
+        : undefined;
     await this.getPrice(settings, true);
     const { householdId } = access;
     const lease = await this.store.beginCheckout(settings.table, householdId);
@@ -125,7 +167,7 @@ export class StripeBillingService {
       throw new ConflictException('Checkout is busy, please retry');
     }
     try {
-      return await this.createCheckout(settings, householdId);
+      return await this.createCheckout(settings, householdId, consent);
     } finally {
       await this.store.endCheckout(settings.table, householdId, lease);
     }
@@ -134,6 +176,7 @@ export class StripeBillingService {
   private async createCheckout(
     settings: StripeBillingSettings,
     householdId: string,
+    consent?: CheckoutConsent,
   ): Promise<{ url: string }> {
     for (let retry = 0; retry < maxConcurrentRetries; retry++) {
       const record = await this.ensureCustomer(settings, householdId);
@@ -146,6 +189,8 @@ export class StripeBillingService {
 
       const open = record.checkout;
       const now = epochSeconds();
+      const currentConsent =
+        !consent || open?.termsVersion === consent.termsVersion;
       const sessionId = open?.stripeSessionId;
       if (sessionId) {
         const session = await stripeRequest(() =>
@@ -153,6 +198,11 @@ export class StripeBillingService {
         );
         this.assertSession(settings, session, record);
         if (session.status === 'open') {
+          if (!currentConsent) {
+            throw new ConflictException(
+              'Previous Checkout is awaiting expiration',
+            );
+          }
           return { url: stripeUrl(session.url, 'checkout.stripe.com') };
         }
         if (
@@ -164,16 +214,26 @@ export class StripeBillingService {
       }
 
       const reuse = open && !open.stripeSessionId && open.expiresAt > now;
+      if (reuse && !currentConsent) {
+        throw new ConflictException('Previous Checkout is awaiting expiration');
+      }
       const attempt = reuse
         ? open
-        : { token: randomUUID(), expiresAt: now + checkoutDuration };
+        : {
+            token: randomUUID(),
+            expiresAt: now + checkoutDuration,
+            ...(consent && { termsVersion: consent.termsVersion }),
+          };
       if (attempt.expiresAt < now + checkoutMinimumRemaining) {
         throw new ConflictException('Checkout is awaiting expiration');
       }
       const reserved = reuse
         ? record
         : { ...record, revision: record.revision + 1, checkout: attempt };
-      if (!reuse && !(await this.store.save(reserved, settings.table))) {
+      if (
+        !reuse &&
+        !(await this.store.save(reserved, settings.table, consent))
+      ) {
         continue;
       }
       const metadata = this.metadata(settings, householdId);
@@ -334,9 +394,7 @@ export class StripeBillingService {
         event.type,
       );
       const paidUntil = paidThrough(settings, subscription, customer.id);
-      const renewal = renewalTable
-        ? renewalCandidate(record, subscription, paidUntil)
-        : undefined;
+      const renewal = renewalCandidate(record, subscription, paidUntil);
       const saved = await this.store.applyEvent(
         {
           ...record,
@@ -350,6 +408,7 @@ export class StripeBillingService {
               : subscriptionStatus(subscription),
           subscriptionId: subscription?.id,
           paidThrough: paidUntil,
+          renewalAt: renewal?.renewalAt,
           cancelAtPeriodEnd:
             subscription?.cancel_at_period_end === true ||
             (subscription?.cancel_at != null &&
@@ -378,7 +437,7 @@ export class StripeBillingService {
       return undefined;
     }
     const settings = await this.config.get();
-    if (settings?.stage !== 'dev' || settings.mode !== 'test') return undefined;
+    if (!settings || !this.getRenewalTable(settings)) return undefined;
 
     const record = await this.store.read(settings.table, householdId);
     if (!record?.customerId || record.closed) return undefined;
@@ -391,11 +450,14 @@ export class StripeBillingService {
   }
 
   private getRenewalTable(settings: StripeBillingSettings): string | undefined {
-    return settings.stage === 'dev' &&
-      settings.mode === 'test' &&
-      this.noticeConfig
-      ? renewalNoticeConfig(this.noticeConfig)?.table
-      : undefined;
+    const notices = this.noticeConfig && renewalNoticeConfig(this.noticeConfig);
+    if (
+      notices?.stage !== settings.stage ||
+      settings.mode !== (notices.stage === 'dev' ? 'test' : 'live')
+    ) {
+      return undefined;
+    }
+    return notices.table;
   }
 
   private async settingsForOrigin(
