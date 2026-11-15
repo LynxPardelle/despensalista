@@ -175,12 +175,12 @@
         <section class="panel monetization-panel" aria-labelledby="subscription-title">
           @if (liveBilling) {
             <h2 id="subscription-title">Plus Hogar</h2>
-            <p>Suscripción mensual para tu hogar.</p>
+            <p>Comparte con hasta 5 personas, guarda 15 listas reutilizables y consulta el resumen semanal y el gasto mensual.</p>
             <p><a routerLink="/terminos-plus-hogar">Condiciones de Plus Hogar</a></p>
           } @else {
             <p class="panel-kicker">Modo de prueba</p>
-            <h2 id="subscription-title">Suscripción de prueba</h2>
-            <p>Stripe simula el cobro. Esta suscripción sirve para probar el pago y su gestión.</p>
+            <h2 id="subscription-title">Plus Hogar en sandbox</h2>
+            <p>Hasta 5 personas, 15 listas reutilizables, resumen semanal y gasto mensual. El pago de prueba en Stripe activa estos beneficios en dev.</p>
           }
 
           <dl class="billing-decision-list" aria-label="Detalles de la suscripción">
@@ -305,10 +305,9 @@
       } @else {
         <aside class="panel monetization-panel">
           <p class="panel-kicker">Monetizaci&oacute;n</p>
-          <h2>Plan y Stripe</h2>
+          <h2 id="subscription-title">Plan y Stripe</h2>
           <p>
-            Despensa Lista sigue en plan Free. Stripe queda como proveedor elegido
-            para pagos web/PWA cuando activemos checkout real.
+            Consulta los cupos y beneficios de cada plan.
           </p>
 
           <dl class="billing-decision-list" aria-label="Decisi&oacute;n de pagos">
@@ -411,7 +410,12 @@
           <p class="loading-copy" aria-live="polite">Cargando hogar...</p>
         } @else if (householdWorkspace; as workspace) {
           <p class="helper-copy">
-            {{ workspace.household.name }} · {{ workspace.members.length }} miembro(s)
+            {{ workspace.household.name }} · {{ workspace.members.length }}
+            @if (workspace.plan; as plan) {
+              de {{ plan.memberLimit }} personas · {{ plan.tier === 'plus' ? 'Plus Hogar' : 'Gratis' }}
+            } @else {
+              personas
+            }
           </p>
 
           @if (householdError) {
@@ -445,6 +449,9 @@
           </section>
 
           @if (canManageHousehold) {
+            @if (workspace.plan && workspace.members.length >= workspace.plan.memberLimit) {
+              <p class="helper-copy">Tu hogar alcanzó su cupo de personas. <a routerLink="/profile" fragment="subscription-title">Ver mi plan</a></p>
+            }
             <form class="preferences-form" [formGroup]="householdInviteForm" (ngSubmit)="createHouseholdInvite()">
               <label class="field">
                 <span>Invitar por email</span>
@@ -689,6 +696,13 @@
           </button>
         </form>
       </aside>
+
+      @if (feedbackAvailable$ | async) {
+        <aside class="panel export-panel">
+          <h2>Ayuda y comentarios</h2>
+          <a class="secondary-button" routerLink="/feedback">Reportar un error, queja o sugerencia</a>
+        </aside>
+      }
     </div>
   </section>
 </main>

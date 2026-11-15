@@ -1,6 +1,6 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
-const PROTECTED_APP_ROUTES = ['/pantry', '/profile'];
+const PROTECTED_APP_ROUTES = ['/pantry', '/profile', '/feedback'];
 const SESSION_COOKIE_PATTERN =
   /(?:^|;\s*)despensalista_(?:access|refresh)_token=[^;\s]+/;
 

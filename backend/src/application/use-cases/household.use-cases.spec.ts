@@ -18,6 +18,7 @@ import { HouseholdRepository } from '../../domain/repositories/household.reposit
 import { User } from '../../domain/entities/user.entity';
 import { UserAccountStatus } from '../../domain/enums';
 import { UserDao } from '../ports/daos';
+import { FREE_HOUSEHOLD_PLAN } from '../ports/household-plan-reader';
 import { UserId } from '../../domain/value-objects/user-id.vo';
 
 describe('household use cases', () => {
@@ -41,13 +42,16 @@ describe('household use cases', () => {
   });
   let repository: jest.Mocked<HouseholdRepository>;
   let userDao: jest.Mocked<UserDao>;
+  const plans = { getPlan: jest.fn().mockResolvedValue(FREE_HOUSEHOLD_PLAN) };
 
   beforeEach(() => {
     repository = {
       createHouseholdWithOwner: jest.fn(
         async (_household, membership) => membership,
       ),
-      acceptInvite: jest.fn(async (_invite, membership) => membership),
+      acceptInvite: jest.fn(
+        async (_invite, membership, _memberLimit) => membership,
+      ),
       saveHousehold: jest.fn(),
       saveMembership: jest.fn(),
       saveInvite: jest.fn(),
@@ -106,6 +110,7 @@ describe('household use cases', () => {
     const workspace = await new GetHouseholdWorkspaceUseCase(
       repository,
       userDao,
+      plans,
     ).execute('owner-user');
 
     expect(repository.createHouseholdWithOwner).toHaveBeenCalledTimes(1);
@@ -113,6 +118,7 @@ describe('household use cases', () => {
     expect(repository.saveMembership).not.toHaveBeenCalled();
     expect(workspace.currentMember.role).toBe('owner');
     expect(workspace.household.name).toBe('Hogar de Alec');
+    expect(workspace.plan).toEqual(FREE_HOUSEHOLD_PLAN);
     expect(workspace.activities[0].type).toBe('household_created');
   });
 
@@ -132,6 +138,7 @@ describe('household use cases', () => {
     const result = await new CreateHouseholdInviteUseCase(
       repository,
       userDao,
+      plans,
     ).execute({
       requesterUserId: 'owner-user',
       email: 'Familia@Example.com',
@@ -143,6 +150,10 @@ describe('household use cases', () => {
       'familia@example.com',
     );
     expect(result.invite.toPrimitives().role).toBe('editor');
+    expect(repository.saveInvite).toHaveBeenCalledWith(
+      expect.any(HouseholdInvite),
+      2,
+    );
     expect(
       repository.saveActivity.mock.calls[0]?.[0]?.toPrimitives(),
     ).toMatchObject({
@@ -165,7 +176,7 @@ describe('household use cases', () => {
     repository.findHouseholdById.mockResolvedValue(household);
 
     await expect(
-      new CreateHouseholdInviteUseCase(repository, userDao).execute({
+      new CreateHouseholdInviteUseCase(repository, userDao, plans).execute({
         requesterUserId: 'editor-user',
         email: 'familia@example.com',
         role: 'viewer',
@@ -198,6 +209,7 @@ describe('household use cases', () => {
     const workspace = await new AcceptHouseholdInviteUseCase(
       repository,
       userDao,
+      plans,
     ).execute({
       userId: 'invited-user',
       token: 'accept-token-safe',
@@ -209,6 +221,7 @@ describe('household use cases', () => {
         userId: 'invited-user',
         role: 'viewer',
       }),
+      2,
     );
     expect(repository.saveInvite).not.toHaveBeenCalled();
     expect(repository.saveActivity).toHaveBeenCalled();
@@ -222,7 +235,7 @@ describe('household use cases', () => {
     );
 
     await expect(
-      new AcceptHouseholdInviteUseCase(repository, userDao).execute({
+      new AcceptHouseholdInviteUseCase(repository, userDao, plans).execute({
         userId: 'owner-user',
         token: 'accept-token-safe',
       }),

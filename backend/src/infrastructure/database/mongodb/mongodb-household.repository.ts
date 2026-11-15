@@ -14,6 +14,7 @@ import {
 } from '../../../domain/entities/household.entity';
 import {
   HouseholdDeletionLock,
+  HouseholdMemberLimitError,
   HouseholdRepository,
 } from '../../../domain/repositories/household.repository';
 import { HouseholdDocument } from './schemas/household.schema';
@@ -105,6 +106,7 @@ export class MongoHouseholdRepository
   async acceptInvite(
     invite: HouseholdInvite,
     membership: HouseholdMembership,
+    memberLimit: number,
   ): Promise<HouseholdMembership> {
     const session = await this.householdModel.db.startSession();
     try {
@@ -126,6 +128,12 @@ export class MongoHouseholdRepository
           .exec();
         if (household.matchedCount !== 1)
           throw new ConflictException('Household no longer exists');
+        await this.assertMemberSpace(
+          invite.householdId,
+          memberLimit,
+          session,
+          membership.userId,
+        );
         const accepted = await this.householdModel
           .updateOne(
             {
@@ -197,17 +205,21 @@ export class MongoHouseholdRepository
         const saved = await this.householdModel
           .findOneAndUpdate({ pk: record.pk }, record, {
             new: true,
-            upsert: true,
             session,
           })
           .lean()
           .exec();
+        if (!saved)
+          throw new ConflictException('Household membership no longer exists');
         return this.toMembership(saved as MembershipRecord);
       },
     );
   }
 
-  async saveInvite(invite: HouseholdInvite): Promise<HouseholdInvite> {
+  async saveInvite(
+    invite: HouseholdInvite,
+    memberLimit?: number,
+  ): Promise<HouseholdInvite> {
     const record = this.toInviteRecord(invite);
     return this.writeOpenHouseholdChild(
       invite.householdId,
@@ -220,6 +232,12 @@ export class MongoHouseholdRepository
         if (invitedUser)
           await this.assertActiveUsers([invitedUser.id], session);
         if (!record.revokedAt) {
+          if (memberLimit !== undefined)
+            await this.assertMemberSpace(
+              invite.householdId,
+              memberLimit,
+              session,
+            );
           await this.householdModel.create([record], { session });
           return invite;
         }
@@ -571,6 +589,30 @@ export class MongoHouseholdRepository
     } finally {
       await session.endSession();
     }
+  }
+
+  private async assertMemberSpace(
+    householdId: string,
+    memberLimit: number,
+    session: ClientSession,
+    existingUserId?: string,
+  ): Promise<void> {
+    const filter = { entityType: 'HOUSEHOLD_MEMBERSHIP', householdId };
+    const count = await this.householdModel
+      .countDocuments(filter)
+      .limit(memberLimit)
+      .session(session)
+      .exec();
+    if (count < memberLimit) return;
+    if (
+      existingUserId &&
+      (await this.householdModel
+        .exists({ ...filter, userId: existingUserId })
+        .session(session)
+        .exec())
+    )
+      return;
+    throw new HouseholdMemberLimitError();
   }
 
   private async assertActiveUsers(

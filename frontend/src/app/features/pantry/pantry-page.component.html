@@ -747,6 +747,10 @@
         }
       </article>
 
+      <article class="panel" aria-labelledby="plus-summary-title">
+        <app-plus-household-summary />
+      </article>
+
       <article class="panel timeline-panel">
         <div class="panel-header">
           <div>
@@ -899,6 +903,9 @@
 
               @if (savedShoppingListStatus) {
                 <p class="helper-copy" aria-live="polite">{{ savedShoppingListStatus }}</p>
+              }
+              @if (savedShoppingListLimitReached) {
+                <a routerLink="/profile" fragment="subscription-title">Ver mi plan</a>
               }
 
               @if (savedShoppingLists.length > 0) {

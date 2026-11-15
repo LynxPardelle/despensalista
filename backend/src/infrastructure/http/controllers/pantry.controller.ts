@@ -280,6 +280,7 @@ export class PantryController {
       currentUser.userId,
     );
     const list = await this.createShoppingListUseCase.execute({
+      householdId: access.householdId,
       ownerUserId: access.pantryOwnerUserId,
       title: dto.title,
       occasion: dto.occasion,

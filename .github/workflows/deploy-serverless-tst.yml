@@ -163,7 +163,13 @@ jobs:
         id: smoke
         env:
           APP_DOMAIN_NAME: ${{ vars.APP_DOMAIN_NAME || 'test.despensalista.lynxpardelle.com' }}
-        run: node .github/scripts/smoke.mjs --base-url "https://$APP_DOMAIN_NAME" --attempts 18 --delay-ms 10000
+        run: |
+          set -euo pipefail
+          feedback_table="$(aws lambda get-function-configuration \
+            --function-name despensalista-tst-backend-api --qualifier live \
+            --query 'Environment.Variables.FEEDBACK_TABLE' --output text)"
+          test "$feedback_table" = despensalista-tst-feedback
+          node .github/scripts/smoke.mjs --base-url "https://$APP_DOMAIN_NAME" --attempts 18 --delay-ms 10000 --verify-feedback true
 
       - name: Restore previous frontend and backend after failed publish or smoke
         if: failure() && (steps.drain.outcome == 'failure' || steps.deploy.outcome == 'failure' || steps.activate.outcome == 'failure' || steps.reconcile.outcome == 'failure' || steps.release_writers.outcome == 'failure' || steps.smoke.outcome == 'failure')

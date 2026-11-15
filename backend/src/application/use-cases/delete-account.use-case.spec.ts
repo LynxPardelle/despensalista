@@ -57,6 +57,28 @@ describe('DeleteAccountUseCase', () => {
     });
     expect(fixture.stopRenewals).not.toHaveBeenCalled();
   });
+
+  it('removes the account feedback before deleting the account and retries erasure on resume', async () => {
+    const fixture = makeUseCase();
+    fixture.deleteFeedback.mockRejectedValueOnce(
+      new Error('Feedback unavailable'),
+    );
+    await expect(
+      fixture.useCase.execute({
+        userId: 'user-1',
+        confirmationText: 'ELIMINAR CUENTA',
+      }),
+    ).rejects.toThrow('Feedback unavailable');
+    expect(fixture.userDao.delete).not.toHaveBeenCalled();
+
+    await fixture.useCase.resume(
+      await fixture.beginAccountDeletion.mock.results[0].value,
+    );
+    expect(fixture.deleteFeedback).toHaveBeenCalledTimes(2);
+    expect(fixture.deleteFeedback).toHaveBeenLastCalledWith('user-1');
+    expect(fixture.userDao.delete).toHaveBeenCalledTimes(1);
+  });
+
   it('requires explicit account deletion confirmation', async () => {
     const { useCase, userDao } = makeUseCase();
 
@@ -412,6 +434,7 @@ function makeUseCase(
     deleteByUserId: jest.fn().mockResolvedValue(2),
   } as unknown as jest.Mocked<UserDeviceRepository>;
   const stopRenewals = jest.fn().mockResolvedValue(undefined);
+  const deleteFeedback = jest.fn().mockResolvedValue(undefined);
   const useCase = new DeleteAccountUseCase(
     userDao,
     householdRepository,
@@ -419,6 +442,7 @@ function makeUseCase(
     userDeviceRepository,
     deletePantryDataUseCase,
     { stopRenewals },
+    { deleteForAccount: deleteFeedback },
   );
 
   return {
@@ -429,6 +453,7 @@ function makeUseCase(
     userDeviceRepository,
     deletePantryDataUseCase,
     stopRenewals,
+    deleteFeedback,
     beginHouseholdDeletion,
     beginAccountDeletion,
     deleteAccountHouseholdReferences,

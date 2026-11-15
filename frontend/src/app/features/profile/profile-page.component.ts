@@ -14,8 +14,8 @@ import { CommonModule, DOCUMENT, isPlatformBrowser } from '@angular/common';
 import { HttpErrorResponse } from '@angular/common/http';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { ActivatedRoute, Router, RouterModule } from '@angular/router';
-import { Subscription } from 'rxjs';
-import { finalize } from 'rxjs/operators';
+import { Subscription, of } from 'rxjs';
+import { catchError, finalize } from 'rxjs/operators';
 import { AuthFacade } from '../../core/services/auth.facade';
 import { AuthApiService } from '../../core/services/auth-api.service';
 import {
@@ -27,6 +27,7 @@ import {
 } from '../../core/services/billing.service';
 import { PantryService } from '../../core/services/pantry.service';
 import { ProfileService } from '../../core/services/profile.service';
+import { FeedbackService } from '../../core/services/feedback.service';
 import {
   HouseholdActivity,
   HouseholdInvite,
@@ -35,7 +36,7 @@ import {
   UserProfile,
 } from '../../shared/models/profile.model';
 
-type MonetizationPlanId = 'free' | 'plus-household' | 'ai-capture-credits';
+type MonetizationPlanId = 'free' | 'plus-household';
 
 interface MonetizationPlan {
   id: MonetizationPlanId;
@@ -101,6 +102,9 @@ export class ProfilePageComponent implements OnInit {
   private readonly document = inject(DOCUMENT);
   private readonly platformId = inject(PLATFORM_ID);
   private readonly changeDetector = inject(ChangeDetectorRef);
+  protected readonly feedbackAvailable$ = inject(FeedbackService).isAvailable().pipe(
+    catchError(() => of(false)),
+  );
   protected readonly canManageGoogleKeys = signal(false);
   protected readonly billing = signal<AvailableBillingStatus | null>(null);
   protected readonly billingLoading = signal(false);
@@ -145,53 +149,30 @@ export class ProfilePageComponent implements OnInit {
   readonly monetizationPlans: MonetizationPlan[] = [
     {
       id: 'free',
-      name: 'Free',
+      name: 'Gratis',
       priceLabel: 'MXN 0',
       statusLabel: 'Activo ahora',
       features: [
         'Inventario manual',
         'Caducidad y usar primero',
-        'Lista de compras',
-        'Export basico',
+        'Listas de compras',
+        'Exportación de datos',
       ],
       boundaries: [
-        'Sin cobro',
-        'Sin limite de prueba artificial por ahora',
-        'Sin AI remota',
+        'Hasta 2 personas y 3 listas reutilizables',
       ],
     },
     {
       id: 'plus-household',
-      name: 'Plus hogar',
-      priceLabel: 'Precio por validar',
-      statusLabel: 'Discovery',
+      name: 'Plus Hogar',
+      priceLabel: '$59 MXN al mes',
+      statusLabel: 'Ventas cerradas',
       features: [
-        'Hogar compartido completo',
-        'Backups y restore/version history',
-        'Reportes de ahorro y merma',
-        'Planeacion multi-tienda avanzada',
+        'Hasta 5 personas y 15 listas reutilizables',
+        'Resumen semanal y gasto mensual registrado',
       ],
       boundaries: [
-        'Stripe Checkout despues de validar precio',
-        'Sin checkout real en esta tanda',
-        'Datos existentes quedan exportables si expira plan',
-      ],
-    },
-    {
-      id: 'ai-capture-credits',
-      name: 'Creditos AI',
-      priceLabel: 'Uso variable',
-      statusLabel: 'Futuro',
-      features: [
-        'OCR de ticket',
-        'Foto de anaquel',
-        'Lectura de caducidad',
-        'Enriquecimiento de codigo',
-      ],
-      boundaries: [
-        'Confirmacion manual obligatoria',
-        'Revision de privacidad separada',
-        'Nunca AI ilimitada en lifetime',
+        'Tus datos y listas se conservan cuando termina Plus Hogar',
       ],
     },
   ];
@@ -355,7 +336,14 @@ export class ProfilePageComponent implements OnInit {
         finalize(() => this.billingLoading.set(false)),
       )
       .subscribe({
-        next: (status) => this.billing.set(status.available ? status : null),
+        next: (status) => {
+          this.billing.set(status.available ? status : null);
+          const displayedPlan = this.householdWorkspace?.plan?.tier;
+          if (status.available && displayedPlan && !this.householdLoading &&
+            displayedPlan !== (status.hasPlus ? 'plus' : 'free')) {
+            this.loadHouseholdWorkspace();
+          }
+        },
         error: (error: HttpErrorResponse) => {
           if (error.status === 404) {
             this.billing.set(null);
@@ -710,7 +698,7 @@ export class ProfilePageComponent implements OnInit {
           this.changeDetector.markForCheck();
         },
         error: (error) => {
-          this.householdError = this.getErrorMessage(error);
+          this.householdError = this.getHouseholdErrorMessage(error);
           this.changeDetector.markForCheck();
         },
       });
@@ -756,10 +744,20 @@ export class ProfilePageComponent implements OnInit {
           this.changeDetector.markForCheck();
         },
         error: (error) => {
-          this.householdError = this.getErrorMessage(error);
+          this.householdError = this.getHouseholdErrorMessage(error);
           this.changeDetector.markForCheck();
         },
       });
+  }
+
+  private getHouseholdErrorMessage(error: unknown): string {
+    return error instanceof HttpErrorResponse && error.error?.code === 'HOUSEHOLD_MEMBER_LIMIT'
+      ? this.householdLimitMessage()
+      : this.getErrorMessage(error);
+  }
+
+  private householdLimitMessage(): string {
+    return 'El hogar alcanzó el cupo de personas de su plan. Plus Hogar incluye hasta 5 personas.';
   }
 
   revokeHouseholdInvite(invite: HouseholdInvite): void {

@@ -18,11 +18,15 @@ test('verifies frontend, backend, and login from one public base URL', async () 
     if (url.endsWith('/healthz')) {
       return response({ status: 'ok', service: 'despensalista-frontend' });
     }
+    if (url.endsWith('/api/feedback/status')) {
+      return new Response(null, { status: 401 });
+    }
     return response('<html><app-root></app-root><script src="main-ABC.js"></script></html>');
   };
 
   await verifyDeployment({
     baseUrl: 'https://despensalista.example/',
+    verifyFeedback: true,
     fetchImpl,
   });
 
@@ -30,7 +34,30 @@ test('verifies frontend, backend, and login from one public base URL', async () 
     'https://despensalista.example/healthz',
     'https://despensalista.example/api/healthz',
     'https://despensalista.example/login/',
+    'https://despensalista.example/api/feedback/status',
   ]);
+});
+
+test('fails when the protected feedback endpoint is absent or anonymously accessible', async () => {
+  const { verifyDeployment } = await loadSmokeModule();
+  for (const status of [200, 404]) {
+    const fetchImpl = async (url) => {
+      if (url.endsWith('/api/healthz')) {
+        return response({ status: 'ok', service: 'despensalista-backend' });
+      }
+      if (url.endsWith('/healthz')) {
+        return response({ status: 'ok', service: 'despensalista-frontend' });
+      }
+      if (url.endsWith('/api/feedback/status')) {
+        return new Response(null, { status });
+      }
+      return response('<app-root></app-root><script src="main-ABC.js"></script>');
+    };
+    await assert.rejects(
+      verifyDeployment({ baseUrl: 'https://despensalista.example', verifyFeedback: true, fetchImpl }),
+      /feedback status.*expected 401/i,
+    );
+  }
 });
 
 test('fails when a key user-facing endpoint is unhealthy', async () => {

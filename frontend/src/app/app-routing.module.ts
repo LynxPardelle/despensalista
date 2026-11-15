@@ -80,6 +80,16 @@ const routes: Routes = [
     },
   },
   {
+    path: 'feedback',
+    title: 'Enviar un reporte | DespensaLista',
+    loadComponent: () =>
+      import('./features/feedback/feedback-page.component').then(
+        (module) => module.FeedbackPageComponent,
+      ),
+    canActivate: [AuthGuard],
+    data: { authMode: 'authenticated' },
+  },
+  {
     path: '',
     pathMatch: 'full',
     redirectTo: 'pantry',

@@ -22,7 +22,10 @@ export class GetPantryOverviewUseCase {
     private readonly userPreferencesDao: UserPreferencesDao,
   ) {}
 
-  async execute(userId: string): Promise<PantryOverview> {
+  async execute(
+    userId: string,
+    referenceDate = new Date(),
+  ): Promise<PantryOverview> {
     const normalizedUserId = UserId.fromString(userId);
     const [productTypes, inventoryLots, preferences] = await Promise.all([
       this.productTypeRepository.findByUserId(normalizedUserId),
@@ -34,7 +37,7 @@ export class GetPantryOverviewUseCase {
       userId,
       productTypes,
       inventoryLots,
-      new Date(),
+      referenceDate,
       preferences.toPrimitives(),
     );
   }

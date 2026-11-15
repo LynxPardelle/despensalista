@@ -12,6 +12,8 @@ describe('server auth route protection', () => {
     expect(isProtectedAppRoute('/pantry/archive')).toBeTrue();
     expect(isProtectedAppRoute('/profile')).toBeTrue();
     expect(isProtectedAppRoute('/profile/preferences')).toBeTrue();
+    expect(isProtectedAppRoute('/feedback')).toBeTrue();
+    expect(isProtectedAppRoute('/feedback-assets')).toBeFalse();
     expect(isProtectedAppRoute('/pantry-assets/app.css')).toBeFalse();
     expect(isProtectedAppRoute('/login')).toBeFalse();
   });

@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 const MANIFEST_NAME = 'release-manifest.json';
 const PAYLOAD_DIRECTORY = 'payload';
 const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/i;
-const BACKEND_DATA_CONTRACT_VERSION = 1;
+const BACKEND_DATA_CONTRACT_VERSION = 2;
 
 const DEPLOY_ALLOWLIST = [
   ['backend/lambda.zip', 'backend/lambda.zip'],

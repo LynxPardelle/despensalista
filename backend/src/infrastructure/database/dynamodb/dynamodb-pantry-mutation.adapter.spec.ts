@@ -342,7 +342,7 @@ describe('DynamoDbPantryMutationAdapter', () => {
     });
   });
 
-  it('rebuilds quota authoritatively before aborting a failed normal reset', async () => {
+  it('rebuilds quota and retains purchase totals on an aborted normal reset', async () => {
     const dynamo = makeDynamo();
     dynamo.send.mockImplementation(async (command) => {
       if (command instanceof GetCommand) {
@@ -354,6 +354,8 @@ describe('DynamoDbPantryMutationAdapter', () => {
             deletionToken: 'owner-token',
             deletionStartedAt: new Date().toISOString(),
             retainFence: false,
+            'purchaseAmount_2026-11': 2500,
+            'purchasePriced_2026-11': 1,
           }),
         };
       }
@@ -379,6 +381,8 @@ describe('DynamoDbPantryMutationAdapter', () => {
       deleting: false,
       activeInventoryLots: 0,
       activeProductTypes: 0,
+      'purchaseAmount_2026-11': 2500,
+      'purchasePriced_2026-11': 1,
     });
     expect(release.input.ConditionExpression).toContain(
       'deletionToken = :deletionToken',
@@ -823,6 +827,7 @@ describe('DynamoDbPantryMutationAdapter', () => {
           },
         ],
       }),
+      3,
     );
 
     const typeCommand = dynamo.send.mock.calls[1][0] as TransactWriteCommand;
@@ -837,6 +842,7 @@ describe('DynamoDbPantryMutationAdapter', () => {
         '#counter < :maximum AND deleting = :deleting',
       ),
       ExpressionAttributeNames: { '#counter': 'savedShoppingLists' },
+      ExpressionAttributeValues: expect.objectContaining({ ':maximum': 3 }),
     });
   });
 

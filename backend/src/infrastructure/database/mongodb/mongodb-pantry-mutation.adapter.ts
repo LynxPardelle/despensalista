@@ -5,6 +5,14 @@ import { randomUUID } from 'node:crypto';
 import { getArchivedRecordRetentionExpiresAt } from '../../../application/policies/retention-policy';
 import { Connection, ClientSession, Model } from 'mongoose';
 import {
+  purchaseSpendFields,
+  purchaseSpendIncrements,
+  readMonthlyPurchaseSpend,
+  retainedPurchaseSpendFields,
+  type MonthlyPurchaseSpend,
+  type MonthlyPurchaseSpendReader,
+} from '../../../application/ports/monthly-purchase-spend-reader';
+import {
   CloseShoppingPurchaseMutation,
   ConsumeInventoryLotMutation,
   IdempotencyPayloadConflictError,
@@ -17,6 +25,7 @@ import {
   PantryOperationLookup,
   PantryOperationReceipt,
   PantryQuotaExceededError,
+  SavedShoppingListLimitError,
 } from '../../../application/ports/pantry-mutation.port';
 import {
   MAX_ACTIVE_INVENTORY_LOTS_PER_USER,
@@ -79,7 +88,7 @@ const PANTRY_DELETION_TAKEOVER_MS = 60_000;
 
 @Injectable()
 export class MongoPantryMutationAdapter
-  implements PantryMutationPort, OnModuleInit
+  implements PantryMutationPort, MonthlyPurchaseSpendReader, OnModuleInit
 {
   constructor(
     @InjectConnection() private readonly connection: Connection,
@@ -201,6 +210,24 @@ export class MongoPantryMutationAdapter
     );
   }
 
+  async getMonthlyPurchaseSpend(
+    ownerUserId: string,
+    month: string,
+  ): Promise<MonthlyPurchaseSpend> {
+    const fields = purchaseSpendFields(month);
+    const row = await this.quotas.findOne(
+      { _id: ownerUserId },
+      {
+        projection: {
+          [fields.amountMinor]: 1,
+          [fields.pricedItemCount]: 1,
+          [fields.unpricedItemCount]: 1,
+        },
+      },
+    );
+    return readMonthlyPurchaseSpend(row && { ...row }, month);
+  }
+
   async checkout(
     mutation: CloseShoppingPurchaseMutation,
   ): Promise<IdempotentMutationResult<InventoryLotPrimitives[]>> {
@@ -257,6 +284,7 @@ export class MongoPantryMutationAdapter
           mutation.receipt.ownerUserId,
           mutation.lots.map((lot) => lot.productTypeId.toString()),
           mutation.receipt.createdAt,
+          mutation.purchaseSpend,
         );
         const quotaResult = await this.quotas.updateOne(
           quotaUpdate.filter,
@@ -430,7 +458,10 @@ export class MongoPantryMutationAdapter
     });
   }
 
-  async createShoppingList(list: ShoppingList): Promise<ShoppingList> {
+  async createShoppingList(
+    list: ShoppingList,
+    savedListLimit: number,
+  ): Promise<ShoppingList> {
     const quotaEpoch = await this.ensureQuota(list.ownerUserId);
     return this.runAtomicMutation(
       list.ownerUserId,
@@ -442,7 +473,7 @@ export class MongoPantryMutationAdapter
         await this.incrementMongoSimpleQuota(
           list.ownerUserId,
           'savedShoppingLists',
-          MAX_SAVED_SHOPPING_LISTS_PER_USER,
+          Math.min(savedListLimit, MAX_SAVED_SHOPPING_LISTS_PER_USER),
           list.toPrimitives().updatedAt,
           session,
         );
@@ -882,6 +913,7 @@ export class MongoPantryMutationAdapter
       },
       {
         ...quota,
+        ...retainedPurchaseSpendFields({ ...fence }),
         mutationEpoch: fence.mutationEpoch,
       },
     );
@@ -1214,6 +1246,8 @@ export class MongoPantryMutationAdapter
       { session },
     );
     if (result.modifiedCount !== 1) {
+      if (counter === 'savedShoppingLists')
+        throw new SavedShoppingListLimitError();
       throw new PantryQuotaExceededError(`${counter} quota exceeded`);
     }
   }
@@ -1555,6 +1589,7 @@ function checkoutQuotaUpdate(
   ownerUserId: string,
   productTypeIds: string[],
   now: Date,
+  purchaseSpend?: MonthlyPurchaseSpend,
 ): {
   filter: Record<string, unknown>;
   update: Record<string, unknown>;
@@ -1575,6 +1610,7 @@ function checkoutQuotaUpdate(
   }));
   const increments: Record<string, number> = {
     activeInventoryLots: productTypeIds.length,
+    ...(purchaseSpend && purchaseSpendIncrements(purchaseSpend)),
   };
   Object.entries(counts).forEach(([id, count]) => {
     increments[`lotsByProductType.${id}`] = count;

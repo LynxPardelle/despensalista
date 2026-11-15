@@ -229,6 +229,11 @@ test('durably drains the old production Lambda before an all-at-once schema cuto
   assert.match(prod, /OutputKey=='PantryQuotaSchemaVersion'/);
   assert.match(prod, /test "\$quota_schema_version" = "2"/);
   assert.match(prod, /test "\$live_version" = "\$published_version"/);
+  assert.match(quotaStep, /live_data_contract_version=.+?backendDataContractVersion/);
+  assert.match(
+    quotaStep,
+    /test "\$quota_schema_version" = "2" &&\s*\{ test "\$live_version" = "\$published_version" \|\|\s*test "\$live_data_contract_version" -ge 1; \}; then\s*exit 0/,
+  );
   assert.equal(
     (
       prod.match(
