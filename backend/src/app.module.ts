@@ -152,6 +152,9 @@ import { AuthStepUpService } from './infrastructure/http/auth/auth-step-up.servi
 import { AccessTokenGuard } from './infrastructure/http/auth/access-token.guard';
 import { StripeBillingConfig } from './infrastructure/billing/stripe-billing-config';
 import { StripeBillingService } from './infrastructure/billing/stripe-billing.service';
+import { CfdiMail } from './infrastructure/billing/cfdi/cfdi-mail';
+import { CfdiService } from './infrastructure/billing/cfdi/cfdi.service';
+import { CfdiRequestStore } from './infrastructure/billing/cfdi/cfdi-request.store';
 import { StripeBillingStore } from './infrastructure/billing/stripe-billing.store';
 import { RenewalNoticeDispatcher } from './infrastructure/billing/renewals/renewal-notice.dispatcher';
 import { RenewalNoticeStore } from './infrastructure/billing/renewals/renewal-notice.store';
@@ -168,6 +171,7 @@ import { MONTHLY_PURCHASE_SPEND_READER } from './application/ports/monthly-purch
 import { GetPlusHouseholdSummaryUseCase } from './application/use-cases/get-plus-household-summary.use-case';
 import { PlusHouseholdSummaryController } from './infrastructure/http/controllers/plus-household-summary.controller';
 import { StripeBillingController } from './infrastructure/http/controllers/stripe-billing.controller';
+import { CfdiController } from './infrastructure/http/controllers/cfdi.controller';
 import { GoogleMfaService } from './infrastructure/http/auth/google-mfa.service';
 import { GoogleMfaController } from './infrastructure/http/controllers/google-mfa.controller';
 import { AuthController } from './infrastructure/http/controllers/auth.controller';
@@ -467,6 +471,10 @@ const wasteEventRepositoryProvider = useDynamoDb
           .optional(),
         GOOGLE_MFA_PROOF_VERSION: Joi.string().valid('2').optional(),
         FEEDBACK_TABLE: Joi.string().optional(),
+        CFDI_REQUEST_MODE: Joi.string().valid('ses').optional(),
+        CFDI_REQUEST_STAGE: Joi.string().valid('dev', 'prod').optional(),
+        CFDI_REQUEST_FROM: Joi.string().email().optional(),
+        CFDI_REQUEST_RECIPIENT: Joi.string().email().optional(),
         STRIPE_BILLING_ORIGIN: Joi.string()
           .uri({ scheme: ['https'] })
           .optional(),
@@ -499,6 +507,7 @@ const wasteEventRepositoryProvider = useDynamoDb
     AuthController,
     GoogleMfaController,
     StripeBillingController,
+    CfdiController,
     PlusHouseholdSummaryController,
     HouseholdController,
     ProductsController,
@@ -519,6 +528,9 @@ const wasteEventRepositoryProvider = useDynamoDb
     GoogleMfaService,
     StripeBillingConfig,
     StripeBillingService,
+    CfdiService,
+    CfdiRequestStore,
+    CfdiMail,
     StripeBillingStore,
     RenewalNoticeStore,
     RenewalNoticeDispatcher,

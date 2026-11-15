@@ -73,6 +73,8 @@ jobs:
       STRIPE_BILLING_BOUNDARY_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING_BOUNDARY || 'false' }}
       STRIPE_BILLING_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING || 'false' }}
       STRIPE_BILLING_CHECKOUT_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING_CHECKOUT || 'false' }}
+      STRIPE_BILLING_VAT_RATE_ID: ${{ vars.STRIPE_BILLING_VAT_RATE_ID }}
+      CFDI_REQUEST_RECIPIENT: ${{ secrets.CFDI_REQUEST_RECIPIENT }}
       STRIPE_BILLING_PUBLIC_CHECKOUT: ${{ vars.ENABLE_PUBLIC_PLUS_CHECKOUT || 'false' }}
       STRIPE_BILLING_PILOT_HOUSEHOLD_ID: ${{ vars.PLUS_PILOT_HOUSEHOLD_ID }}
       STRIPE_BILLING_EXTERNAL_BOUNDARY: ${{ vars.STRIPE_BILLING_BOUNDARY_EXTERNALLY_MANAGED || 'false' }}
@@ -138,6 +140,8 @@ jobs:
           fi
           if [[ "$STRIPE_BILLING_CHECKOUT_ENABLED" == true ]]; then
             test "$STRIPE_BILLING_ENABLED" = true
+            [[ "$STRIPE_BILLING_VAT_RATE_ID" =~ ^txr_[A-Za-z0-9]+$ ]]
+            test -n "$CFDI_REQUEST_RECIPIENT"
           fi
           if [[ "$STRIPE_BILLING_CHECKOUT_ENABLED" == true ]]; then
             [[ "$STRIPE_BILLING_PUBLIC_CHECKOUT" =~ ^(true|false)$ ]]
@@ -331,6 +335,8 @@ jobs:
             --context externalStripeBillingBoundary="$STRIPE_BILLING_EXTERNAL_BOUNDARY" \
             --context enableStripeBilling="$STRIPE_BILLING_ENABLED" \
             --context enableStripeBillingCheckout="$STRIPE_BILLING_CHECKOUT_ENABLED" \
+            --context stripeBillingVatRateId="$STRIPE_BILLING_VAT_RATE_ID" \
+            --context cfdiRequestRecipient="$CFDI_REQUEST_RECIPIENT" \
             --context enablePublicStripeBillingCheckout="$STRIPE_BILLING_PUBLIC_CHECKOUT" \
             --context stripeBillingPilotHouseholdId="$STRIPE_BILLING_PILOT_HOUSEHOLD_ID" \
             --context renewalNoticeMode="$PLUS_RENEWAL_NOTICE_MODE" \

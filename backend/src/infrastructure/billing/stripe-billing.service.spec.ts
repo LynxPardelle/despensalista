@@ -37,9 +37,20 @@ describe('StripeBillingService', () => {
     table: 'despensalista-prod-billing',
     accountId: 'acct_despensa',
     productId: 'prod_despensa',
+    vatRateId: 'txr_liveiva',
     portalConfigurationId: 'bpc_despensa',
     checkoutEnabled: false,
   };
+  const mexicanVat = {
+    id: 'txr_testiva',
+    object: 'tax_rate',
+    active: true,
+    country: 'MX',
+    tax_type: 'vat',
+    inclusive: false,
+    percentage: 16,
+    livemode: false,
+  } as Stripe.Response<Stripe.TaxRate>;
   const session = {
     id: 'cs_test_thissession',
     customer: 'cus_test',
@@ -128,6 +139,7 @@ describe('StripeBillingService', () => {
         usage_type: 'licensed',
       },
     } as Stripe.Response<Stripe.Price>);
+    jest.spyOn(stripe.taxRates, 'retrieve').mockResolvedValue(mexicanVat);
     jest.spyOn(stripe.customers, 'create').mockResolvedValue({
       id: 'cus_test',
       livemode: false,
@@ -182,6 +194,7 @@ describe('StripeBillingService', () => {
       collection_method: 'charge_automatically',
       cancel_at_period_end: false,
       cancel_at: null as number | null,
+      default_tax_rates: [] as Stripe.TaxRate[],
       items: {
         has_more: false,
         data: [
@@ -265,6 +278,13 @@ describe('StripeBillingService', () => {
       amountMinor: 5900,
       currency: 'mxn',
     });
+    subscription.default_tax_rates = [mexicanVat];
+    await expect(
+      service.getUpcomingRenewal('household-1'),
+    ).resolves.toMatchObject({
+      amountMinor: 6844,
+    });
+    subscription.default_tax_rates = [];
 
     const previous = {
       householdId: 'household-1',
@@ -397,7 +417,7 @@ describe('StripeBillingService', () => {
       canCheckout: false,
     });
     await expect(
-      service.checkout('owner-1', production.origin, true, '2026-11-15'),
+      service.checkout('owner-1', production.origin, true, '2026-11-15-iva'),
     ).rejects.toMatchObject({ status: 403 });
     expect(permissions).not.toHaveBeenCalled();
     expect(beginCheckout).not.toHaveBeenCalled();
@@ -436,7 +456,16 @@ describe('StripeBillingService', () => {
       id: 'cs_live_valid',
       customer: 'cus_live',
       livemode: true,
+      currency: 'mxn',
+      amount_subtotal: 5900,
+      amount_total: 6844,
+      total_details: { amount_tax: 944 },
     };
+    jest.mocked(stripe.taxRates.retrieve).mockResolvedValue({
+      ...mexicanVat,
+      id: production.vatRateId,
+      livemode: true,
+    });
     const price = await stripe.prices.retrieve(billing.priceId);
     jest.mocked(stripe.prices.retrieve).mockResolvedValue({
       ...price,
@@ -472,23 +501,27 @@ describe('StripeBillingService', () => {
 
     await expect(service.status('owner-1')).resolves.toMatchObject({
       canCheckout: true,
-      termsVersion: '2026-11-15',
+      termsVersion: '2026-11-15-iva',
+      plan: { amountMinor: 6844, subtotalMinor: 5900, taxMinor: 944 },
     });
     await expect(
-      service.checkout('owner-1', production.origin, true, '2026-11-14'),
+      service.checkout('owner-1', production.origin, true, '2026-11-15'),
     ).rejects.toMatchObject({ status: 400 });
     const invoke = () =>
-      service.checkout('owner-1', production.origin, true, '2026-11-15');
+      service.checkout('owner-1', production.origin, true, '2026-11-15-iva');
     const first = await invoke();
     await expect(invoke()).resolves.toEqual(first);
     expect(saveRecord).toHaveBeenCalledTimes(2);
     expect(saveRecord.mock.calls[0]).toEqual([
       expect.objectContaining({
-        checkout: expect.objectContaining({ termsVersion: '2026-11-15' }),
+        checkout: expect.objectContaining({
+          termsVersion: '2026-11-15-iva',
+          vatRateId: production.vatRateId,
+        }),
       }),
       production.table,
       {
-        termsVersion: '2026-11-15',
+        termsVersion: '2026-11-15-iva',
         acceptedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T.*Z$/),
       },
     ]);
@@ -497,6 +530,26 @@ describe('StripeBillingService', () => {
     );
     expect(saveRecord.mock.calls[1]).toHaveLength(2);
     expect(stripe.checkout.sessions.create).toHaveBeenCalledTimes(1);
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subscription_data: {
+          metadata,
+          default_tax_rates: [production.vatRateId],
+        },
+        adaptive_pricing: { enabled: false },
+      }),
+      { idempotencyKey: expect.any(String) },
+    );
+
+    jest.mocked(stripe.checkout.sessions.retrieve).mockResolvedValueOnce({
+      ...liveSession,
+      amount_total: 5900,
+      metadata: {
+        ...metadata,
+        despensalistaCheckoutToken: record?.checkout?.token,
+      },
+    } as unknown as Stripe.Response<Stripe.Checkout.Session>);
+    await expect(invoke()).rejects.toMatchObject({ status: 503 });
 
     if (!record?.checkout) throw new Error('Expected a saved Checkout attempt');
     delete record.checkout.termsVersion;
@@ -505,6 +558,39 @@ describe('StripeBillingService', () => {
     });
     await expect(invoke()).rejects.toMatchObject({ status: 409 });
     expect(stripe.checkout.sessions.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects live Checkout without verified VAT while leaving the offer view available', async () => {
+    const price = await stripe.prices.retrieve(billing.priceId);
+    jest.mocked(stripe.prices.retrieve).mockResolvedValue({
+      ...price,
+      livemode: true,
+      product: production.productId,
+    });
+    jest.spyOn(stripe.products, 'retrieve').mockResolvedValue({
+      id: production.productId,
+      active: true,
+      livemode: true,
+      metadata: { integration: 'despensalista', stage: 'prod' },
+    } as unknown as Stripe.Response<Stripe.Product>);
+
+    for (const vatRateId of [undefined, production.vatRateId]) {
+      settings.mockResolvedValue({
+        ...production,
+        checkoutEnabled: true,
+        vatRateId,
+      });
+      await expect(service.status('owner-1')).resolves.toMatchObject({
+        available: true,
+        canCheckout: false,
+        plan: { amountMinor: 6844, subtotalMinor: 5900, taxMinor: 944 },
+      });
+      await expect(
+        service.checkout('owner-1', production.origin, true, '2026-11-15-iva'),
+      ).rejects.toMatchObject({ status: 503 });
+    }
+    expect(beginCheckout).not.toHaveBeenCalled();
+    expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
   });
 
   it('does not start billing changes while the household checkout is locked', async () => {
@@ -708,6 +794,7 @@ describe('StripeBillingService', () => {
     await expect(service.status('owner-1')).resolves.toMatchObject({
       canCheckout: false,
       nextRenewalAt: new Date(currentPeriodEnd * 1000).toISOString(),
+      nextRenewalAmountMinor: 5900,
     });
   });
 
@@ -725,10 +812,38 @@ describe('StripeBillingService', () => {
         currency: 'mxn',
         interval: 'month',
         amountMinor: 5900,
+        subtotalMinor: 5900,
+        taxMinor: 0,
       },
     });
     expect(permissions).not.toHaveBeenCalled();
     expect(stripe.customers.create).not.toHaveBeenCalled();
+  });
+
+  it('does not reuse a Sandbox Checkout with a different VAT rate', async () => {
+    await service.checkout('owner-1', billing.origin);
+    membership.mockResolvedValue({ householdId: 'household-1', role: 'owner' });
+    settings.mockResolvedValue({ ...billing, vatRateId: 'txr_testiva' });
+    jest.spyOn(stripe.taxRates, 'retrieve').mockResolvedValue({
+      id: 'txr_testiva',
+      active: true,
+      country: 'MX',
+      tax_type: 'vat',
+      inclusive: false,
+      percentage: 16,
+      livemode: false,
+    } as Stripe.Response<Stripe.TaxRate>);
+
+    await expect(service.status('owner-1')).resolves.toMatchObject({
+      canCheckout: false,
+      plan: { amountMinor: 6844, subtotalMinor: 5900, taxMinor: 944 },
+    });
+    await expect(
+      service.checkout('owner-1', billing.origin),
+    ).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledTimes(1);
   });
 
   it('rejects other origins and household members before billing calls', async () => {

@@ -12,7 +12,7 @@ import { RouterLink } from '@angular/router';
       <article class="legal-document">
         <p class="eyebrow">Despensa Lista</p>
         <h1 id="privacy-title">Politica de privacidad</h1>
-        <p class="updated">Última actualización: 14 de noviembre de 2026</p>
+        <p class="updated">Última actualización: 15 de noviembre de 2026</p>
 
         <p>
           Despensa Lista ayuda a organizar productos del hogar, lotes,
@@ -65,6 +65,22 @@ import { RouterLink } from '@angular/router';
           Conservamos los registros de facturación necesarios para atender la suscripción,
           conciliar pagos y cumplir las obligaciones aplicables.
           <a routerLink="/terminos-plus-hogar">Consulta las condiciones de Plus Hogar.</a>
+        </p>
+        <p>
+          Si solicitas un CFDI, el equipo de facturación de ZooBeriah Systems recibe tu RFC,
+          nombre o razón social, código postal fiscal, régimen fiscal, uso del CFDI y correo de
+          entrega si lo proporcionas. Recibe también la referencia y los datos del pago para
+          comprobar el cobro y emitir tu factura.
+        </p>
+        <p>
+          Para solicitar tu factura por correo o consultar una solicitud, escribe a
+          <a href="mailto:facturas@despensalista.com">facturas@despensalista.com</a>.
+        </p>
+        <p>
+          La app guarda el folio y el estado de la solicitud. Retira los datos fiscales temporales
+          cuando el servicio de correo acepta el envío. Si la entrega queda pendiente o por confirmar,
+          se programa su eliminación siete días después del intento. El equipo de facturación conserva la documentación
+          necesaria para gestionar la solicitud y cumplir sus obligaciones fiscales.
         </p>
 
         <h2>Como usamos los datos</h2>

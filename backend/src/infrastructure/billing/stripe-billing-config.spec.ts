@@ -140,7 +140,11 @@ describe('StripeBillingConfig environments', () => {
 
   it('requires a valid pilot or explicit public approval for live purchases', async () => {
     settings(live);
-    const enabled = { ...liveEnv, STRIPE_BILLING_CHECKOUT_ENABLED: 'true' };
+    const enabled = {
+      ...liveEnv,
+      STRIPE_BILLING_CHECKOUT_ENABLED: 'true',
+      STRIPE_BILLING_VAT_RATE_ID: 'txr_livevat',
+    };
     const pilotHouseholdId = '37bfb36a-0c8c-4383-a96d-168f82991446';
     const publicEnv = {
       ...enabled,
@@ -157,7 +161,11 @@ describe('StripeBillingConfig environments', () => {
         ...enabled,
         STRIPE_BILLING_PILOT_HOUSEHOLD_ID: pilotHouseholdId,
       }).get(),
-    ).resolves.toMatchObject({ checkoutEnabled: true, pilotHouseholdId });
+    ).resolves.toMatchObject({
+      checkoutEnabled: true,
+      pilotHouseholdId,
+      vatRateId: 'txr_livevat',
+    });
     await expect(
       loader({ ...enabled, STRIPE_BILLING_PUBLIC_CHECKOUT: 'true' }).get(),
     ).resolves.toMatchObject({ checkoutEnabled: false });
@@ -182,5 +190,23 @@ describe('StripeBillingConfig environments', () => {
       checkoutEnabled: false,
       webhookSigningSecret: live.webhookSigningSecret,
     });
+  });
+
+  it('leaves live billing available but keeps Checkout closed without a VAT rate ID', async () => {
+    settings(live);
+    const enabled = {
+      ...liveEnv,
+      STRIPE_BILLING_CHECKOUT_ENABLED: 'true',
+      STRIPE_BILLING_PILOT_HOUSEHOLD_ID: '37bfb36a-0c8c-4383-a96d-168f82991446',
+    };
+
+    for (const vatRateId of ['', 'not-a-tax-rate']) {
+      await expect(
+        loader({ ...enabled, STRIPE_BILLING_VAT_RATE_ID: vatRateId }).get(),
+      ).resolves.toMatchObject({
+        checkoutEnabled: false,
+        portalConfigurationId: live.portalConfigurationId,
+      });
+    }
   });
 });
