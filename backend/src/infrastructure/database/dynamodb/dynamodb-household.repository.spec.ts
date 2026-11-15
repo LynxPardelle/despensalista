@@ -15,6 +15,7 @@ import {
 } from '../../../domain/entities/household.entity';
 import { DynamoDbDocumentClientService } from './dynamodb-document-client.service';
 import { DynamoDbHouseholdRepository } from './dynamodb-household.repository';
+import { HouseholdMemberLimitError } from '../../../domain/repositories/household.repository';
 
 describe('DynamoDbHouseholdRepository', () => {
   it('claims one household per user and creates the owner atomically', async () => {
@@ -62,7 +63,10 @@ describe('DynamoDbHouseholdRepository', () => {
   });
 
   it('accepts a live invite and claims membership in a single transaction', async () => {
-    const send = jest.fn().mockResolvedValue({});
+    const send = jest
+      .fn()
+      .mockResolvedValueOnce({ Item: { memberUserIds: new Set(['owner']) } })
+      .mockResolvedValue({});
     const repository = new DynamoDbHouseholdRepository(
       { send } as unknown as DynamoDbDocumentClientService,
       makeConfigService(),
@@ -80,13 +84,13 @@ describe('DynamoDbHouseholdRepository', () => {
       expiresAt: new Date(now.getTime() + 60000),
     });
     invite.accept(now);
-    await repository.acceptInvite(invite, testMember());
-    const transaction = send.mock.calls[0][0] as TransactWriteCommand;
+    await repository.acceptInvite(invite, testMember(), 5);
+    const transaction = send.mock.calls[1][0] as TransactWriteCommand;
     expect(transaction).toBeInstanceOf(TransactWriteCommand);
     expect(
       transaction.input.TransactItems?.find(
-        (item) => item.ConditionCheck?.Key?.pk === 'HOUSEHOLD#household-1',
-      )?.ConditionCheck?.ConditionExpression,
+        (item) => item.Update?.Key?.pk === 'HOUSEHOLD#household-1',
+      )?.Update?.ConditionExpression,
     ).toContain('attribute_not_exists(deleting)');
     expect(transaction.input.TransactItems).toEqual(
       expect.arrayContaining([
@@ -117,6 +121,146 @@ describe('DynamoDbHouseholdRepository', () => {
         }),
       ]),
     );
+  });
+
+  it('fences last-seat races in the same write as acceptance and membership', async () => {
+    const send = jest
+      .fn()
+      .mockResolvedValue({ Item: { memberUserIds: new Set(['owner']) } });
+    const repository = new DynamoDbHouseholdRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      makeConfigService(),
+    );
+    const now = new Date();
+    const invite = HouseholdInvite.create({
+      householdId: 'household-1',
+      invitedEmail: 'user@example.com',
+      invitedByUserId: 'owner',
+      role: 'editor',
+      tokenHash: 'b'.repeat(64),
+      createdAt: now,
+      expiresAt: new Date(now.getTime() + 60_000),
+    });
+    invite.accept(now);
+
+    await repository.acceptInvite(invite, testMember(), 2);
+
+    const transaction = send.mock.calls
+      .map(([command]) => command as unknown)
+      .find(
+        (command): command is TransactWriteCommand =>
+          command instanceof TransactWriteCommand,
+      );
+    expect(transaction?.input.TransactItems).toContainEqual({
+      Update: expect.objectContaining({
+        Key: { pk: 'HOUSEHOLD#household-1' },
+        UpdateExpression: 'ADD memberUserIds :joiningUsers',
+        ConditionExpression: expect.stringContaining(
+          'size(memberUserIds) < :memberLimit',
+        ),
+        ExpressionAttributeValues: expect.objectContaining({
+          ':memberLimit': 2,
+          ':joiningUsers': new Set(['user-1']),
+        }),
+      }),
+    });
+  });
+
+  it('counts existing members from every base-table page before enforcing a legacy household limit', async () => {
+    const memberUserIds = new Set(['owner', 'another-member', 'third-member']);
+    let migrated = false;
+    const send = jest.fn(async (command: unknown) => {
+      if (command instanceof GetCommand) {
+        expect(command.input.ConsistentRead).toBe(true);
+        return {
+          Item: { ownerUserId: 'owner', ...(migrated && { memberUserIds }) },
+        };
+      }
+      if (command instanceof ScanCommand) {
+        expect(command.input.ConsistentRead).toBe(true);
+        if (command.input.ExclusiveStartKey)
+          return { Items: [{ userId: 'third-member' }] };
+        return {
+          Items: [{ userId: 'owner' }, { userId: 'another-member' }],
+          LastEvaluatedKey: { pk: 'next' },
+        };
+      }
+      if (command instanceof UpdateCommand) {
+        expect(command.input.ConditionExpression).toContain(
+          'attribute_not_exists(memberUserIds)',
+        );
+        expect(command.input.ExpressionAttributeValues).toEqual({
+          ':members': memberUserIds,
+        });
+        migrated = true;
+        return {};
+      }
+      if (command instanceof TransactWriteCommand) {
+        expect(migrated).toBe(true);
+        throw Object.assign(new Error('Seat limit'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+          ],
+        });
+      }
+      throw new Error('Unexpected command');
+    });
+    const repository = new DynamoDbHouseholdRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      makeConfigService(),
+    );
+    const now = new Date();
+    const invite = HouseholdInvite.create({
+      householdId: 'household-1',
+      invitedEmail: 'user@example.com',
+      invitedByUserId: 'owner',
+      role: 'editor',
+      tokenHash: 'b'.repeat(64),
+      createdAt: now,
+      expiresAt: new Date(now.getTime() + 60_000),
+    });
+    invite.accept(now);
+
+    await expect(
+      repository.acceptInvite(invite, testMember(), 2),
+    ).rejects.toBeInstanceOf(HouseholdMemberLimitError);
+    expect(
+      send.mock.calls.filter(([command]) => command instanceof ScanCommand),
+    ).toHaveLength(2);
+  });
+
+  it('releases a seat atomically with the corresponding member removal', async () => {
+    const send = jest
+      .fn()
+      .mockResolvedValueOnce({
+        Item: { memberUserIds: new Set(['owner', 'user-1']) },
+      })
+      .mockResolvedValue({});
+    const repository = new DynamoDbHouseholdRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      makeConfigService(),
+    );
+
+    await repository.deleteMembership('household-1', 'user-1');
+
+    const transaction = send.mock.calls[1][0] as TransactWriteCommand;
+    expect(transaction.input.TransactItems).toEqual([
+      {
+        Delete: expect.objectContaining({
+          Key: { pk: 'HOUSEHOLD_MEMBER_BY_USER#user-1' },
+        }),
+      },
+      {
+        Update: expect.objectContaining({
+          Key: { pk: 'HOUSEHOLD#household-1' },
+          UpdateExpression: 'DELETE memberUserIds :leavingUsers',
+          ExpressionAttributeValues: { ':leavingUsers': new Set(['user-1']) },
+        }),
+      },
+    ]);
   });
 
   it('checks every user referenced by an activity in the same transaction', async () => {
@@ -507,6 +651,7 @@ describe('DynamoDbHouseholdRepository', () => {
           ],
         };
       }
+      if (command instanceof GetCommand) return {};
       if (command instanceof TransactWriteCommand) {
         transactions.push(command);
         return {};
@@ -523,7 +668,7 @@ describe('DynamoDbHouseholdRepository', () => {
       'user@example.com',
     );
 
-    expect(transactions).toHaveLength(2);
+    expect(transactions).toHaveLength(3);
     expect(JSON.stringify(transactions)).toContain('deleted-user');
     expect(JSON.stringify(transactions)).toContain('Usuario eliminado');
     expect(JSON.stringify(transactions)).toContain(

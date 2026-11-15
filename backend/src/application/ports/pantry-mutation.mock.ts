@@ -42,8 +42,10 @@ export function makePantryMutationMock(
     deleteProductType: jest.fn(async (type) => {
       await repositories.types?.delete(type.id);
     }),
-    createShoppingList: jest.fn(async (list) =>
-      repositories.lists ? repositories.lists.save(list) : list,
+    createShoppingList: jest.fn(
+      async (
+        ...[list]: Parameters<PantryMutationPort['createShoppingList']>
+      ) => (repositories.lists ? repositories.lists.save(list) : list),
     ),
     createProduct: jest.fn((product) => Promise.resolve(product)),
     updateProduct: jest.fn((_expected, product) => Promise.resolve(product)),

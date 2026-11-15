@@ -25,6 +25,11 @@ export interface StripeBillingSettings {
   stripe: Stripe;
 }
 
+type StripeBillingLocation = Pick<
+  StripeBillingSettings,
+  'mode' | 'stage' | 'origin' | 'table' | 'checkoutEnabled'
+>;
+
 @Injectable()
 export class StripeBillingConfig {
   private readonly ssm = new SSMClient({});
@@ -35,7 +40,13 @@ export class StripeBillingConfig {
 
   constructor(private readonly config: ConfigService) {}
 
-  async get(): Promise<StripeBillingSettings | undefined> {
+  getBillingTable(): string | undefined {
+    return this.location()?.base.table;
+  }
+
+  private location():
+    | { base: StripeBillingLocation; parameter: string }
+    | undefined {
     const configuredMode = this.config.get<string>('STRIPE_BILLING_MODE');
     const mode = configuredMode ?? 'test';
     const checkoutFlag = this.config.get<string>(
@@ -74,18 +85,25 @@ export class StripeBillingConfig {
       throw new ServiceUnavailableException('Billing is unavailable');
     }
 
+    return {
+      base: {
+        mode,
+        stage: isProduction ? 'prod' : 'dev',
+        origin,
+        table,
+        checkoutEnabled:
+          checkoutFlag === 'true' || (checkoutFlag === undefined && isDev),
+      },
+      parameter,
+    };
+  }
+
+  async get(): Promise<StripeBillingSettings | undefined> {
+    const location = this.location();
+    if (!location) return undefined;
+
     if (!this.cached || this.cached.expiresAt <= Date.now()) {
-      const settings = this.load(
-        {
-          mode,
-          stage: isProduction ? 'prod' : 'dev',
-          origin,
-          table,
-          checkoutEnabled:
-            checkoutFlag === 'true' || (checkoutFlag === undefined && isDev),
-        },
-        parameter,
-      );
+      const settings = this.load(location.base, location.parameter);
       this.cached = { settings, expiresAt: Date.now() + 60_000 };
     }
     const current = this.cached;
@@ -100,10 +118,7 @@ export class StripeBillingConfig {
   }
 
   private async load(
-    base: Pick<
-      StripeBillingSettings,
-      'mode' | 'stage' | 'origin' | 'table' | 'checkoutEnabled'
-    >,
+    base: StripeBillingLocation,
     parameter: string,
   ): Promise<StripeBillingSettings> {
     const result = await this.ssm.send(

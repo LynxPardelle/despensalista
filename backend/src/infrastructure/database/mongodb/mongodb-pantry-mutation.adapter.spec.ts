@@ -774,7 +774,7 @@ describe('MongoPantryMutationAdapter', () => {
     });
   });
 
-  it('rebuilds quota before aborting a failed normal reset', async () => {
+  it('rebuilds quota and retains purchase totals on an aborted normal reset', async () => {
     const runtimeAdapter = adapter as unknown as {
       beginPantryDeletion: (
         ownerUserId: string,
@@ -787,6 +787,11 @@ describe('MongoPantryMutationAdapter', () => {
     };
     const type = makeProductType('remaining');
     await adapter.createProductType(type);
+    const quotas = connection.collection('pantry_quotas');
+    await quotas.updateOne(
+      { _id: 'user-1' as never },
+      { $set: { 'purchaseAmount_2026-11': 2500, 'purchasePriced_2026-11': 1 } },
+    );
     await runtimeAdapter.beginPantryDeletion('user-1', {
       deletionToken: 'owner-token',
     });
@@ -801,6 +806,12 @@ describe('MongoPantryMutationAdapter', () => {
       deleting: false,
       mutationEpoch: 1,
       activeProductTypes: 1,
+    });
+    await expect(
+      adapter.getMonthlyPurchaseSpend('user-1', '2026-11'),
+    ).resolves.toMatchObject({
+      amountMinor: 2500,
+      pricedItemCount: 1,
     });
     await expect(
       adapter.createProductType(makeProductType('after-abort')),
@@ -872,7 +883,7 @@ describe('MongoPantryMutationAdapter', () => {
       ],
     });
 
-    await adapter.createShoppingList(list);
+    await adapter.createShoppingList(list, 3);
     expect(
       await connection.collection('shoppingLists').findOne({ id: list.id }),
     ).toMatchObject({ ownerUserId: 'user-1' });
@@ -884,6 +895,49 @@ describe('MongoPantryMutationAdapter', () => {
     expect(await connection.collection('shoppingLists').countDocuments()).toBe(
       0,
     );
+  });
+
+  it('preserves lists on downgrade and lets only one writer claim recovered capacity', async () => {
+    const list = (title: string) =>
+      ShoppingList.create({
+        ownerUserId: 'user-1',
+        title,
+        items: [
+          {
+            productTypeId: 'type-1',
+            baseName: 'Leche',
+            quantity: 1,
+            unit: QuantityUnit.PIECE,
+          },
+        ],
+      });
+    const existing = [list('A'), list('B'), list('C'), list('D')];
+    for (const entry of existing) await adapter.createShoppingList(entry, 15);
+
+    const stored = connection.collection('shoppingLists');
+    await expect(
+      adapter.createShoppingList(list('E'), 3),
+    ).rejects.toMatchObject({ name: 'SavedShoppingListLimitError' });
+    expect(await stored.countDocuments()).toBe(4);
+    await adapter.deleteShoppingList(existing[3]);
+    await expect(
+      adapter.createShoppingList(list('E'), 3),
+    ).rejects.toMatchObject({ name: 'SavedShoppingListLimitError' });
+    await adapter.deleteShoppingList(existing[2]);
+
+    const results = await Promise.allSettled(
+      ['E', 'F'].map((title) => adapter.createShoppingList(list(title), 3)),
+    );
+
+    expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(
+      1,
+    );
+    expect(await stored.countDocuments()).toBe(3);
+    expect(
+      await stored.countDocuments({
+        id: { $in: existing.slice(0, 2).map((entry) => entry.id) },
+      }),
+    ).toBe(2);
   });
 
   it('rejects delayed legacy product and public-share writes after a deletion fence', async () => {

@@ -7,6 +7,7 @@ import { WasteEvent } from '../../domain/entities/waste-event.entity';
 import { ShoppingList } from '../../domain/entities/shopping-list.entity';
 import { Product } from '../../domain/entities/product.entity';
 import { ShoppingShare } from '../../domain/entities/shopping-share.entity';
+import { MonthlyPurchaseSpend } from './monthly-purchase-spend-reader';
 
 export type PantryOperation =
   | 'consume_inventory_lot'
@@ -67,6 +68,7 @@ export interface CloseShoppingPurchaseMutation {
   receipt: PantryOperationContext;
   lots: InventoryLot[];
   productTypes: ProductTypeTransactionChange[];
+  purchaseSpend?: MonthlyPurchaseSpend;
 }
 
 export interface PantryDeletionRequest {
@@ -102,7 +104,10 @@ export interface PantryMutationPort {
     expected: ProductType,
     restored: ProductType,
   ): Promise<ProductType>;
-  createShoppingList(list: ShoppingList): Promise<ShoppingList>;
+  createShoppingList(
+    list: ShoppingList,
+    savedListLimit: number,
+  ): Promise<ShoppingList>;
   createProduct(product: Product): Promise<Product>;
   updateProduct(expected: Product, updated: Product): Promise<Product>;
   createShoppingShare(share: ShoppingShare): Promise<ShoppingShare>;
@@ -152,5 +157,12 @@ export class PantryQuotaExceededError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'PantryQuotaExceededError';
+  }
+}
+
+export class SavedShoppingListLimitError extends PantryQuotaExceededError {
+  constructor() {
+    super('El hogar alcanzó el límite de listas guardadas de su plan.');
+    this.name = 'SavedShoppingListLimitError';
   }
 }

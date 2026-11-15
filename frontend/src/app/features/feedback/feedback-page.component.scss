@@ -1,0 +1,59 @@
+.feedback-page {
+  width: min(42rem, calc(100% - 2rem));
+  margin: 2rem auto 4rem;
+}
+
+article {
+  padding: clamp(1.25rem, 4vw, 2rem);
+  border: 1px solid var(--color-border);
+  border-radius: 1rem;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-soft);
+}
+
+h1 {
+  margin: 1rem 0 1.5rem;
+}
+
+form, fieldset {
+  display: grid;
+  gap: .75rem;
+}
+
+fieldset {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+label {
+  font-weight: 600;
+}
+
+textarea {
+  resize: vertical;
+}
+
+#feedback-message-help, .field-error {
+  margin: 0;
+}
+
+#feedback-message-help {
+  color: var(--color-text-muted);
+}
+
+.field-error {
+  color: var(--color-danger-text);
+}
+
+.receipt {
+  padding: .75rem 1rem;
+  border-radius: .75rem;
+  background: var(--color-success-soft);
+  overflow-wrap: anywhere;
+}
+
+button {
+  justify-self: start;
+}

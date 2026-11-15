@@ -602,6 +602,7 @@ export class PantryPageComponent implements OnInit {
   barcodeCaptureSupported = false;
   savedShoppingLists: SavedShoppingList[] = [];
   savedShoppingListStatus: string | null = null;
+  savedShoppingListLimitReached = false;
   wasteOverview: WasteOverview | null = null;
   wasteOverviewLoading = false;
   wasteOverviewError: string | null = null;
@@ -1887,6 +1888,7 @@ export class PantryPageComponent implements OnInit {
     listPayload: SavedShoppingListSnapshotPayload,
     successMessage: string,
   ): void {
+    this.savedShoppingListLimitReached = false;
     this.savedShoppingListStatus = 'Guardando lista...';
     this.pantryService.createSavedShoppingList(listPayload).subscribe({
       next: (list) => {
@@ -1902,6 +1904,18 @@ export class PantryPageComponent implements OnInit {
         this.changeDetector.markForCheck();
       },
       error: (error) => {
+        if (error instanceof HttpErrorResponse && error.status === 409 && error.error?.code === 'SAVED_LIST_LIMIT') {
+          this.savedShoppingListLimitReached = true;
+          this.savedShoppingListStatus = 'Tu hogar alcanzó el límite de listas reutilizables. Consulta tu plan o elimina una lista para guardar otra. Plus Hogar incluye hasta 15 listas.';
+          this.changeDetector.markForCheck();
+          return;
+        }
+        const offline = error instanceof HttpErrorResponse ? error.status === 0 : this.isOffline;
+        if (!offline || this.savedShoppingLists.length >= 3) {
+          this.savedShoppingListStatus = this.getErrorMessage(error);
+          this.changeDetector.markForCheck();
+          return;
+        }
         const now = new Date();
         const localList: SavedShoppingList = {
           id: `local-${now.getTime()}`,

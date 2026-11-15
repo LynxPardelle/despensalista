@@ -786,3 +786,15 @@ export interface ApiPantryExport {
   shoppingLists: ApiSavedShoppingList[];
   limits: PantryDataLimits;
 }
+export interface PlusHouseholdSummary {
+  generatedAt: string;
+  upcomingExpiration: { productTypeId: string; name: string; date: string }[];
+  restock: { productTypeId: string; name: string; quantity: number; unit: string }[];
+  waste: { count: number; estimatedLoss: number };
+  monthlySpend: {
+    month: string;
+    amountMinor: number;
+    pricedItemCount: number;
+    unpricedItemCount: number;
+  };
+}

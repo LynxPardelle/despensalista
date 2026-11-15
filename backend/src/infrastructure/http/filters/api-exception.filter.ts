@@ -13,7 +13,10 @@ import {
   IdempotencyPayloadConflictError,
   PantryMutationConflictError,
   PantryQuotaExceededError,
+  SavedShoppingListLimitError,
 } from '../../../application/ports/pantry-mutation.port';
+import { HouseholdMemberLimitError } from '../../../domain/repositories/household.repository';
+import { PlusRequiredException } from '../../../application/use-cases/get-plus-household-summary.use-case';
 
 interface ApiErrorBody {
   statusCode: number;
@@ -39,15 +42,14 @@ export class ApiExceptionFilter implements ExceptionFilter {
       .replace(/(\/shopping-shares\/)[^/]+/g, '$1:token');
     const message =
       statusCode >= 500 ? 'Internal server error' : getClientMessage(exception);
+    const code = getErrorCode(exception);
     const body: ApiErrorBody = {
       statusCode,
       message,
       path,
       requestId,
       timestamp: new Date().toISOString(),
-      ...(exception instanceof GoogleMfaRequiredException
-        ? { code: exception.code }
-        : {}),
+      ...(code ? { code } : {}),
     };
 
     if (statusCode >= 500) {
@@ -71,7 +73,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
 }
 
 function getStatusCode(exception: unknown): number {
-  if (isPantryConflict(exception)) return HttpStatus.CONFLICT;
+  if (isClientConflict(exception)) return HttpStatus.CONFLICT;
   if (exception instanceof HttpException) {
     return exception.getStatus();
   }
@@ -83,8 +85,18 @@ function getStatusCode(exception: unknown): number {
   return HttpStatus.INTERNAL_SERVER_ERROR;
 }
 
+function getErrorCode(exception: unknown): string | undefined {
+  if (exception instanceof GoogleMfaRequiredException) return exception.code;
+  if (exception instanceof PlusRequiredException) return exception.code;
+  if (exception instanceof HouseholdMemberLimitError)
+    return 'HOUSEHOLD_MEMBER_LIMIT';
+  if (exception instanceof SavedShoppingListLimitError)
+    return 'SAVED_LIST_LIMIT';
+  return undefined;
+}
+
 function getClientMessage(exception: unknown): string | string[] {
-  if (isPantryConflict(exception)) return exception.message;
+  if (isClientConflict(exception)) return exception.message;
   if (exception instanceof HttpException) {
     const response = exception.getResponse();
 
@@ -119,11 +131,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function isPantryConflict(error: unknown): error is Error {
+function isClientConflict(error: unknown): error is Error {
   return (
     error instanceof IdempotencyPayloadConflictError ||
     error instanceof PantryMutationConflictError ||
-    error instanceof PantryQuotaExceededError
+    error instanceof PantryQuotaExceededError ||
+    error instanceof HouseholdMemberLimitError
   );
 }
 

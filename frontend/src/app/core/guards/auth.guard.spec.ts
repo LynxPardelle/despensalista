@@ -85,6 +85,15 @@ describe('AuthGuard', () => {
     );
   });
 
+  it('returns to the feedback form after requiring Google verification', async () => {
+    authFacade.sessionStatus$.next('google-mfa-required');
+    const result = await resolveGuardResult(guard.canActivate({
+      data: { authMode: 'authenticated' },
+    } as unknown as ActivatedRouteSnapshot, { url: '/feedback' } as RouterStateSnapshot));
+
+    expect((result as UrlTree).queryParams['redirectTo']).toBe('/feedback');
+  });
+
   it('rejects external login return destinations for an existing session', async () => {
     document.cookie = 'XSRF-TOKEN=test; path=/';
     authFacade.sessionStatus$.next('authenticated');

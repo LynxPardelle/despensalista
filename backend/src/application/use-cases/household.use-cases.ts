@@ -17,6 +17,11 @@ import { HouseholdRepository } from '../../domain/repositories/household.reposit
 import { User } from '../../domain/entities/user.entity';
 import { UserId } from '../../domain/value-objects/user-id.vo';
 import { UserDao } from '../ports/daos';
+import {
+  HOUSEHOLD_PLAN_READER,
+  HouseholdPlan,
+  HouseholdPlanReader,
+} from '../ports/household-plan-reader';
 import { HOUSEHOLD_REPOSITORY, USER_DAO } from '../tokens';
 import {
   generateHouseholdInviteToken,
@@ -33,13 +38,19 @@ export class GetHouseholdWorkspaceUseCase {
     private readonly householdRepository: HouseholdRepository,
     @Inject(USER_DAO)
     private readonly userDao: UserDao,
+    @Inject(HOUSEHOLD_PLAN_READER)
+    private readonly plans: HouseholdPlanReader,
   ) {}
 
   async execute(userId: string): Promise<HouseholdWorkspace> {
     const user = await getRequiredUser(this.userDao, userId);
     const membership = await this.ensureMembership(user);
 
-    return buildWorkspace(this.householdRepository, membership);
+    return buildWorkspace(
+      this.householdRepository,
+      membership,
+      this.plans.getPlan(membership.householdId),
+    );
   }
 
   private async ensureMembership(user: User): Promise<HouseholdMembership> {
@@ -68,6 +79,8 @@ export class CreateHouseholdInviteUseCase {
     private readonly householdRepository: HouseholdRepository,
     @Inject(USER_DAO)
     private readonly userDao: UserDao,
+    @Inject(HOUSEHOLD_PLAN_READER)
+    private readonly plans: HouseholdPlanReader,
   ) {}
 
   async execute(command: {
@@ -101,7 +114,11 @@ export class CreateHouseholdInviteUseCase {
       expiresAt: new Date(now.getTime() + HOUSEHOLD_INVITE_TTL_MS),
     });
 
-    const savedInvite = await this.householdRepository.saveInvite(invite);
+    const { memberLimit } = await this.plans.getPlan(membership.householdId);
+    const savedInvite = await this.householdRepository.saveInvite(
+      invite,
+      memberLimit,
+    );
     await recordHouseholdActivity(this.householdRepository, {
       householdId: membership.householdId,
       type: 'invite_created',
@@ -124,6 +141,8 @@ export class AcceptHouseholdInviteUseCase {
     private readonly householdRepository: HouseholdRepository,
     @Inject(USER_DAO)
     private readonly userDao: UserDao,
+    @Inject(HOUSEHOLD_PLAN_READER)
+    private readonly plans: HouseholdPlanReader,
   ) {}
 
   async execute(command: {
@@ -166,9 +185,11 @@ export class AcceptHouseholdInviteUseCase {
       });
 
     invite.accept(now);
+    const plan = await this.plans.getPlan(invite.householdId);
     const savedMembership = await this.householdRepository.acceptInvite(
       invite,
       membership,
+      plan.memberLimit,
     );
     await recordHouseholdActivity(this.householdRepository, {
       householdId: invite.householdId,
@@ -180,7 +201,11 @@ export class AcceptHouseholdInviteUseCase {
       createdAt: now,
     });
 
-    return buildWorkspace(this.householdRepository, savedMembership);
+    return buildWorkspace(
+      this.householdRepository,
+      savedMembership,
+      Promise.resolve(plan),
+    );
   }
 }
 
@@ -368,10 +393,12 @@ export class RecordHouseholdActivityUseCase {
 async function buildWorkspace(
   householdRepository: HouseholdRepository,
   currentMember: HouseholdMembership,
+  plan: Promise<HouseholdPlan>,
 ): Promise<HouseholdWorkspace> {
-  const household = await householdRepository.findHouseholdById(
-    currentMember.householdId,
-  );
+  const [household, householdPlan] = await Promise.all([
+    householdRepository.findHouseholdById(currentMember.householdId),
+    plan,
+  ]);
 
   if (!household) {
     throw new NotFoundException('Household not found');
@@ -391,6 +418,7 @@ async function buildWorkspace(
 
   return {
     household: household.toPrimitives(),
+    plan: householdPlan,
     currentMember: currentMember.toPrimitives(),
     members: members.map((member) => member.toPrimitives()),
     invites: invites.map((invite) => invite.toPrimitives()),

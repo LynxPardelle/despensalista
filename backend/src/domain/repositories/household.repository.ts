@@ -10,6 +10,13 @@ export interface HouseholdDeletionLock {
   token?: string;
 }
 
+export class HouseholdMemberLimitError extends Error {
+  constructor() {
+    super('El hogar alcanzó el límite de integrantes de su plan.');
+    this.name = 'HouseholdMemberLimitError';
+  }
+}
+
 export interface HouseholdRepository {
   createHouseholdWithOwner(
     household: Household,
@@ -18,10 +25,14 @@ export interface HouseholdRepository {
   acceptInvite(
     invite: HouseholdInvite,
     membership: HouseholdMembership,
+    memberLimit: number,
   ): Promise<HouseholdMembership>;
   saveHousehold(household: Household): Promise<Household>;
   saveMembership(membership: HouseholdMembership): Promise<HouseholdMembership>;
-  saveInvite(invite: HouseholdInvite): Promise<HouseholdInvite>;
+  saveInvite(
+    invite: HouseholdInvite,
+    memberLimit?: number,
+  ): Promise<HouseholdInvite>;
   saveActivity(activity: HouseholdActivity): Promise<HouseholdActivity>;
   findHouseholdById(id: string): Promise<Household | null>;
   findMembershipByUserId(userId: string): Promise<HouseholdMembership | null>;

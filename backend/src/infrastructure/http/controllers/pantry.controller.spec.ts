@@ -405,6 +405,7 @@ describe('PantryController', () => {
       request,
     );
     expect(createShoppingListUseCase.execute).toHaveBeenCalledWith({
+      householdId: 'household-1',
       ownerUserId: 'user-1',
       title: 'Mayoreo semanal',
       occasion: 'Quincena',
