@@ -5,7 +5,7 @@ import { map } from 'rxjs/operators';
 import { environment } from '../../../environments/environment';
 
 export type BillingAction = 'checkout' | 'portal';
-export const plusHogarTermsVersion = '2026-11-15';
+export const plusHogarTermsVersion = '2026-11-15-iva';
 
 export type SubscriptionStatus =
   | 'none'
@@ -22,6 +22,8 @@ export type SubscriptionStatus =
 export interface BillingPlan {
   label: string;
   amountMinor: number;
+  subtotalMinor?: number;
+  taxMinor?: number;
   currency: 'mxn';
   interval: 'month';
 }
@@ -38,6 +40,7 @@ export interface AvailableBillingStatus {
   cancelAtPeriodEnd?: boolean;
   currentPeriodEnd?: string;
   nextRenewalAt?: string;
+  nextRenewalAmountMinor?: number;
   termsVersion?: string;
 }
 

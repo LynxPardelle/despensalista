@@ -416,10 +416,19 @@ describe('ProfilePageComponent', () => {
 
   it('requires consent to the recurring live charge before opening Stripe Checkout', () => {
     spyOnProperty(fixture.componentInstance as unknown as { canOpenLiveBillingHere: boolean }, 'canOpenLiveBillingHere').and.returnValue(true);
-    http.expectOne('/api/billing/status').flush({ ...subscription, mode: 'live', hasPlus: false, termsVersion: '2026-11-15' });
+    http.expectOne('/api/billing/status').flush({
+      ...subscription,
+      mode: 'live',
+      hasPlus: false,
+      termsVersion: '2026-11-15-iva',
+      plan: { ...subscription.plan, subtotalMinor: 5900, taxMinor: 944, amountMinor: 6844 },
+    });
     fixture.detectChanges();
 
     const panel = (fixture.nativeElement as HTMLElement).querySelector('section[aria-labelledby="subscription-title"]')!;
+    expect(panel.textContent).toMatch(/68[.,]44/);
+    expect(panel.textContent).toMatch(/59[.,]00/);
+    expect(panel.textContent).toMatch(/9[.,]44 de IVA/);
     const consent = panel.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
     const checkout = Array.from(panel.querySelectorAll('button')).find((button) => button.textContent.includes('Suscribirme'))!;
     expect(consent.checked).toBeFalse();
@@ -436,7 +445,7 @@ describe('ProfilePageComponent', () => {
     expect(checkout.disabled).toBeFalse();
     checkout.click();
     const request = http.expectOne({ method: 'POST', url: '/api/billing/checkout' });
-    expect(request.request.body).toEqual({ acceptRecurringTerms: true, termsVersion: '2026-11-15' });
+    expect(request.request.body).toEqual({ acceptRecurringTerms: true, termsVersion: '2026-11-15-iva' });
     request.flush({ url: 'https://example.com/' });
   });
 
@@ -896,7 +905,131 @@ describe('ProfilePageComponent', () => {
 
     expect(accountDeleteButton.disabled).toBeFalse();
   });
+
+  it('offers a paid invoice to its owner after cancellation and sends only normalized fiscal data', () => {
+    http.expectOne('/api/billing/status').flush({
+      ...subscription, mode: 'live', status: 'canceled', canCheckout: false, canOpenPortal: false,
+    });
+    fixture.detectChanges();
+    http.expectNone('/api/billing/invoices');
+
+    const panel: HTMLElement = fixture.nativeElement.querySelector('.cfdi-panel');
+    panel.querySelector<HTMLButtonElement>('button')!.click();
+    const invoiceList = http.expectOne('/api/billing/invoices');
+    expect(invoiceList.request.withCredentials).toBeTrue();
+    invoiceList.flush({ available: true, invoices: [paidInvoice()] });
+    fixture.detectChanges();
+
+    const selection = panel.querySelector<HTMLSelectElement>('#cfdi-invoice')!;
+    expect(selection.options[1].textContent?.replace(/\s/g, ' ')).toContain('MXN 68.44');
+    selection.value = 'in_paid';
+    selection.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+
+    fillTaxFields(panel);
+    const form = panel.querySelector('form')!;
+    form.dispatchEvent(new Event('submit'));
+    form.dispatchEvent(new Event('submit'));
+    const request = http.expectOne({ method: 'POST', url: '/api/billing/invoices/in_paid/cfdi-requests' });
+    expect(request.request.withCredentials).toBeTrue();
+    expect(request.request.body).toEqual({
+      rfc: 'DEMO010101AB1', legalName: 'COMERCIAL ÑANDÚ', postalCode: '01001', taxRegime: '601', cfdiUse: 'G03',
+    });
+    request.flush({ id: 'cfdi-folio-1', status: 'sent' });
+    fixture.detectChanges();
+
+    expect(panel.textContent).toContain('cfdi-folio-1');
+    expect(panel.textContent).toContain('Si omitiste el correo de entrega');
+    expect(panel.querySelector('#cfdi-rfc')).toBeNull();
+    expect(panel.textContent).not.toContain('COMERCIAL ÑANDÚ');
+    expect(panel.querySelector('button[type="submit"]')).toBeNull();
+  });
+
+  it('shows the folio without offering another send after an uncertain delivery', () => {
+    http.expectOne('/api/billing/status').flush({ ...subscription, mode: 'live', canCheckout: false });
+    fixture.detectChanges();
+    const panel: HTMLElement = fixture.nativeElement.querySelector('.cfdi-panel');
+    panel.querySelector<HTMLButtonElement>('button')!.click();
+    http.expectOne('/api/billing/invoices').flush({ available: true, invoices: [paidInvoice()] });
+    fixture.detectChanges();
+
+    const selection = panel.querySelector<HTMLSelectElement>('#cfdi-invoice')!;
+    selection.value = 'in_paid';
+    selection.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    fillTaxFields(panel);
+    panel.querySelector('form')!.dispatchEvent(new Event('submit'));
+    http.expectOne('/api/billing/invoices/in_paid/cfdi-requests').flush({
+      id: 'cfdi-folio-2', status: 'pending', retryable: true,
+    });
+    fixture.detectChanges();
+
+    expect(panel.querySelector('button[type="submit"]')?.textContent).toContain('Reintentar');
+    expect(panel.querySelector<HTMLInputElement>('#cfdi-rfc')?.value).toBe('demo010101ab1');
+    panel.querySelector('form')!.dispatchEvent(new Event('submit'));
+    http.expectOne('/api/billing/invoices/in_paid/cfdi-requests').flush({
+      id: 'cfdi-folio-2', status: 'delivery_unknown',
+    });
+    fixture.detectChanges();
+
+    expect(panel.textContent).toContain('cfdi-folio-2');
+    expect(panel.textContent).toContain('entrega');
+    expect(panel.querySelector('button[type="submit"]')).toBeNull();
+    expect(panel.querySelector('a[href="mailto:facturas@despensalista.com"]')).toBeTruthy();
+  });
+
+  it('finds a paid invoice after a page with no eligible payments', () => {
+    http.expectOne('/api/billing/status').flush({ ...subscription, mode: 'live', canCheckout: false });
+    fixture.detectChanges();
+
+    const panel: HTMLElement = fixture.nativeElement.querySelector('.cfdi-panel');
+    panel.querySelector<HTMLButtonElement>('button')!.click();
+    http.expectOne('/api/billing/invoices').flush({
+      available: true, invoices: [], nextCursor: 'in_previous',
+    });
+    fixture.detectChanges();
+
+    expect(panel.textContent).toContain('En esta página no hay pagos facturables');
+    expect(panel.textContent).not.toContain('Todavía no hay pagos');
+    const earlierPayments = [...panel.querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('Ver pagos anteriores'));
+    expect(earlierPayments).toBeDefined();
+    earlierPayments!.click();
+    http.expectOne('/api/billing/invoices?cursor=in_previous').flush({
+      available: true, invoices: [paidInvoice()],
+    });
+    fixture.detectChanges();
+
+    const selection = panel.querySelector<HTMLSelectElement>('#cfdi-invoice');
+    expect(selection?.options[1].value).toBe('in_paid');
+    expect(panel.textContent).not.toContain('Ver pagos anteriores');
+  });
+
+  it('keeps the request card hidden from members who do not manage billing', () => {
+    http.expectOne('/api/billing/status').flush({ ...subscription, mode: 'live', canManage: false });
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.cfdi-panel')).toBeNull();
+    http.expectNone('/api/billing/invoices');
+  });
 });
+
+function paidInvoice() {
+  return { id: 'in_paid', paidAt: '2026-11-15T14:30:00.000Z', amountMinor: 6844, currency: 'mxn' };
+}
+
+function fillTaxFields(panel: HTMLElement) {
+  const fields: Record<string, string> = {
+    rfc: 'demo010101ab1', 'legal-name': 'Comercial Ñandú', 'postal-code': '01001',
+    'tax-regime': '601', use: 'g03',
+  };
+  for (const [name, value] of Object.entries(fields)) {
+    const input = panel.querySelector<HTMLInputElement>(`#cfdi-${name}`);
+    if (!input) throw new Error(`Missing fiscal field: ${name}`);
+    input.value = value;
+    input.dispatchEvent(new Event('input'));
+  }
+}
 
 function makeHouseholdWorkspace() {
   return {

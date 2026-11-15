@@ -132,6 +132,8 @@ jobs:
     env:
       STRIPE_BILLING_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING || 'false' }}
       STRIPE_BILLING_CHECKOUT_ENABLED: ${{ vars.ENABLE_STRIPE_BILLING_CHECKOUT || vars.ENABLE_STRIPE_BILLING || 'false' }}
+      STRIPE_BILLING_VAT_RATE_ID: ${{ vars.STRIPE_BILLING_VAT_RATE_ID }}
+      CFDI_REQUEST_RECIPIENT: ${{ secrets.CFDI_REQUEST_RECIPIENT }}
       PLUS_RENEWAL_NOTICE_MODE: ${{ vars.PLUS_RENEWAL_NOTICE_MODE || 'off' }}
       PLUS_RENEWAL_NOTICE_TEST_TO: ${{ secrets.PLUS_RENEWAL_NOTICE_TEST_TO }}
 
@@ -233,6 +235,8 @@ jobs:
             --context enableGoogleMfa=true \
             --context enableStripeBilling="$STRIPE_BILLING_ENABLED" \
             --context enableStripeBillingCheckout="$STRIPE_BILLING_CHECKOUT_ENABLED" \
+            --context stripeBillingVatRateId="$STRIPE_BILLING_VAT_RATE_ID" \
+            --context cfdiRequestRecipient="$CFDI_REQUEST_RECIPIENT" \
             --context renewalNoticeMode="$PLUS_RENEWAL_NOTICE_MODE" \
             --context renewalNoticeTestTo="$PLUS_RENEWAL_NOTICE_TEST_TO" \
             --context externallyManagedSocialProviders=Google

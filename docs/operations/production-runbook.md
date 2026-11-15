@@ -389,7 +389,8 @@ record its exact UUID. Set `PLUS_PILOT_HOUSEHOLD_ID` to that UUID,
 `ENABLE_PUBLIC_PLUS_CHECKOUT=false`, and `ENABLE_STRIPE_BILLING_CHECKOUT=true`.
 Deploy and confirm that a different owner can't open Checkout and that the pilot
 can see the final price, the recurrence and the current terms. The pilot owner
-completes one $59 MXN payment with their own payment method. Confirm the signed
+completes one $68.44 MXN payment with their own payment method, including the
+$59.00 MXN base price and $9.44 MXN of IVA. Confirm the signed
 event activates Plus once, and check the associated invoice, fee and subscription
 against the pilot household. Cancel the renewal from Perfil and verify at Stripe
 that there is no upcoming charge. Close new purchases by setting
@@ -406,8 +407,8 @@ closure, confirm the owned Checkout session is complete or expired in Stripe.
 
 Open public sales only after a controlled production renewal notice reaches its
 verified recipient, the consent and cancellation checks pass, and the billing
-owner confirms who issues the CFDI, the final price and VAT treatment, and who
-handles refund and dispute requests. Public sales use
+owner confirms who handles refund and dispute requests. ZooBeriah Systems issues
+CFDIs through Alec or Héctor. Public sales use
 `ENABLE_PUBLIC_PLUS_CHECKOUT=true`, no pilot household, and production renewal
 notices enabled. The pilot and public settings are mutually exclusive.
 
@@ -419,6 +420,38 @@ agreement requires ending the subscription, cancel it separately. Verify the app
 reflects the resulting subscription state and that Stripe shows the expected
 renewal and refund status. Check with accounting whether a new or corrected CFDI
 is required. Exercise the procedure in Stripe Sandbox before public sales.
+
+## IVA and CFDI requests
+
+Keep the existing Stripe price at MXN 59.00. Create an independent, active
+Stripe tax rate per stage with display name `IVA`, tax type `vat`, country `MX`,
+16 percent and exclusive pricing. Configure `STRIPE_BILLING_VAT_RATE_ID` on the
+matching GitHub environment. Give its Stripe runtime key Read access to Tax
+Rates and Invoices. The application verifies the rate and the MXN 68.44 total
+before returning a Checkout link. Confirm the state of earlier Checkout
+sessions before the pilot. Renewal notices use the subscription's actual tax.
+
+Set the GitHub environment secret `CFDI_REQUEST_RECIPIENT` to one lowercase
+mailbox approved by ZooBeriah. The public contact and initial destination are
+`facturas@despensalista.com`. If the internal destination changes, keep the
+public address available to customers. In SES sandbox, verify the exact
+recipient in `us-east-1`. The sender is `no-reply@despensalista.lynxpardelle.com`.
+
+Synchronize the stage's protected Cognito stack policy as an administrator
+before deploying a new recipient. Preserve the existing grants and Cognito
+exports. The new `ses:SendEmail` grant matches the exact sender, region and
+recipient. The ordinary workflow publishes the backend role permission and
+address together. When rotating the address, provision the new scoped grant,
+deploy the verified new address and confirm delivery. Remove the old grant
+afterwards. Unsetting the environment secret disables form submission.
+
+Alec or Héctor reconcile the Stripe reference, amount, date, payment method
+and refund state before issuing the CFDI. Messages marked `[Prueba]` represent
+Sandbox payments. The app shows a request as sent when SES accepts it. For an
+uncertain result, search the mailbox for the folio before arranging follow-up.
+If the customer omitted the optional email, coordinate delivery using the same
+folio. Before opening sales, verify one authorized request from the target
+stage and the copy that actually reaches the mailbox.
 
 ## SES approval blocker
 

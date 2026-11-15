@@ -29,6 +29,7 @@ import {
 import { PantryService } from '../../core/services/pantry.service';
 import { ProfileService } from '../../core/services/profile.service';
 import { FeedbackService } from '../../core/services/feedback.service';
+import { InvoiceRequestComponent } from './invoice-request.component';
 import {
   HouseholdActivity,
   HouseholdInvite,
@@ -86,7 +87,7 @@ const SUBSCRIPTION_STATUS_LABELS: Record<SubscriptionStatus, string> = {
   templateUrl: './profile-page.component.html',
   styleUrl: './profile-page.component.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CommonModule, ReactiveFormsModule, RouterModule],
+  imports: [CommonModule, ReactiveFormsModule, RouterModule, InvoiceRequestComponent],
   host: { '(window:pageshow)': 'onPageShow($event)' },
   standalone: true,
 })
@@ -167,7 +168,7 @@ export class ProfilePageComponent implements OnInit {
     {
       id: 'plus-household',
       name: 'Plus Hogar',
-      priceLabel: '$59 MXN al mes',
+      priceLabel: '$68.44 MXN al mes con IVA',
       statusLabel: 'Ventas cerradas',
       features: [
         'Hasta 5 personas y 15 listas reutilizables',
@@ -302,12 +303,15 @@ export class ProfilePageComponent implements OnInit {
   }
 
   protected formatPlanPrice(plan: BillingPlan): string {
-    const amount = new Intl.NumberFormat('es-MX', {
+    return `${this.formatBillingAmount(plan.amountMinor, plan.currency)} al mes`;
+  }
+
+  protected formatBillingAmount(amountMinor: number, currency: string): string {
+    return new Intl.NumberFormat('es-MX', {
       style: 'currency',
-      currency: plan.currency,
+      currency,
       currencyDisplay: 'code',
-    }).format(plan.amountMinor / 100);
-    return `${amount} al mes`;
+    }).format(amountMinor / 100);
   }
 
   protected formatBillingDate(value?: string): string | null {

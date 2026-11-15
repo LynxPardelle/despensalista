@@ -16,7 +16,8 @@ import { plusHogarTermsVersion } from '../../core/services/billing.service';
         <h2>Precio y renovación</h2>
         <p>
           Plus Hogar es una suscripción para un hogar de DespensaLista. Antes de autorizar el cobro,
-          el perfil muestra el importe mensual y Stripe muestra el total antes de confirmar el pago.
+          el perfil muestra el total mensual con IVA y el desglose. Stripe también muestra el total
+          antes de confirmar el pago.
           El primer cargo se realiza al confirmar el pago en Stripe. Después se realizan cobros
           automáticos cada mes hasta que canceles la renovación. Consulta el periodo actual en tu perfil.
         </p>
@@ -37,6 +38,12 @@ import { plusHogarTermsVersion } from '../../core/services/billing.service';
         <p>
           El acceso de Plus se activa cuando Stripe confirma el pago. Si un cobro falla, la persona
           propietaria puede revisar la suscripción y actualizar su forma de pago en el portal de Stripe.
+        </p>
+
+        <h2>Factura fiscal</h2>
+        <p>
+          ZooBeriah emite el CFDI. Puedes solicitarlo desde tu perfil o escribir a
+          <a href="mailto:facturas@despensalista.com">facturas@despensalista.com</a>.
         </p>
 
         <p class="links">

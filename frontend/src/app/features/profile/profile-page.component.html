@@ -187,8 +187,13 @@
 
           <dl class="billing-decision-list" aria-label="Detalles de la suscripción">
             <div>
-              <dt>{{ subscription.plan.label }}</dt>
-              <dd>{{ formatPlanPrice(subscription.plan) }}</dd>
+              <dt>{{ subscription.hasPlus ? 'Precio para nuevas suscripciones' : subscription.plan.label }}</dt>
+              <dd>
+                {{ formatPlanPrice(subscription.plan) }}
+                @if (subscription.plan.subtotalMinor !== undefined && subscription.plan.taxMinor !== undefined) {
+                  <small>{{ formatBillingAmount(subscription.plan.subtotalMinor, subscription.plan.currency) }} + {{ formatBillingAmount(subscription.plan.taxMinor, subscription.plan.currency) }} de IVA</small>
+                }
+              </dd>
             </div>
             <div>
               <dt>Estado</dt>
@@ -199,7 +204,12 @@
             @if (liveBilling && nextRenewal && !subscription.cancelAtPeriodEnd && !billingStatusError()) {
               <div>
                 <dt>Próximo cargo programado</dt>
-                <dd>{{ nextRenewal }}</dd>
+                <dd>
+                  {{ nextRenewal }}
+                  @if (subscription.nextRenewalAmountMinor !== undefined) {
+                    <small>{{ formatBillingAmount(subscription.nextRenewalAmountMinor, subscription.plan.currency) }}</small>
+                  }
+                </dd>
               </div>
             } @else if (periodEnd && !billingStatusError()) {
               <div>
@@ -407,6 +417,10 @@
             </section>
           }
         </aside>
+      }
+
+      @if (billing()?.canManage && !householdAccepting) {
+        <app-invoice-request [testMode]="billing()?.mode === 'test'" />
       }
 
       <aside class="panel household-panel">
