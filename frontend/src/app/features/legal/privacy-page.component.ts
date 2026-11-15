@@ -12,7 +12,7 @@ import { RouterLink } from '@angular/router';
       <article class="legal-document">
         <p class="eyebrow">Despensa Lista</p>
         <h1 id="privacy-title">Politica de privacidad</h1>
-        <p class="updated">Última actualización: 13 de noviembre de 2026</p>
+        <p class="updated">Última actualización: 14 de noviembre de 2026</p>
 
         <p>
           Despensa Lista ayuda a organizar productos del hogar, lotes,
@@ -74,6 +74,18 @@ import { RouterLink } from '@angular/router';
           <li>Mostrar recordatorios, resumenes y exportaciones que solicites.</li>
           <li>Prevenir abuso, diagnosticar errores y mantener el servicio.</li>
         </ul>
+
+        <h2>Reportes de errores, quejas y sugerencias</h2>
+        <p>
+          Si envías un reporte desde tu perfil, guardamos su categoría, mensaje, fecha y folio
+          para revisar el problema o la sugerencia. Asociamos el envío a un identificador
+          seudónimo de tu cuenta para aplicar el límite de envíos y eliminar tus reportes si
+          borras la cuenta. El equipo autorizado de Despensa Lista puede consultar el reporte.
+        </p>
+        <p>
+          Los reportes vencen después de 90 días. Evita incluir contraseñas, datos de pago
+          o información personal en el mensaje.
+        </p>
 
         <h2>Con quien compartimos datos</h2>
         <p>

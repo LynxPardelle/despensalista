@@ -42,7 +42,7 @@ interface DespensaListaTables {
   users: dynamodb.Table;
 }
 
-const BACKEND_DATA_CONTRACT_VERSION = '1';
+const BACKEND_DATA_CONTRACT_VERSION = '2';
 
 export class DespensaListaServerlessBackendStack extends cdk.Stack {
   constructor(
@@ -102,17 +102,16 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       ? logs.RetentionDays.ONE_MONTH
       : logs.RetentionDays.ONE_WEEK;
     const resourceRemovalPolicy = this.resolveRemovalPolicy();
-    const feedbackTable = stage.trim().toLowerCase() === 'dev'
-      ? new dynamodb.Table(this, 'FeedbackTable', {
-          tableName: `${projectName}-${stage}-feedback`,
-          partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
-          sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
-          timeToLiveAttribute: 'expiresAt',
-          billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-          removalPolicy: resourceRemovalPolicy,
-        })
-      : undefined;
-    feedbackTable?.addGlobalSecondaryIndex({
+    const feedbackTable = new dynamodb.Table(this, 'FeedbackTable', {
+      tableName: `${projectName}-${stage}-feedback`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'expiresAt',
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      deletionProtection: isProduction,
+      removalPolicy: isProduction ? cdk.RemovalPolicy.RETAIN : resourceRemovalPolicy,
+    });
+    feedbackTable.addGlobalSecondaryIndex({
       indexName: 'FeedbackInboxByMonth',
       partitionKey: { name: 'inboxMonth', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'inboxOrder', type: dynamodb.AttributeType.STRING },
@@ -187,7 +186,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         DYNAMODB_PRODUCTS_TABLE: tables.products.tableName,
         DYNAMODB_PRODUCT_TYPES_TABLE: tables.productTypes.tableName,
         DYNAMODB_INVENTORY_LOTS_TABLE: tables.inventoryLots.tableName,
-        ...(feedbackTable && { FEEDBACK_TABLE: feedbackTable.tableName }),
+        FEEDBACK_TABLE: feedbackTable.tableName,
         CORS_ORIGIN: publicDomain ? `${frontendBaseUrl},${publicDomain.origin}` : frontendBaseUrl,
         COGNITO_ENABLED: 'true',
         COGNITO_ISSUER: `https://cognito-idp.${cdk.Aws.REGION}.${cdk.Aws.URL_SUFFIX}/${props.cognitoUserPoolId}`,
@@ -222,19 +221,17 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     });
 
     Object.values(tables).forEach((table) => table.grantReadWriteData(apiFunction));
-    if (feedbackTable) {
-      apiFunction.addToRolePolicy(new iam.PolicyStatement({
-        actions: [
-          'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem',
-          'dynamodb:Query', 'dynamodb:DeleteItem', 'dynamodb:TransactWriteItems',
-        ],
-        resources: [feedbackTable.tableArn],
-      }));
-      apiFunction.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['dynamodb:ConditionCheckItem'],
-        resources: [tables.users.tableArn],
-      }));
-    }
+    apiFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem',
+        'dynamodb:Query', 'dynamodb:DeleteItem', 'dynamodb:TransactWriteItems',
+      ],
+      resources: [feedbackTable.tableArn],
+    }));
+    apiFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:ConditionCheckItem'],
+      resources: [tables.users.tableArn],
+    }));
     if (googleMfaTable) {
       apiFunction.addToRolePolicy(new iam.PolicyStatement({
         actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem'],
@@ -549,6 +546,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'DynamoDbInventoryLotsTable', {
       value: tables.inventoryLots.tableName,
     });
+    new cdk.CfnOutput(this, 'FeedbackTableName', { value: feedbackTable.tableName });
     new cdk.CfnOutput(this, 'AppDomainName', { value: domainName });
     new cdk.CfnOutput(this, 'CloudFrontDistributionId', {
       value: distribution.distributionId,
