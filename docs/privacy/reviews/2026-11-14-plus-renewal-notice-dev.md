@@ -9,3 +9,5 @@ El recurso y la regla programada se habilitan en dev mediante la configuración 
 La cola registra cada intento para evitar reenvíos ante reintentos o respuestas inciertas de SES. Consultar [el runbook](../../operations/production-runbook.md) antes de habilitar el servicio para clientes reales.
 
 Para diagnosticar rechazos en dev, el transporte registra una categoría de error de una lista fija, el código HTTP y una etiqueta fija si SES identifica la identidad del remitente o del dominio. Se descartan la excepción completa, direcciones, ARN, contenido y metadatos de la solicitud. El registro no habilita nuevos envíos ni cambia cuándo se permite reintentar un aviso.
+
+El permiso de dev para `ses:SendEmail` restringe la región a `us-east-1`, exige el remitente exacto y comprueba que la lista de destinatarios esté presente y solo incluya el buzón de prueba. IAM aplica estas condiciones también aunque el ARN del recurso no esté fijado: SES rechazó los permisos limitados a los ARN del dominio y de la dirección durante las pruebas. La aplicación verifica nuevamente el destinatario antes de llamar a SES.

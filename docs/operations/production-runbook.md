@@ -398,13 +398,13 @@ On 2026-09-25 the domain `despensalista.lynxpardelle.com` and RSA-2048 Easy DKIM
 were verified `SUCCESS`. Future intended SES sender:
 `DespensaLista <no-reply@despensalista.lynxpardelle.com>`.
 
-The account remains in the SES sandbox. Its prior Moyra production-access case
-`178199358800446` is `DENIED`. A new API request describing DespensaLista while
-preserving the existing contacts returned `ConflictException`; the account's
-previous request was not overwritten. Reading the case through the Support API
-requires a paid support subscription, which was not purchased. Open that case
-in the AWS Support console to read the explanation and request reconsideration
-for the verified transactional-auth domain.
+The account remains in the `us-east-1` SES sandbox. The prior production-access
+case `178199358800446` was denied for Moyra. AWS Support accepted a separate
+[DespensaLista reconsideration, case 179454466900956](https://support.console.aws.amazon.com/support/home#/case/?displayId=179454466900956)
+on November 12 (Mexico City time). On November 14, Support showed the case as
+unassigned with no AWS reply. The submitted scope is account verification and
+recovery; disclose subscription renewal reminders before using SES to send them
+to customers.
 
 All stages keep Cognito `EmailSendingAccount=COGNITO_DEFAULT` without `From` or
 `SourceArn`, so signup and recovery continue through Cognito's managed sender.
