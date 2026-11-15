@@ -10,7 +10,12 @@ import {
   PantryMutationConflictError,
   PantryMutationPort,
   PantryQuotaExceededError,
+  SavedShoppingListLimitError,
 } from '../ports/pantry-mutation.port';
+import {
+  HOUSEHOLD_PLAN_READER,
+  HouseholdPlanReader,
+} from '../ports/household-plan-reader';
 import {
   ShoppingList,
   ShoppingListItemPrimitives,
@@ -22,9 +27,12 @@ export class CreateShoppingListUseCase {
   constructor(
     @Inject(PANTRY_MUTATION_PORT)
     private readonly pantryMutationPort: PantryMutationPort,
+    @Inject(HOUSEHOLD_PLAN_READER)
+    private readonly plans: HouseholdPlanReader,
   ) {}
 
   async execute(command: {
+    householdId: string;
     ownerUserId: string;
     title: string;
     occasion?: string;
@@ -32,10 +40,15 @@ export class CreateShoppingListUseCase {
     items: ShoppingListItemPrimitives[];
   }): Promise<ShoppingList> {
     const list = ShoppingList.create(command);
+    const { savedListLimit } = await this.plans.getPlan(command.householdId);
 
     try {
-      return await this.pantryMutationPort.createShoppingList(list);
+      return await this.pantryMutationPort.createShoppingList(
+        list,
+        savedListLimit,
+      );
     } catch (error) {
+      if (error instanceof SavedShoppingListLimitError) throw error;
       if (
         error instanceof PantryQuotaExceededError ||
         error instanceof PantryMutationConflictError

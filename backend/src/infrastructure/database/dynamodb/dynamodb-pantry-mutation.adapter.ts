@@ -11,6 +11,13 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { randomUUID } from 'node:crypto';
 import {
+  purchaseSpendFields,
+  purchaseSpendIncrements,
+  readMonthlyPurchaseSpend,
+  type MonthlyPurchaseSpend,
+  type MonthlyPurchaseSpendReader,
+} from '../../../application/ports/monthly-purchase-spend-reader';
+import {
   CloseShoppingPurchaseMutation,
   ConsumeInventoryLotMutation,
   IdempotencyPayloadConflictError,
@@ -23,6 +30,7 @@ import {
   PantryOperationLookup,
   PantryOperationReceipt,
   PantryQuotaExceededError,
+  SavedShoppingListLimitError,
 } from '../../../application/ports/pantry-mutation.port';
 import {
   MAX_ACTIVE_INVENTORY_LOTS_PER_USER,
@@ -106,7 +114,9 @@ type PersistedLot = Omit<
 };
 
 @Injectable()
-export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
+export class DynamoDbPantryMutationAdapter
+  implements PantryMutationPort, MonthlyPurchaseSpendReader
+{
   private readonly usersTable: string;
   private readonly productTypesTable: string;
   private readonly inventoryLotsTable: string;
@@ -241,6 +251,27 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
     );
   }
 
+  async getMonthlyPurchaseSpend(
+    ownerUserId: string,
+    month: string,
+  ): Promise<MonthlyPurchaseSpend> {
+    const fields = purchaseSpendFields(month);
+    const result = await this.dynamoDb.send(
+      new GetCommand({
+        TableName: this.usersTable,
+        Key: { pk: quotaKey(ownerUserId) },
+        ConsistentRead: true,
+        ProjectionExpression: '#total, #priced, #unpriced',
+        ExpressionAttributeNames: {
+          '#total': fields.amountMinor,
+          '#priced': fields.pricedItemCount,
+          '#unpriced': fields.unpricedItemCount,
+        },
+      }),
+    );
+    return readMonthlyPurchaseSpend(result.Item, month);
+  }
+
   async checkout(
     mutation: CloseShoppingPurchaseMutation,
   ): Promise<IdempotentMutationResult<InventoryLotPrimitives[]>> {
@@ -287,6 +318,7 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
         mutation.receipt.ownerUserId,
         mutation.lots.map((lot) => lot.productTypeId.toString()),
         mutation.receipt.createdAt,
+        mutation.purchaseSpend,
       ),
     ];
 
@@ -496,8 +528,12 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
     return restored;
   }
 
-  async createShoppingList(list: ShoppingList): Promise<ShoppingList> {
+  async createShoppingList(
+    list: ShoppingList,
+    savedListLimit: number,
+  ): Promise<ShoppingList> {
     const quotaEpoch = await this.ensureQuota(list.ownerUserId);
+    const maximum = Math.min(savedListLimit, MAX_SAVED_SHOPPING_LISTS_PER_USER);
     const transactionItems: TransactionItems = [
       {
         Put: {
@@ -510,16 +546,32 @@ export class DynamoDbPantryMutationAdapter implements PantryMutationPort {
         this.usersTable,
         list.ownerUserId,
         'savedShoppingLists',
-        MAX_SAVED_SHOPPING_LISTS_PER_USER,
+        maximum,
         list.toPrimitives().updatedAt,
       ),
     ];
-    await this.commitQuotaMutation(
-      transactionItems,
-      1,
-      'Saved shopping list quota exceeded',
-      quotaEpoch,
-    );
+    try {
+      await this.commitQuotaMutation(
+        transactionItems,
+        1,
+        'Saved shopping list quota exceeded',
+        quotaEpoch,
+      );
+    } catch (error) {
+      if (error instanceof PantryQuotaExceededError) {
+        const quota = await this.getQuota(list.ownerUserId);
+        if (
+          quota &&
+          !quota.deleting &&
+          quota.mutationEpoch === quotaEpoch &&
+          typeof quota.savedShoppingLists === 'number' &&
+          quota.savedShoppingLists >= maximum
+        ) {
+          throw new SavedShoppingListLimitError();
+        }
+      }
+      throw error;
+    }
     return list;
   }
 
@@ -1489,12 +1541,13 @@ function incrementCheckoutQuota(
   ownerUserId: string,
   productTypeIds: string[],
   now: Date,
+  purchaseSpend?: MonthlyPurchaseSpend,
 ): TransactionItems[number] {
   const counts = productTypeIds.reduce<Record<string, number>>((result, id) => {
     result[id] = (result[id] ?? 0) + 1;
     return result;
   }, {});
-  const names: Record<string, string> = {};
+  const names: Record<string, string> = { '#lots': 'lotsByProductType' };
   const values: Record<string, unknown> = {
     ':lotDelta': productTypeIds.length,
     ':remainingTotal':
@@ -1511,19 +1564,30 @@ function incrementCheckoutQuota(
     'attribute_not_exists(deleting)',
   ];
   Object.entries(counts).forEach(([id, count], index) => {
-    const name = `#productType${index}`;
-    const delta = `:typeDelta${index}`;
-    const remaining = `:remainingType${index}`;
+    const name = `#p${index}`;
+    const delta = `:d${index}`;
+    const remaining = `:r${index}`;
     names[name] = id;
     values[delta] = count;
     values[remaining] = MAX_INVENTORY_LOTS_PER_PRODUCT_TYPE - count;
-    sets.push(
-      `lotsByProductType.${name} = if_not_exists(lotsByProductType.${name}, :zero) + ${delta}`,
-    );
+    const counter = `#lots.${name}`;
+    sets.push(`${counter} = if_not_exists(${counter}, :zero) + ${delta}`);
     conditions.push(
-      `(attribute_not_exists(lotsByProductType.${name}) OR lotsByProductType.${name} <= ${remaining})`,
+      `(attribute_not_exists(${counter}) OR ${counter} <= ${remaining})`,
     );
   });
+  // These totals share the same idempotent transaction as the new lots.
+  if (purchaseSpend) {
+    Object.entries(purchaseSpendIncrements(purchaseSpend)).forEach(
+      ([field, increment], index) => {
+        const name = `#spend${index}`;
+        const delta = `:spend${index}`;
+        names[name] = field;
+        values[delta] = increment;
+        sets.push(`${name} = if_not_exists(${name}, :zero) + ${delta}`);
+      },
+    );
+  }
   return {
     Update: {
       TableName: tableName,

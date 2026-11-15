@@ -1,0 +1,61 @@
+<div class="summary-header">
+  <h2 id="plus-summary-title">Resumen semanal de Plus Hogar</h2>
+  <button class="secondary-button" type="button" [disabled]="loading()" (click)="load()">
+    {{ summary() ? 'Actualizar resumen' : 'Consultar resumen' }}
+  </button>
+</div>
+@if (loading()) {
+  <p role="status">Cargando resumen…</p>
+} @else if (needsPlus()) {
+  <p role="status">El resumen semanal está disponible con Plus Hogar. <a routerLink="/profile" fragment="subscription-title">Ver mi plan</a></p>
+} @else if (error()) {
+  <p role="alert">{{ error() }}</p>
+} @else if (summary(); as report) {
+  <div class="summary-grid" aria-live="polite">
+    <section>
+      <h3>Usar pronto</h3>
+      @if (report.upcomingExpiration.length) {
+        <ul>
+          @for (item of report.upcomingExpiration; track item.productTypeId) {
+            <li>{{ item.name }} · {{ (item.date + 'T00:00:00Z') | date:'dd MMM':'UTC' }}</li>
+          }
+        </ul>
+      } @else {
+        <p>Sin lotes por vencer en los próximos siete días.</p>
+      }
+    </section>
+    <section>
+      <h3>Reponer</h3>
+      @if (report.restock.length) {
+        <ul>
+          @for (item of report.restock; track item.productTypeId) {
+            <li>{{ item.name }} · {{ item.quantity | number:'1.0-3' }} {{ item.unit }}</li>
+          }
+        </ul>
+      } @else {
+        <p>Sin compras sugeridas por ahora.</p>
+      }
+    </section>
+    <section>
+      <h3>Merma en siete días</h3>
+      <p>{{ report.waste.count }} {{ report.waste.count === 1 ? 'registro' : 'registros' }}.</p>
+      @if (report.waste.estimatedLoss > 0) {
+        <p>{{ report.waste.estimatedLoss | currency:'MXN':'code' }} de pérdida estimada.</p>
+      }
+    </section>
+    <section>
+      <h3>Gasto registrado del mes</h3>
+      @if (report.monthlySpend.pricedItemCount > 0) {
+        <p>{{ report.monthlySpend.amountMinor / 100 | currency:'MXN':'code' }} en compras cerradas con precio pagado.</p>
+      } @else {
+        <p>Aún no hay compras cerradas con precio pagado este mes.</p>
+      }
+      @if (report.monthlySpend.unpricedItemCount > 0) {
+        <p>Renglones sin precio, fuera del total: {{ report.monthlySpend.unpricedItemCount }}.</p>
+      }
+      <small>El total se registra a partir de la activación de este resumen.</small>
+    </section>
+  </div>
+} @else {
+  <p>Caducidades, reposición, merma reciente y gasto registrado del mes en una vista.</p>
+}

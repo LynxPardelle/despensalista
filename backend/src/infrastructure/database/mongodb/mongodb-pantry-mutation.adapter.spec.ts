@@ -872,7 +872,7 @@ describe('MongoPantryMutationAdapter', () => {
       ],
     });
 
-    await adapter.createShoppingList(list);
+    await adapter.createShoppingList(list, 3);
     expect(
       await connection.collection('shoppingLists').findOne({ id: list.id }),
     ).toMatchObject({ ownerUserId: 'user-1' });
@@ -884,6 +884,49 @@ describe('MongoPantryMutationAdapter', () => {
     expect(await connection.collection('shoppingLists').countDocuments()).toBe(
       0,
     );
+  });
+
+  it('preserves lists on downgrade and lets only one writer claim recovered capacity', async () => {
+    const list = (title: string) =>
+      ShoppingList.create({
+        ownerUserId: 'user-1',
+        title,
+        items: [
+          {
+            productTypeId: 'type-1',
+            baseName: 'Leche',
+            quantity: 1,
+            unit: QuantityUnit.PIECE,
+          },
+        ],
+      });
+    const existing = [list('A'), list('B'), list('C'), list('D')];
+    for (const entry of existing) await adapter.createShoppingList(entry, 15);
+
+    const stored = connection.collection('shoppingLists');
+    await expect(
+      adapter.createShoppingList(list('E'), 3),
+    ).rejects.toMatchObject({ name: 'SavedShoppingListLimitError' });
+    expect(await stored.countDocuments()).toBe(4);
+    await adapter.deleteShoppingList(existing[3]);
+    await expect(
+      adapter.createShoppingList(list('E'), 3),
+    ).rejects.toMatchObject({ name: 'SavedShoppingListLimitError' });
+    await adapter.deleteShoppingList(existing[2]);
+
+    const results = await Promise.allSettled(
+      ['E', 'F'].map((title) => adapter.createShoppingList(list(title), 3)),
+    );
+
+    expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(
+      1,
+    );
+    expect(await stored.countDocuments()).toBe(3);
+    expect(
+      await stored.countDocuments({
+        id: { $in: existing.slice(0, 2).map((entry) => entry.id) },
+      }),
+    ).toBe(2);
   });
 
   it('rejects delayed legacy product and public-share writes after a deletion fence', async () => {

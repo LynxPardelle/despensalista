@@ -62,6 +62,12 @@ export interface HouseholdActivityResponseDto {
 
 export interface HouseholdWorkspaceResponseDto {
   household: HouseholdResponseDto;
+  plan: {
+    tier: 'free' | 'plus';
+    memberLimit: number;
+    savedListLimit: number;
+    paidThrough: string | null;
+  };
   currentMember: HouseholdMemberResponseDto;
   members: HouseholdMemberResponseDto[];
   invites: HouseholdInviteResponseDto[];

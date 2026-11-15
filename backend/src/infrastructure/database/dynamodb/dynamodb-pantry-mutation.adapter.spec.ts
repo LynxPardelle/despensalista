@@ -823,6 +823,7 @@ describe('DynamoDbPantryMutationAdapter', () => {
           },
         ],
       }),
+      3,
     );
 
     const typeCommand = dynamo.send.mock.calls[1][0] as TransactWriteCommand;
@@ -837,6 +838,7 @@ describe('DynamoDbPantryMutationAdapter', () => {
         '#counter < :maximum AND deleting = :deleting',
       ),
       ExpressionAttributeNames: { '#counter': 'savedShoppingLists' },
+      ExpressionAttributeValues: expect.objectContaining({ ':maximum': 3 }),
     });
   });
 

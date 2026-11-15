@@ -169,6 +169,7 @@ export class ProfileService {
     workspace: ApiHouseholdWorkspace,
   ): HouseholdWorkspace {
     return {
+      plan: workspace.plan,
       household: {
         ...workspace.household,
         createdAt: new Date(workspace.household.createdAt),

@@ -3,7 +3,10 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { ACCOUNT_FEEDBACK_ERASER } from '../ports/account-feedback-eraser.port';
+import type { AccountFeedbackEraser } from '../ports/account-feedback-eraser.port';
 import { CognitoUserAdmin } from '../ports/cognito-auth.port';
 import { AccountDeletionJob, UserDao } from '../ports/daos';
 import type { HouseholdBilling } from '../ports/household-billing.port';
@@ -47,6 +50,9 @@ export class DeleteAccountUseCase {
     private readonly deletePantryDataUseCase: DeletePantryDataUseCase,
     @Inject(HOUSEHOLD_BILLING)
     private readonly billing: HouseholdBilling,
+    @Optional()
+    @Inject(ACCOUNT_FEEDBACK_ERASER)
+    private readonly feedback?: AccountFeedbackEraser,
   ) {}
 
   async execute(command: {
@@ -120,6 +126,7 @@ export class DeleteAccountUseCase {
     );
     const deletedKnownDeviceCount =
       await this.userDeviceRepository.deleteByUserId(userId);
+    await this.feedback?.deleteForAccount(job.userId);
     const deletedCognitoIdentityCount =
       await this.cognitoUserAdmin.deleteUsersBySubjectIds(
         job.authSubjectIds,

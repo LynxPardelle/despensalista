@@ -1,5 +1,7 @@
 import { ArgumentsHost, BadRequestException, Logger } from '@nestjs/common';
 import { ApiExceptionFilter } from './api-exception.filter';
+import { SavedShoppingListLimitError } from '../../../application/ports/pantry-mutation.port';
+import { HouseholdMemberLimitError } from '../../../domain/repositories/household.repository';
 
 describe('ApiExceptionFilter', () => {
   afterEach(() => jest.restoreAllMocks());
@@ -77,6 +79,23 @@ describe('ApiExceptionFilter', () => {
       expect.objectContaining({
         message: 'Consume amount exceeds lot quantity',
         statusCode: 400,
+      }),
+    );
+  });
+
+  it.each([
+    ['HOUSEHOLD_MEMBER_LIMIT', new HouseholdMemberLimitError()],
+    ['SAVED_LIST_LIMIT', new SavedShoppingListLimitError()],
+  ])('returns a machine-readable 409 for %s', (code, error) => {
+    const reply = makeReply();
+
+    new ApiExceptionFilter().catch(error, makeHost(reply));
+
+    expect(reply.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code,
+        statusCode: 409,
+        message: error.message,
       }),
     );
   });

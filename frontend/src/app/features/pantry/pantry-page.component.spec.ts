@@ -20,6 +20,7 @@ import { DATE_PIPE_DEFAULT_OPTIONS } from '@angular/common';
 import { Store } from '@ngrx/store';
 import { AuthFacade } from '../../core/services/auth.facade';
 import { PantryPageComponent, toDateInputValue } from './pantry-page.component';
+import { PlusHouseholdSummaryComponent } from './plus-household-summary.component';
 import { PantryService } from '../../core/services/pantry.service';
 import { AuthUser } from '../../shared/models/auth.model';
 import {
@@ -208,6 +209,7 @@ describe('PantryPageComponent', () => {
         HttpClientTestingModule,
         ReactiveFormsModule,
         RouterTestingModule,
+        PlusHouseholdSummaryComponent,
       ],
       providers: [
         {
@@ -809,6 +811,19 @@ describe('PantryPageComponent', () => {
     expect(component.savedShoppingListStatus).toBe(
       'Lista maestra sincronizada en tu cuenta.',
     );
+  });
+
+  it('does not save a local list when the server rejects the plan limit', () => {
+    pantryService.createSavedShoppingList.and.returnValue(throwError(() => new HttpErrorResponse({
+      status: 409,
+      error: { code: 'SAVED_LIST_LIMIT', limit: 3 },
+    })));
+    component.savedShoppingListForm.patchValue({ title: 'Cuarta lista' });
+    component.saveShoppingListSnapshot([makeShoppingPlanItem()]);
+
+    expect(component.savedShoppingLists).toEqual([]);
+    expect(component.savedShoppingListStatus).toContain('Plus Hogar');
+    expect(component.savedShoppingListForm.controls.title.value).toBe('Cuarta lista');
   });
 
   it('repeats a saved shopping list in shopping mode even without current recommendations', async () => {

@@ -19,6 +19,7 @@ export class HouseholdMapper {
   ): HouseholdWorkspaceResponseDto {
     return {
       household: this.toHouseholdResponse(workspace.household),
+      plan: workspace.plan,
       currentMember: this.toMemberResponse(workspace.currentMember),
       members: workspace.members.map((member) => this.toMemberResponse(member)),
       invites: workspace.invites.map((invite) => this.toInviteResponse(invite)),

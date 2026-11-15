@@ -36,6 +36,27 @@ function synthesizeTemplate(
 
 const productionTemplate = synthesizeTemplate('prod');
 
+test('feedback provisions an expiring on-demand inbox only in dev', () => {
+  const devTemplate = synthesizeTemplate('dev');
+  devTemplate.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'despensalista-dev-feedback',
+    BillingMode: 'PAY_PER_REQUEST',
+    TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
+    GlobalSecondaryIndexes: [Match.objectLike({
+      IndexName: 'FeedbackInboxByMonth',
+      Projection: { ProjectionType: 'INCLUDE' },
+    })],
+  });
+  const [tableId] = Object.keys(devTemplate.findResources('AWS::DynamoDB::Table', {
+    Properties: { TableName: 'despensalista-dev-feedback' },
+  }));
+  devTemplate.hasResourceProperties('AWS::Lambda::Function', {
+    Environment: { Variables: { FEEDBACK_TABLE: { Ref: tableId } } },
+  });
+  assert.doesNotMatch(JSON.stringify(synthesizeTemplate('tst').toJSON()), /FEEDBACK_TABLE|FeedbackInboxByMonth/);
+  assert.doesNotMatch(JSON.stringify(productionTemplate.toJSON()), /FEEDBACK_TABLE|FeedbackInboxByMonth/);
+});
+
 test('public production domain preserves the legacy site and stamps the trusted viewer host', () => {
   const certificateArn = 'arn:aws:acm:us-east-1:123456789012:certificate/01234567-89ab-cdef-0123-456789abcdef';
   const context = {

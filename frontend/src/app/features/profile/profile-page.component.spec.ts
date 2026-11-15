@@ -283,11 +283,21 @@ describe('ProfilePageComponent', () => {
   });
 
   afterEach(() => {
+    http.match('/api/feedback/status').forEach((request) => {
+      if (!request.cancelled) request.flush({ available: false });
+    });
     http.match('/api/billing/status').forEach((request) => {
       if (!request.cancelled) request.flush({ available: false });
     });
     http.verify();
     document.cookie = 'XSRF-TOKEN=; Max-Age=0; Path=/';
+  });
+
+  it('offers the feedback form when it is enabled for this environment', () => {
+    http.expectOne('/api/feedback/status').flush({ available: true });
+    fixture.detectChanges();
+    const page = fixture.nativeElement as HTMLElement;
+    expect(page.querySelector('a[href="/feedback"]')?.textContent).toContain('queja o sugerencia');
   });
 
   it('renders account summary and loaded preferences', () => {
@@ -375,7 +385,7 @@ describe('ProfilePageComponent', () => {
     expect(compiled.textContent).toContain('Checkout Sessions');
     expect(compiled.textContent).toContain('Billing + Prices');
     expect(compiled.textContent).toContain('Customer Portal');
-    expect(compiled.textContent).toContain('Sin checkout real en esta tanda');
+    expect(compiled.textContent).toContain('Ventas cerradas');
   });
 
   it('offers sandbox checkout to the household owner and prevents duplicate submissions', () => {
@@ -547,7 +557,7 @@ describe('ProfilePageComponent', () => {
   });
 
   it('clears local monetization discovery events', () => {
-    component.registerMonetizationInterest('ai-capture-credits');
+    component.registerMonetizationInterest('plus-household');
 
     expect(component.monetizationEvents.length).toBe(1);
 

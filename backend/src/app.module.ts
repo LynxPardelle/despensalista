@@ -4,6 +4,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import * as Joi from 'joi';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { ACCOUNT_FEEDBACK_ERASER } from './application/ports/account-feedback-eraser.port';
 import { ApiMetricsService } from './application/services/api-metrics.service';
 import { ApiMetricsAlertSinkService } from './application/services/api-metrics-alert-sink.service';
 import {
@@ -153,6 +154,11 @@ import { StripeBillingConfig } from './infrastructure/billing/stripe-billing-con
 import { StripeBillingService } from './infrastructure/billing/stripe-billing.service';
 import { StripeBillingStore } from './infrastructure/billing/stripe-billing.store';
 import { StripeHouseholdBilling } from './infrastructure/billing/stripe-household-billing';
+import { StripeHouseholdPlan } from './infrastructure/billing/stripe-household-plan';
+import { HOUSEHOLD_PLAN_READER } from './application/ports/household-plan-reader';
+import { MONTHLY_PURCHASE_SPEND_READER } from './application/ports/monthly-purchase-spend-reader';
+import { GetPlusHouseholdSummaryUseCase } from './application/use-cases/get-plus-household-summary.use-case';
+import { PlusHouseholdSummaryController } from './infrastructure/http/controllers/plus-household-summary.controller';
 import { StripeBillingController } from './infrastructure/http/controllers/stripe-billing.controller';
 import { GoogleMfaService } from './infrastructure/http/auth/google-mfa.service';
 import { GoogleMfaController } from './infrastructure/http/controllers/google-mfa.controller';
@@ -161,6 +167,8 @@ import { HouseholdController } from './infrastructure/http/controllers/household
 import { InventoryLotsController } from './infrastructure/http/controllers/inventory-lots.controller';
 import { PantryController } from './infrastructure/http/controllers/pantry.controller';
 import { ProfileController } from './infrastructure/http/controllers/profile.controller';
+import { FeedbackController } from './infrastructure/http/controllers/feedback.controller';
+import { FeedbackStore } from './infrastructure/feedback/feedback.store';
 import { ProductTypesController } from './infrastructure/http/controllers/product-types.controller';
 import { ProductsController } from './infrastructure/http/controllers/products.controller';
 import { ShoppingSharesController } from './infrastructure/http/controllers/shopping-shares.controller';
@@ -450,6 +458,7 @@ const wasteEventRepositoryProvider = useDynamoDb
           .uri({ scheme: ['https'] })
           .optional(),
         GOOGLE_MFA_PROOF_VERSION: Joi.string().valid('2').optional(),
+        FEEDBACK_TABLE: Joi.string().optional(),
         STRIPE_BILLING_ORIGIN: Joi.string()
           .uri({ scheme: ['https'] })
           .optional(),
@@ -479,12 +488,14 @@ const wasteEventRepositoryProvider = useDynamoDb
     AuthController,
     GoogleMfaController,
     StripeBillingController,
+    PlusHouseholdSummaryController,
     HouseholdController,
     ProductsController,
     ProductTypesController,
     InventoryLotsController,
     PantryController,
     ProfileController,
+    FeedbackController,
     ShoppingSharesController,
   ],
   providers: [
@@ -499,6 +510,12 @@ const wasteEventRepositoryProvider = useDynamoDb
     StripeBillingService,
     StripeBillingStore,
     { provide: HOUSEHOLD_BILLING, useClass: StripeHouseholdBilling },
+    { provide: HOUSEHOLD_PLAN_READER, useClass: StripeHouseholdPlan },
+    {
+      provide: MONTHLY_PURCHASE_SPEND_READER,
+      useExisting: PANTRY_MUTATION_PORT,
+    },
+    GetPlusHouseholdSummaryUseCase,
     CognitoAuthTransactionService,
     CognitoProfileSyncService,
     CognitoAuthUrlBuilderService,
@@ -526,6 +543,8 @@ const wasteEventRepositoryProvider = useDynamoDb
     GetPantryOverviewUseCase,
     GetArchivedPantryItemsUseCase,
     GetUserProfileUseCase,
+    FeedbackStore,
+    { provide: ACCOUNT_FEEDBACK_ERASER, useExisting: FeedbackStore },
     GetWasteOverviewUseCase,
     GetExpiringLotsUseCase,
     ListInventoryLotsUseCase,

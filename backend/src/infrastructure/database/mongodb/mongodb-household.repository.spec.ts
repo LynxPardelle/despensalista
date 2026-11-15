@@ -9,6 +9,7 @@ import {
 } from '../../../domain/entities/household.entity';
 import { User } from '../../../domain/entities/user.entity';
 import { UserAccountStatus } from '../../../domain/enums';
+import { HouseholdMemberLimitError } from '../../../domain/repositories/household.repository';
 import { MongoHouseholdRepository } from './mongodb-household.repository';
 import { HouseholdDocument, HouseholdSchema } from './schemas/household.schema';
 
@@ -44,6 +45,72 @@ describe('Mongo household atomic membership', () => {
   afterAll(async () => {
     await connection?.close();
     await replica?.stop();
+  });
+
+  it('admits only one of two invitees racing for the last seat', async () => {
+    const owner = user('owner');
+    const household = Household.create(owner);
+    await repository.createHouseholdWithOwner(
+      household,
+      household.createOwnerMembership(owner),
+    );
+    const now = new Date();
+    const candidates = await Promise.all(
+      ['invited', 'other-user'].map(async (id, index) => {
+        const invitee = user(id);
+        const invite = HouseholdInvite.create({
+          householdId: household.id,
+          invitedEmail: invitee.email,
+          invitedByUserId: 'owner',
+          role: 'editor',
+          tokenHash: String(index).repeat(64),
+          createdAt: now,
+          expiresAt: new Date(now.getTime() + 60_000),
+        });
+        await repository.saveInvite(invite, 2);
+        invite.accept(now);
+        const member = HouseholdMembership.create({
+          householdId: household.id,
+          user: invitee,
+          role: 'editor',
+          now,
+        });
+        return [invite, member] as const;
+      }),
+    );
+
+    const results = await Promise.allSettled(
+      candidates.map(([invite, member]) =>
+        repository.acceptInvite(invite, member, 2),
+      ),
+    );
+
+    expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(
+      1,
+    );
+    expect(
+      await repository.findMembersByHouseholdId(household.id),
+    ).toHaveLength(2);
+    expect(
+      await repository.findActiveInvitesByHouseholdId(household.id, now),
+    ).toHaveLength(1);
+    const next = HouseholdInvite.create({
+      householdId: household.id,
+      invitedEmail: 'other@example.com',
+      invitedByUserId: 'owner',
+      role: 'viewer',
+      tokenHash: 'f'.repeat(64),
+      createdAt: now,
+      expiresAt: new Date(now.getTime() + 60_000),
+    });
+    await expect(repository.saveInvite(next, 2)).rejects.toBeInstanceOf(
+      HouseholdMemberLimitError,
+    );
+
+    const winner = results.find((result) => result.status === 'fulfilled');
+    if (!winner) throw new Error('No invite accepted');
+    await repository.deleteMembership(household.id, winner.value.userId);
+    await expect(repository.saveInvite(next, 2)).resolves.toBe(next);
   });
 
   it('simultaneous first requests return one household without orphans', async () => {
@@ -151,7 +218,7 @@ describe('Mongo household atomic membership', () => {
     );
     const results = await Promise.allSettled(
       attempts.map(({ invite, membership }) =>
-        repository.acceptInvite(invite, membership),
+        repository.acceptInvite(invite, membership, 5),
       ),
     );
     expect(
@@ -203,6 +270,7 @@ describe('Mongo household atomic membership', () => {
           role: 'viewer',
           now,
         }),
+        5,
       ),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(
@@ -260,7 +328,7 @@ describe('Mongo household atomic membership', () => {
     );
     invite.accept();
     await expect(
-      repository.acceptInvite(invite, membership),
+      repository.acceptInvite(invite, membership, 5),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(await repository.findMembershipByUserId('invited')).toBeNull();
   });
@@ -269,7 +337,7 @@ describe('Mongo household atomic membership', () => {
     const { household, invite, membership } = await pendingInvite();
     await repository.saveInvite(invite);
     invite.accept();
-    await repository.acceptInvite(invite, membership);
+    await repository.acceptInvite(invite, membership, 5);
     const count = await model.countDocuments({});
     await expect(
       repository.beginHouseholdDeletion(household.id, 'owner'),
@@ -323,7 +391,7 @@ describe('Mongo household atomic membership', () => {
     const { household, invite, membership } = await pendingInvite();
     await repository.saveInvite(invite);
     invite.accept();
-    await repository.acceptInvite(invite, membership);
+    await repository.acceptInvite(invite, membership, 5);
     await repository.saveActivity(
       HouseholdActivity.create({
         householdId: household.id,
@@ -494,7 +562,7 @@ describe('Mongo household atomic membership', () => {
       invite.accept();
       const [deletion, acceptance] = await Promise.allSettled([
         repository.beginHouseholdDeletion(household.id, 'owner'),
-        repository.acceptInvite(invite, membership),
+        repository.acceptInvite(invite, membership, 5),
       ]);
       expect(deletion.status).toBe('fulfilled');
       const canDelete =
