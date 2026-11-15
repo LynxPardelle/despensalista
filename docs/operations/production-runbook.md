@@ -458,6 +458,12 @@ same queue and has Checkout disabled. Resume sending with `ses` after confirming
 SES readiness and resolving any late or uncertain notices. Review the operator
 alarm and the queue before opening public Checkout.
 
+With Stripe Billing enabled, CloudFormation keeps the production renewal queue
+in the stack across `off`, `dry-run`, and `ses`. Use the same queue when resuming
+delivery. A reinstated renewal can requeue a notice that was skipped because the
+subscription was not set to renew. The worker still enforces the delivery
+window and leaves previously accepted or uncertain send attempts terminal.
+
 All stages keep Cognito `EmailSendingAccount=COGNITO_DEFAULT` without `From` or
 `SourceArn`, so signup and recovery continue through Cognito's managed sender.
 AWS rejected the production bootstrap on 2026-09-27 when those custom fields were

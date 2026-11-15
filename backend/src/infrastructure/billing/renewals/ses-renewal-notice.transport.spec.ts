@@ -8,7 +8,10 @@ import { ConfigService } from '@nestjs/config';
 import { SesRenewalNoticeTransport } from './ses-renewal-notice.transport';
 
 describe('SES renewal notice diagnostics', () => {
-  afterEach(() => jest.restoreAllMocks());
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
 
   it('requires sending and production SES access before dispatching live notices', async () => {
     const transport = new SesRenewalNoticeTransport(
@@ -32,6 +35,11 @@ describe('SES renewal notice diagnostics', () => {
       .mockResolvedValueOnce({
         ProductionAccessEnabled: true,
         SendingEnabled: true,
+        SendQuota: {
+          Max24HourSend: 10,
+          SentLast24Hours: 8,
+          MaxSendRate: 2,
+        },
       } as never);
     await expect(transport.assertProductionAccess()).rejects.toThrow(
       'SES production sending is unavailable',
@@ -39,7 +47,10 @@ describe('SES renewal notice diagnostics', () => {
     await expect(transport.assertProductionAccess()).rejects.toThrow(
       'SES production sending is unavailable',
     );
-    await expect(transport.assertProductionAccess()).resolves.toBeUndefined();
+    await expect(transport.assertProductionAccess()).resolves.toEqual({
+      maxSends: 2,
+      intervalMs: 500,
+    });
 
     expect(ses.mock.calls.map(([command]) => command)).toEqual(
       Array(3).fill(expect.any(GetAccountCommand)),
@@ -61,6 +72,11 @@ describe('SES renewal notice diagnostics', () => {
       .mockResolvedValueOnce({
         ProductionAccessEnabled: true,
         SendingEnabled: true,
+        SendQuota: {
+          Max24HourSend: 10,
+          SentLast24Hours: 9,
+          MaxSendRate: 1,
+        },
       } as never)
       .mockResolvedValueOnce({ MessageId: 'ses-id' } as never);
     const message = {
@@ -96,6 +112,63 @@ describe('SES renewal notice diagnostics', () => {
       }),
     ]);
     expect(ses.mock.calls[1][0]).toBeInstanceOf(SendEmailCommand);
+  });
+
+  it('enforces the production rate, keeps multiple sends, and stops on an ambiguous response', async () => {
+    const transport = new SesRenewalNoticeTransport(
+      new ConfigService({
+        STRIPE_BILLING_MODE: 'live',
+        RENEWAL_NOTICE_STAGE: 'prod',
+        RENEWAL_NOTICE_MODE: 'ses',
+        RENEWAL_NOTICE_TABLE: 'despensalista-prod-renewal-notices',
+      }),
+    );
+    jest.useFakeTimers();
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    const ses = jest
+      .spyOn(SESv2Client.prototype, 'send')
+      .mockResolvedValueOnce({
+        ProductionAccessEnabled: true,
+        SendingEnabled: true,
+        SendQuota: { Max24HourSend: -1, SentLast24Hours: 12, MaxSendRate: 2 },
+      } as never)
+      .mockResolvedValueOnce({ MessageId: 'first-id' } as never)
+      .mockResolvedValueOnce({ MessageId: 'second-id' } as never)
+      .mockResolvedValueOnce({} as never);
+    const message = {
+      noticeId: 'notice',
+      recipient: 'owner@example.com',
+      subject: 'Subject',
+      text: 'Text',
+    };
+
+    await expect(transport.assertProductionAccess()).resolves.toEqual({
+      maxSends: 5,
+      intervalMs: 500,
+    });
+    await expect(transport.send(message)).resolves.toEqual({
+      messageId: 'first-id',
+    });
+    await jest.advanceTimersByTimeAsync(499);
+    await expect(transport.send(message)).rejects.toThrow(
+      'transport is unavailable',
+    );
+    await jest.advanceTimersByTimeAsync(1);
+    await expect(transport.send(message)).resolves.toEqual({
+      messageId: 'second-id',
+    });
+    await jest.advanceTimersByTimeAsync(500);
+    await expect(transport.send(message)).rejects.toThrow(
+      'SES did not return a message ID',
+    );
+    await jest.advanceTimersByTimeAsync(500);
+    await expect(transport.send(message)).rejects.toThrow(
+      'transport is unavailable',
+    );
+    expect(ses).toHaveBeenCalledTimes(4);
+    expect(ses.mock.calls[1][1]).toMatchObject({
+      abortSignal: expect.any(AbortSignal),
+    });
   });
 
   it.each([

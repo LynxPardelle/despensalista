@@ -120,7 +120,20 @@ test('production can dry run notices without authorizing SES and requires produc
     enableStripeBillingBoundary: 'true',
     enableStripeBilling: 'true',
   };
+  const off = synthesizeTemplate('prod', billing);
+  const renewalTables = (template: Template) => template.findResources('AWS::DynamoDB::Table', {
+    Properties: { TableName: 'despensalista-prod-renewal-notices' },
+  });
+  const offTables = renewalTables(off);
+  const [renewalTableId] = Object.keys(offTables);
+  assert.equal(Object.keys(offTables).length, 1, 'Off must retain the managed production renewal table');
+  assert.equal(offTables[renewalTableId].DeletionPolicy, 'Retain');
+  assert.equal(offTables[renewalTableId].UpdateReplacePolicy, 'Retain');
+  assert.equal(offTables[renewalTableId].Properties.DeletionProtectionEnabled, true);
+  assert.equal(offTables[renewalTableId].Properties.BillingMode, 'PAY_PER_REQUEST');
+  assert.doesNotMatch(JSON.stringify(off.toJSON()), /RENEWAL_NOTICE_TABLE|PlusRenewalNoticeRule|ses:SendEmail|ses:GetAccount/);
   const dryRun = synthesizeTemplate('prod', { ...billing, renewalNoticeMode: 'dry-run' });
+  assert.deepEqual(renewalTables(dryRun), offTables);
   const dryRunJson = JSON.stringify(dryRun.toJSON());
   assert.match(dryRunJson, /despensalista-prod-renewal-notices/);
   assert.doesNotMatch(dryRunJson, /ses:SendEmail|RENEWAL_NOTICE_SES_TEST_TO/);
@@ -137,6 +150,7 @@ test('production can dry run notices without authorizing SES and requires produc
     renewalNoticeMode: 'ses',
     renewalNoticeSesProductionAccess: 'true',
   });
+  assert.deepEqual(renewalTables(production), offTables);
   production.hasResourceProperties('AWS::Lambda::Function', {
     FunctionName: 'despensalista-prod-backend-api',
     Environment: { Variables: { RENEWAL_NOTICE_STAGE: 'prod', RENEWAL_NOTICE_MODE: 'ses' } },
@@ -293,6 +307,9 @@ test('Stripe Billing keeps the dev sandbox and scopes its Lambda grants', () => 
     serverlessFrontendBaseUrl: devOrigin,
     appDomainName: new URL(devOrigin).hostname,
   });
+  assert.deepEqual(enabled.findResources('AWS::DynamoDB::Table', {
+    Properties: { TableName: 'despensalista-dev-renewal-notices' },
+  }), {});
   const [tableId] = Object.keys(enabled.findResources('AWS::DynamoDB::Table', {
     Properties: {
       TableName: 'despensalista-dev-billing',
