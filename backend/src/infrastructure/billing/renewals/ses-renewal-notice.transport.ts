@@ -1,5 +1,5 @@
 import { SendEmailCommand, SESv2Client } from '@aws-sdk/client-sesv2';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type {
   RenewalNoticeMessage,
@@ -7,9 +7,23 @@ import type {
 } from './renewal-notice.types';
 
 const sender = 'no-reply@despensalista.lynxpardelle.com';
+const knownErrors = new Set([
+  'AccessDeniedException',
+  'BadRequestException',
+  'CredentialsProviderError',
+  'EndpointError',
+  'InternalServiceErrorException',
+  'MailFromDomainNotVerifiedException',
+  'MessageRejected',
+  'NotFoundException',
+  'SendingPausedException',
+  'TimeoutError',
+  'TooManyRequestsException',
+]);
 
 @Injectable()
 export class SesRenewalNoticeTransport implements RenewalNoticeTransport {
+  private readonly logger = new Logger(SesRenewalNoticeTransport.name);
   private readonly ses = new SESv2Client({
     region: 'us-east-1',
     maxAttempts: 1,
@@ -25,22 +39,48 @@ export class SesRenewalNoticeTransport implements RenewalNoticeTransport {
         'despensalista-dev-renewal-notices' ||
       this.config.get('RENEWAL_NOTICE_SES_TEST_TO') !== message.recipient
     ) {
+      this.logger.warn('SES SendEmail blocked by the dev configuration guard');
       throw new Error('Renewal notice transport is unavailable');
     }
 
-    const sent = await this.ses.send(
-      new SendEmailCommand({
-        FromEmailAddress: sender,
-        Destination: { ToAddresses: [message.recipient] },
-        Content: {
-          Simple: {
-            Subject: { Data: message.subject, Charset: 'UTF-8' },
-            Body: { Text: { Data: message.text, Charset: 'UTF-8' } },
+    const sent = await this.ses
+      .send(
+        new SendEmailCommand({
+          FromEmailAddress: sender,
+          Destination: { ToAddresses: [message.recipient] },
+          Content: {
+            Simple: {
+              Subject: { Data: message.subject, Charset: 'UTF-8' },
+              Body: { Text: { Data: message.text, Charset: 'UTF-8' } },
+            },
           },
-        },
-      }),
-    );
-    if (!sent.MessageId) throw new Error('SES did not return a message ID');
+        }),
+      )
+      .catch((error: unknown) => {
+        const info = error as {
+          name?: unknown;
+          $metadata?: { httpStatusCode?: unknown };
+        } | null;
+        const name = info?.name;
+        const status = info?.$metadata?.httpStatusCode;
+        const label =
+          typeof name === 'string' && knownErrors.has(name)
+            ? name
+            : 'UnexpectedError';
+        const http =
+          typeof status === 'number' &&
+          Number.isInteger(status) &&
+          status >= 100 &&
+          status < 600
+            ? ` (HTTP ${status})`
+            : '';
+        this.logger.warn(`SES SendEmail failed: ${label}${http}`);
+        throw error;
+      });
+    if (!sent.MessageId) {
+      this.logger.warn('SES SendEmail returned no message ID');
+      throw new Error('SES did not return a message ID');
+    }
     return { messageId: sent.MessageId };
   }
 }
