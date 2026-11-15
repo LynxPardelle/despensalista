@@ -52,6 +52,12 @@ export function stripeBillingDeployment(stack: cdk.Stack, project: string, stage
   const boundaryEnabled = readFlag('enableStripeBillingBoundary') ?? false;
   const externalBoundary = readFlag('externalStripeBillingBoundary') ?? false;
   const checkoutEnabled = readFlag('enableStripeBillingCheckout') ?? (stage === 'dev' && enabled);
+  const rawVatRateId: unknown = stack.node.tryGetContext('stripeBillingVatRateId');
+  const vatRateId = rawVatRateId === '' ? undefined : rawVatRateId;
+  if (vatRateId !== undefined && (!enabled || typeof vatRateId !== 'string' ||
+    !/^txr_[A-Za-z0-9]+$/.test(vatRateId))) {
+    throw new Error('The Stripe VAT rate requires billing and a Stripe tax rate identifier.');
+  }
   const publicCheckout = checkoutEnabled && (readFlag('enablePublicStripeBillingCheckout') ?? false);
   const pilotContext: unknown = checkoutEnabled ? stack.node.tryGetContext('stripeBillingPilotHouseholdId') : undefined;
   const pilotHouseholdId = pilotContext === '' ? undefined : pilotContext;
@@ -85,6 +91,7 @@ export function stripeBillingDeployment(stack: cdk.Stack, project: string, stage
   return {
     enabled,
     checkoutEnabled,
+    vatRateId: typeof vatRateId === 'string' ? vatRateId : undefined,
     publicCheckout,
     pilotHouseholdId,
     boundaryEnabled: stage === 'dev' ? enabled : boundaryEnabled,
@@ -97,6 +104,22 @@ export function stripeBillingDeployment(stack: cdk.Stack, project: string, stage
 
 const renewalNoticeSenderDomain = 'despensalista.lynxpardelle.com';
 export const renewalNoticeSender = `no-reply@${renewalNoticeSenderDomain}`;
+
+export function cfdiRequestDeployment(stack: cdk.Stack, project: string, stage: string) {
+  const recipient: unknown = stack.node.tryGetContext('cfdiRequestRecipient');
+  if (recipient === '' || recipient === undefined) return undefined;
+  if (project !== 'despensalista' || (stage !== 'dev' && stage !== 'prod')) {
+    throw new Error('CFDI requests may only run in dev and prod for DespensaLista.');
+  }
+  if (typeof recipient !== 'string' || recipient !== recipient.toLowerCase() ||
+    recipient.length > 254 || !/^[a-z0-9.!#$%&'*+\/=?^_{}|~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(recipient)) {
+    throw new Error('CFDI requests require a single lowercase address.');
+  }
+  if (stack.region !== 'us-east-1' || !stripeBillingDeployment(stack, project, stage).enabled) {
+    throw new Error('CFDI requests require Stripe Billing and SES in us-east-1.');
+  }
+  return { recipient, stage, from: renewalNoticeSender };
+}
 
 export function renewalNoticeDeployment(stack: cdk.Stack, project: string, stage: string) {
   const mode: unknown = stack.node.tryGetContext('renewalNoticeMode') ?? 'off';
@@ -181,6 +204,7 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
   const inventory = deliveryInventory(stage);
   const stripeBilling = stripeBillingDeployment(stack, project, stage);
   const renewalNotice = renewalNoticeDeployment(stack, project, stage);
+  const cfdiRequest = cfdiRequestDeployment(stack, project, stage);
   const arn = (service: string, resource: string, resourceName: string, region = stack.region) =>
     stack.formatArn({ service, region, resource, resourceName });
   const roleArn = (name: string) => arn('iam', 'role', name, '');
@@ -240,6 +264,7 @@ export function createStageDeliveryControls(stack: cdk.Stack, project: string, s
       if (renewalNotice.stage === 'prod') runtimeStatements.push(renewalNoticeSesAccountPolicy(stack));
     }
   }
+  if (cfdiRequest) runtimeStatements.push(renewalNoticeSesPolicy(stack, cfdiRequest.recipient));
   const boundary = new iam.ManagedPolicy(stack, 'RuntimePermissionsBoundary', {
     managedPolicyName: `${prefix}-runtime-boundary`, statements: runtimeStatements,
   });

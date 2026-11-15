@@ -29,13 +29,48 @@ function synthesizeTemplate(
     cognitoDomain: 'https://auth.example',
     cognitoUserPoolClientId: 'client-id',
     cognitoUserPoolId: 'us-east-1_example',
-    ...(extraContext.renewalNoticeMode === 'ses' && { env: { region: 'us-east-1' } }),
+    ...((extraContext.renewalNoticeMode === 'ses' || extraContext.cfdiRequestRecipient) && { env: { region: 'us-east-1' } }),
   });
 
   return Template.fromStack(stack);
 }
 
 const productionTemplate = synthesizeTemplate('prod');
+
+test('CFDI sending is opt-in and permitted only to its configured billing mailbox', () => {
+  const cfdiRequestRecipient = 'facturas@despensalista.com';
+  const billing = {
+    enableStripeBilling: 'true',
+    stripeBillingVatRateId: 'txr_1234',
+    serverlessFrontendBaseUrl: 'https://dev.despensalista.lynxpardelle.com',
+    appDomainName: 'dev.despensalista.lynxpardelle.com',
+  };
+  const dev = synthesizeTemplate('dev', { ...billing, cfdiRequestRecipient });
+  dev.hasResourceProperties('AWS::Lambda::Function', {
+    FunctionName: 'despensalista-dev-backend-api',
+    Environment: { Variables: {
+      STRIPE_BILLING_VAT_RATE_ID: 'txr_1234',
+      CFDI_REQUEST_MODE: 'ses',
+      CFDI_REQUEST_STAGE: 'dev',
+      CFDI_REQUEST_FROM: 'no-reply@despensalista.lynxpardelle.com',
+      CFDI_REQUEST_RECIPIENT: cfdiRequestRecipient,
+    } },
+  });
+  dev.hasResourceProperties('AWS::IAM::Policy', {
+    PolicyDocument: { Statement: Match.arrayWith([Match.objectLike({
+      Action: 'ses:SendEmail',
+      Condition: {
+        StringEquals: { 'aws:RequestedRegion': 'us-east-1', 'ses:FromAddress': 'no-reply@despensalista.lynxpardelle.com' },
+        'ForAllValues:StringEquals': { 'ses:Recipients': [cfdiRequestRecipient] },
+        Null: { 'ses:Recipients': 'false' },
+      },
+    })]) },
+  });
+  assert.doesNotMatch(JSON.stringify(synthesizeTemplate('dev', billing).toJSON()), /CFDI_REQUEST|ses:SendEmail/);
+  assert.throws(() => synthesizeTemplate('tst', { cfdiRequestRecipient }), /CFDI requests may only run in dev and prod/);
+  assert.throws(() => synthesizeTemplate('dev', { ...billing, cfdiRequestRecipient: 'one@example.com,two@example.com' }), /single lowercase address/);
+  assert.throws(() => synthesizeTemplate('dev', { ...billing, stripeBillingVatRateId: 'price_unrelated' }), /VAT rate/);
+});
 
 test('feedback provisions isolated expiring inboxes and protects production contents', () => {
   for (const stage of ['dev', 'tst', 'prod'] as const) {

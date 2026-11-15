@@ -23,6 +23,7 @@ export interface CheckoutAttempt {
   expiresAt: number;
   stripeSessionId?: string;
   termsVersion?: string;
+  vatRateId?: string;
 }
 
 export interface CheckoutConsent {
@@ -40,6 +41,7 @@ export interface BillingRecord {
   subscriptionId?: string;
   paidThrough?: number;
   renewalAt?: number;
+  renewalAmountMinor?: number;
   cancelAtPeriodEnd?: boolean;
   closed?: boolean;
 }
