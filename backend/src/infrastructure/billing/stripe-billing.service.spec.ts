@@ -1,5 +1,6 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- Match the backend's Stripe CommonJS import.
 import Stripe = require('stripe');
+import type { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import {
   FastifyAdapter,
@@ -56,9 +57,11 @@ describe('StripeBillingService', () => {
   let customerMapping: jest.Mock;
   let beginCheckout: jest.Mock;
   let endCheckout: jest.Mock;
+  let noticeValues: Record<string, string>;
 
   beforeEach(() => {
     record = undefined;
+    noticeValues = {};
     exists = jest.fn().mockResolvedValue(false);
     settings = jest.fn().mockResolvedValue(billing);
     customerMapping = jest.fn().mockResolvedValue(undefined);
@@ -102,6 +105,7 @@ describe('StripeBillingService', () => {
       {
         executeOwner: permissions,
       } as unknown as ResolveHouseholdPantryAccessUseCase,
+      { get: (key: string) => noticeValues[key] } as ConfigService,
     );
     jest.spyOn(stripe.prices, 'retrieve').mockResolvedValue({
       id: 'price_test',
@@ -146,6 +150,135 @@ describe('StripeBillingService', () => {
         },
       } as unknown as Stripe.Response<Stripe.Checkout.Session>),
     );
+  });
+
+  it('enqueues only an eligible verified dev renewal and reconfirms fresh cancellation', async () => {
+    noticeValues = {
+      RENEWAL_NOTICE_TABLE: 'despensalista-dev-renewal-notices',
+      RENEWAL_NOTICE_MODE: 'dry-run',
+      STRIPE_BILLING_MODE: 'test',
+    };
+    record = {
+      householdId: 'household-1',
+      customerId: 'cus_test',
+      revision: 1,
+    };
+    const renewalAt = Math.floor(Date.now() / 1000) + 30 * 86_400;
+    const subscription = {
+      id: 'sub_test',
+      customer: 'cus_test',
+      livemode: false,
+      metadata: session.metadata,
+      status: 'active',
+      collection_method: 'charge_automatically',
+      cancel_at_period_end: false,
+      cancel_at: null as number | null,
+      items: {
+        has_more: false,
+        data: [
+          {
+            id: 'si_test',
+            quantity: 1,
+            current_period_end: renewalAt,
+            price: {
+              id: billing.priceId,
+              currency: 'mxn',
+              unit_amount: 5900,
+              recurring: {
+                interval: 'month',
+                interval_count: 1,
+                usage_type: 'licensed',
+              },
+            },
+          },
+        ],
+      },
+      latest_invoice: {
+        status: 'paid',
+        amount_paid: 5900,
+        currency: 'mxn',
+        customer: 'cus_test',
+        livemode: false,
+        parent: { subscription_details: { subscription: 'sub_test' } },
+        lines: {
+          data: [
+            {
+              currency: 'mxn',
+              amount: 5900,
+              period: { end: renewalAt },
+              parent: {
+                subscription_item_details: { subscription_item: 'si_test' },
+              },
+              pricing: { price_details: { price: billing.priceId } },
+            },
+          ],
+        },
+      },
+    };
+    jest.mocked(stripe.subscriptions.list).mockResolvedValue({
+      data: [subscription],
+      has_more: false,
+    } as unknown as Stripe.Response<Stripe.ApiList<Stripe.Subscription>>);
+    const deliver = (id: string) => {
+      const payload = JSON.stringify({
+        id,
+        type: 'invoice.paid',
+        livemode: false,
+        data: { object: { customer: 'cus_test' } },
+      });
+      return service.webhook(
+        Buffer.from(payload),
+        stripe.webhooks.generateTestHeaderString({ payload, secret }),
+      );
+    };
+
+    await deliver('evt_eligible_notice');
+    expect(commit).toHaveBeenLastCalledWith(
+      expect.objectContaining({ paidThrough: renewalAt }),
+      billing.table,
+      'evt_eligible_notice',
+      {
+        Update: expect.objectContaining({
+          TableName: noticeValues.RENEWAL_NOTICE_TABLE,
+          ExpressionAttributeValues: expect.objectContaining({
+            ':householdId': 'household-1',
+            ':subscriptionId': 'sub_test',
+            ':renewalAt': renewalAt,
+            ':amountMinor': 5900,
+          }),
+        }),
+      },
+    );
+    await expect(service.getUpcomingRenewal('household-1')).resolves.toEqual({
+      householdId: 'household-1',
+      subscriptionId: 'sub_test',
+      renewalAt,
+      amountMinor: 5900,
+      currency: 'mxn',
+    });
+
+    // A fresh Stripe state can become nonrenewing before its webhook arrives.
+    subscription.cancel_at = renewalAt;
+    await expect(
+      service.getUpcomingRenewal('household-1'),
+    ).resolves.toBeUndefined();
+    await deliver('evt_canceled_notice');
+    expect(commit).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        paidThrough: renewalAt,
+        cancelAtPeriodEnd: true,
+      }),
+      billing.table,
+      'evt_canceled_notice',
+      undefined,
+    );
+
+    settings.mockResolvedValue(production);
+    jest.mocked(stripe.subscriptions.list).mockClear();
+    await expect(
+      service.getUpcomingRenewal('household-1'),
+    ).resolves.toBeUndefined();
+    expect(stripe.subscriptions.list).not.toHaveBeenCalled();
   });
 
   afterEach(() => jest.restoreAllMocks());

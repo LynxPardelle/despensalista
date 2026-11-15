@@ -1,6 +1,7 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  AdminGetUserCommand,
   AdminUserGlobalSignOutCommand,
   AdminDeleteUserCommand,
   CognitoIdentityProviderClient,
@@ -20,6 +21,44 @@ export class CognitoUserAdminService implements CognitoUserAdmin {
     this.client = new CognitoIdentityProviderClient({
       region: this.getRegion(),
     });
+  }
+
+  async getVerifiedEmailBySubjectId(
+    subjectId: string,
+    knownUsername?: string,
+  ): Promise<string | undefined> {
+    if (this.configService.get<string>('COGNITO_ENABLED') !== 'true') {
+      return undefined;
+    }
+    const userPoolId = this.getUserPoolId();
+    const username =
+      knownUsername ||
+      (await this.findUsernameBySubjectId(userPoolId, subjectId));
+    if (!username) return undefined;
+
+    try {
+      const user = await this.client.send(
+        new AdminGetUserCommand({ UserPoolId: userPoolId, Username: username }),
+      );
+      const attributes = new Map(
+        user.UserAttributes?.map(({ Name, Value }) => [Name, Value]),
+      );
+      if (
+        !user.Enabled ||
+        (user.UserStatus !== 'CONFIRMED' &&
+          user.UserStatus !== 'EXTERNAL_PROVIDER') ||
+        attributes.get('sub') !== subjectId ||
+        attributes.get('email_verified') !== 'true'
+      ) {
+        return undefined;
+      }
+      return (
+        attributes.get('email')?.trim().toLocaleLowerCase('en-US') || undefined
+      );
+    } catch (error) {
+      if ((error as Error).name === 'UserNotFoundException') return undefined;
+      throw error;
+    }
   }
 
   async deleteUsersBySubjectIds(
@@ -130,7 +169,7 @@ export class CognitoUserAdminService implements CognitoUserAdmin {
 
     if (!userPoolId) {
       throw new ServiceUnavailableException(
-        'Cognito user pool id is required for account deletion',
+        'Cognito user pool id is required for account administration',
       );
     }
 

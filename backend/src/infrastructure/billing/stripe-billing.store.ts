@@ -8,6 +8,7 @@ import {
   PutCommand,
   TransactWriteCommand,
   type PutCommandInput,
+  type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb';
 import {
   ConditionalCheckFailedException,
@@ -232,6 +233,7 @@ export class StripeBillingStore {
     next: BillingRecord,
     table: string,
     eventId: string,
+    renewal?: NonNullable<TransactWriteCommandInput['TransactItems']>[number],
   ): Promise<boolean> {
     try {
       await this.db.send(
@@ -248,6 +250,7 @@ export class StripeBillingStore {
               },
             },
             { Put: this.recordWrite(next, table) },
+            ...(renewal ? [renewal] : []),
           ],
         }),
       );
