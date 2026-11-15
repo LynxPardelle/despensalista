@@ -22,8 +22,12 @@
       @if (available() === false) {
         <p class="helper-copy">La solicitud en línea no está disponible para este hogar.</p>
       }
-      @if (available() && invoices().length === 0) {
-        <p class="helper-copy">Todavía no hay pagos que puedas facturar desde aquí.</p>
+      @if (available() && invoices().length === 0 && !loading() && !loadError()) {
+        @if (nextCursor()) {
+          <p class="helper-copy">En esta página no hay pagos facturables. Consulta los pagos anteriores.</p>
+        } @else {
+          <p class="helper-copy">Todavía no hay pagos que puedas facturar desde aquí.</p>
+        }
       }
       @if (available() && invoices().length > 0) {
         <div class="cfdi-field">

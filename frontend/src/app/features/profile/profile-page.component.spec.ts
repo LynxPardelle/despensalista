@@ -978,6 +978,33 @@ describe('ProfilePageComponent', () => {
     expect(panel.querySelector('a[href="mailto:facturas@despensalista.com"]')).toBeTruthy();
   });
 
+  it('finds a paid invoice after a page with no eligible payments', () => {
+    http.expectOne('/api/billing/status').flush({ ...subscription, mode: 'live', canCheckout: false });
+    fixture.detectChanges();
+
+    const panel: HTMLElement = fixture.nativeElement.querySelector('.cfdi-panel');
+    panel.querySelector<HTMLButtonElement>('button')!.click();
+    http.expectOne('/api/billing/invoices').flush({
+      available: true, invoices: [], nextCursor: 'in_previous',
+    });
+    fixture.detectChanges();
+
+    expect(panel.textContent).toContain('En esta página no hay pagos facturables');
+    expect(panel.textContent).not.toContain('Todavía no hay pagos');
+    const earlierPayments = [...panel.querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('Ver pagos anteriores'));
+    expect(earlierPayments).toBeDefined();
+    earlierPayments!.click();
+    http.expectOne('/api/billing/invoices?cursor=in_previous').flush({
+      available: true, invoices: [paidInvoice()],
+    });
+    fixture.detectChanges();
+
+    const selection = panel.querySelector<HTMLSelectElement>('#cfdi-invoice');
+    expect(selection?.options[1].value).toBe('in_paid');
+    expect(panel.textContent).not.toContain('Ver pagos anteriores');
+  });
+
   it('keeps the request card hidden from members who do not manage billing', () => {
     http.expectOne('/api/billing/status').flush({ ...subscription, mode: 'live', canManage: false });
     fixture.detectChanges();

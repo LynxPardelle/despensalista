@@ -51,7 +51,9 @@ export class CfdiMail {
     const testPrefix = options.stage === 'dev' ? '[Prueba] ' : '';
     const text = [
       ...(testPrefix
-        ? ['Prueba de Stripe Sandbox. No emitas un CFDI por este pago de prueba.']
+        ? [
+            'Prueba de Stripe Sandbox. No emitas un CFDI por este pago de prueba.',
+          ]
         : []),
       'Solicitaron un CFDI por un pago de Plus Hogar. ZooBeriah Systems emite el comprobante.',
       '',
