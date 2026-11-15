@@ -787,14 +787,11 @@ describe('MongoPantryMutationAdapter', () => {
     };
     const type = makeProductType('remaining');
     await adapter.createProductType(type);
-    await connection
-      .collection('pantry_quotas')
-      .updateOne(
-        { _id: 'user-1' as never },
-        {
-          $set: { 'purchaseAmount_2026-11': 2500, 'purchasePriced_2026-11': 1 },
-        },
-      );
+    const quotas = connection.collection('pantry_quotas');
+    await quotas.updateOne(
+      { _id: 'user-1' as never },
+      { $set: { 'purchaseAmount_2026-11': 2500, 'purchasePriced_2026-11': 1 } },
+    );
     await runtimeAdapter.beginPantryDeletion('user-1', {
       deletionToken: 'owner-token',
     });
