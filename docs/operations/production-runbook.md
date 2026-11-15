@@ -397,6 +397,13 @@ that there is no upcoming charge. Close new purchases by setting
 before the next enrollment, and check the production release and portal after
 closing purchases.
 
+After a close deployment, verify the `live` alias reports Checkout disabled.
+A failed deployment can restore the previous version and its Checkout settings.
+Treat a failed close as an open enrollment incident until the alias confirms
+closure. Manual rollback cannot expand the currently served Checkout audience.
+Stripe sessions already open may accept payment until they expire. During pilot
+closure, confirm the owned Checkout session is complete or expired in Stripe.
+
 Open public sales only after a controlled production renewal notice reaches its
 verified recipient, the consent and cancellation checks pass, and the billing
 owner confirms who issues the CFDI, the final price and VAT treatment, and who
@@ -441,6 +448,15 @@ on November 12 (Mexico City time). The November 14 reply added subscription
 renewal notices to the requested transactional scope and summarized the dev
 delivery, duplicate prevention, and cancellation results. Activate production
 sending only after SES reports production access in `us-east-1`.
+
+After the administrative production SES permissions are installed, pause
+delivery by setting `PLUS_RENEWAL_NOTICE_MODE=dry-run` and
+`ENABLE_STRIPE_BILLING_CHECKOUT=false`. Run **Deploy Serverless Prod** on `prod`
+with `backend_only=true` so the deployment preserves the protected Cognito and
+IAM policies. Verify the serving Lambda version has `dry-run` mode, keeps the
+same queue and has Checkout disabled. Resume sending with `ses` after confirming
+SES readiness and resolving any late or uncertain notices. Review the operator
+alarm and the queue before opening public Checkout.
 
 All stages keep Cognito `EmailSendingAccount=COGNITO_DEFAULT` without `From` or
 `SourceArn`, so signup and recovery continue through Cognito's managed sender.
