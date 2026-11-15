@@ -7,3 +7,5 @@ La cola conserva los identificadores de hogar y suscripción, la fecha de renova
 El recurso y la regla programada se habilitan en dev mediante la configuración del entorno. Los escenarios de prueba usan suscripciones desechables. El reloj de prueba se acepta por invocación directa de la Lambda de dev y exige el identificador de un único aviso. El recorrido productivo conserva Checkout cerrado.
 
 La cola registra cada intento para evitar reenvíos ante reintentos o respuestas inciertas de SES. Consultar [el runbook](../../operations/production-runbook.md) antes de habilitar el servicio para clientes reales.
+
+Para diagnosticar rechazos en dev, el transporte registra una categoría de error de una lista fija, el código HTTP y una etiqueta fija si SES identifica la identidad del remitente o del dominio. Se descartan la excepción completa, direcciones, ARN, contenido y metadatos de la solicitud. El registro no habilita nuevos envíos ni cambia cuándo se permite reintentar un aviso.
