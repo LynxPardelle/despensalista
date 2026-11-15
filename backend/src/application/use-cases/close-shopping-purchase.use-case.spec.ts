@@ -45,6 +45,13 @@ describe('CloseShoppingPurchaseUseCase', () => {
     expect(mutationPort.checkout).toHaveBeenCalledTimes(1);
     const transaction = mutationPort.checkout.mock.calls[0][0];
     expect(transaction.lots).toHaveLength(2);
+    expect(transaction).toMatchObject({
+      purchaseSpend: {
+        amountMinor: 10500,
+        pricedItemCount: 2,
+        unpricedItemCount: 0,
+      },
+    });
     expect(transaction.productTypes).toHaveLength(1);
     expect(
       transaction.productTypes[0].updated.shoppingMetadata.estimatedUnitPrice,
@@ -83,6 +90,16 @@ describe('CloseShoppingPurchaseUseCase', () => {
 
       expect(result.value[0].purchaseDate).toEqual(
         new Date('2026-04-28T00:00:00.000Z'),
+      );
+      expect(mutationPort.checkout).toHaveBeenCalledWith(
+        expect.objectContaining({
+          purchaseSpend: {
+            month: '2026-04',
+            amountMinor: 0,
+            pricedItemCount: 0,
+            unpricedItemCount: 1,
+          },
+        }),
       );
     } finally {
       jest.useRealTimers();

@@ -36,6 +36,43 @@ function synthesizeTemplate(
 
 const productionTemplate = synthesizeTemplate('prod');
 
+test('feedback provisions isolated expiring inboxes and protects production contents', () => {
+  for (const stage of ['dev', 'tst', 'prod'] as const) {
+    // Explicitly ask for destroy to show the production inbox is protected
+    // independently of the developer-configurable stack default.
+    const template = synthesizeTemplate(stage, { removalPolicy: 'destroy' });
+    const tableName = `despensalista-${stage}-feedback`;
+    const [tableId] = Object.keys(template.findResources('AWS::DynamoDB::Table', {
+      Properties: { TableName: tableName },
+    }));
+    assert.ok(tableId, tableName);
+    template.hasResource('AWS::DynamoDB::Table', {
+      DeletionPolicy: stage === 'prod' ? 'Retain' : 'Delete',
+      UpdateReplacePolicy: stage === 'prod' ? 'Retain' : 'Delete',
+      Properties: {
+        TableName: tableName,
+        BillingMode: 'PAY_PER_REQUEST',
+        DeletionProtectionEnabled: stage === 'prod',
+        TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
+        GlobalSecondaryIndexes: [Match.objectLike({
+          IndexName: 'FeedbackInboxByMonth',
+          Projection: { ProjectionType: 'INCLUDE' },
+        })],
+      },
+    });
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: { FEEDBACK_TABLE: { Ref: tableId } } },
+    });
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: { Statement: Match.arrayWith([Match.objectLike({
+        Action: Match.arrayWith(['dynamodb:PutItem', 'dynamodb:Query']),
+        Resource: { 'Fn::GetAtt': [tableId, 'Arn'] },
+      })]) },
+    });
+    template.hasOutput('FeedbackTableName', { Value: { Ref: tableId } });
+  }
+});
+
 test('public production domain preserves the legacy site and stamps the trusted viewer host', () => {
   const certificateArn = 'arn:aws:acm:us-east-1:123456789012:certificate/01234567-89ab-cdef-0123-456789abcdef';
   const context = {
@@ -294,7 +331,7 @@ test('production Lambda does not trust X-Forwarded-For for rate-limit identity',
   );
   assert.equal(
     backend.Properties.Environment.Variables.BACKEND_DATA_CONTRACT_VERSION,
-    '1',
+    '2',
   );
 });
 
@@ -395,7 +432,7 @@ test('production publishes an aliased Lambda with all-at-once rollback controls'
   );
   assert.equal(deploymentGroup.Properties.AlarmConfiguration.Alarms.length, 1);
   productionTemplate.hasOutput('PantryQuotaSchemaVersion', { Value: '2' });
-  productionTemplate.hasOutput('BackendDataContractVersion', { Value: '1' });
+  productionTemplate.hasOutput('BackendDataContractVersion', { Value: '2' });
   productionTemplate.hasOutput('DeploymentReleaseId', { Value: 'a'.repeat(12) });
 });
 
@@ -519,7 +556,7 @@ test('production retains versioned web assets and deletion-protected tables', ()
     },
   });
   const tables = productionTemplate.findResources('AWS::DynamoDB::Table');
-  assert.equal(Object.keys(tables).length, 4);
+  assert.equal(Object.keys(tables).length, 5);
   for (const table of Object.values(tables)) {
     assert.equal(table.Properties?.DeletionProtectionEnabled, true);
   }

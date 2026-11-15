@@ -191,8 +191,16 @@ export interface HouseholdActivity {
   createdAt: Date;
 }
 
+export interface HouseholdPlan {
+  tier: 'free' | 'plus';
+  memberLimit: number;
+  savedListLimit: number;
+  paidThrough: string | null;
+}
+
 export interface ApiHouseholdWorkspace {
   household: ApiHousehold;
+  plan?: HouseholdPlan;
   currentMember: ApiHouseholdMember;
   members: ApiHouseholdMember[];
   invites: ApiHouseholdInvite[];
@@ -201,6 +209,7 @@ export interface ApiHouseholdWorkspace {
 
 export interface HouseholdWorkspace {
   household: Household;
+  plan?: HouseholdPlan;
   currentMember: HouseholdMember;
   members: HouseholdMember[];
   invites: HouseholdInvite[];

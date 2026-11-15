@@ -1,0 +1,47 @@
+<main class="feedback-page" aria-labelledby="feedback-title">
+  <article>
+    <a routerLink="/profile">Volver al perfil</a>
+    <h1 id="feedback-title">Enviar un reporte</h1>
+
+    @switch (availability()) {
+      @case ('loading') {
+        <p role="status">Cargando el formulario…</p>
+      }
+      @case ('unavailable') {
+        <p>El formulario todavía no está disponible.</p>
+      }
+      @case ('error') {
+        <p role="alert">No pudimos cargar el formulario.</p>
+        <button type="button" class="secondary-button" (click)="checkAvailability()">Volver a intentar</button>
+      }
+      @case ('ready') {
+        @if (receipt(); as id) {
+          <p class="receipt" role="status">Recibimos tu reporte. Tu folio es <strong>{{ id }}</strong>.</p>
+        }
+        <form [formGroup]="form" (ngSubmit)="submit()" [attr.aria-busy]="sending()">
+          <fieldset [disabled]="sending()">
+            <label for="feedback-category">Tipo de reporte</label>
+            <select id="feedback-category" formControlName="category" required>
+              <option value="" disabled>Elige una opción</option>
+              <option value="bug">Error</option>
+              <option value="complaint">Queja</option>
+              <option value="suggestion">Sugerencia</option>
+            </select>
+
+            <label for="feedback-message">Descripción</label>
+            <p id="feedback-message-help">Entre 10 y 2,000 caracteres. Evita incluir contraseñas, datos de pago o información personal.</p>
+            <textarea id="feedback-message" formControlName="message" rows="6" maxlength="2000"
+              aria-describedby="feedback-message-help" required></textarea>
+          </fieldset>
+
+          @if (error(); as message) {
+            <p class="field-error" role="alert">{{ message }}</p>
+          }
+          <button type="submit" class="primary-button" [disabled]="!canSubmit">
+            {{ sending() ? 'Enviando…' : 'Enviar reporte' }}
+          </button>
+        </form>
+      }
+    }
+  </article>
+</main>

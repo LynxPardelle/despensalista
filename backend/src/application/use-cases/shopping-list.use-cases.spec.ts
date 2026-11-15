@@ -1,4 +1,5 @@
 import { makePantryMutationMock } from '../ports/pantry-mutation.mock';
+import { FREE_HOUSEHOLD_PLAN } from '../ports/household-plan-reader';
 import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { PantryQuotaExceededError } from '../ports/pantry-mutation.port';
 import { QuantityUnit } from '../../domain/enums';
@@ -11,13 +12,52 @@ import {
 } from './shopping-list.use-cases';
 
 describe('Shopping list use cases', () => {
+  const freePlans = {
+    getPlan: jest.fn().mockResolvedValue(FREE_HOUSEHOLD_PLAN),
+  };
+  it('applies the household plan when saving a shared list', async () => {
+    const mutation = makePantryMutationMock({ lists: makeRepository() });
+    const plans = {
+      getPlan: jest.fn().mockResolvedValue({
+        tier: 'plus',
+        memberLimit: 5,
+        savedListLimit: 15,
+        paidThrough: null,
+      }),
+    };
+    const useCase = new CreateShoppingListUseCase(mutation, plans);
+    const command = {
+      householdId: 'household-1',
+      ownerUserId: 'user-1',
+      title: 'Lista del hogar',
+      items: [
+        {
+          productTypeId: 'type-rice',
+          baseName: 'Arroz',
+          quantity: 1,
+          unit: QuantityUnit.KILOGRAM,
+        },
+      ],
+    };
+
+    await useCase.execute(command);
+
+    expect(plans.getPlan).toHaveBeenCalledWith('household-1');
+    expect(mutation.createShoppingList).toHaveBeenCalledWith(
+      expect.any(ShoppingList),
+      15,
+    );
+  });
+
   it('creates a server-backed list under the per-user limit', async () => {
     const repository = makeRepository();
     const useCase = new CreateShoppingListUseCase(
       makePantryMutationMock({ lists: repository }),
+      freePlans,
     );
 
     const list = await useCase.execute({
+      householdId: 'household-1',
       ownerUserId: 'user-1',
       title: 'Mayoreo semanal',
       occasion: 'Quincena',
@@ -56,10 +96,11 @@ describe('Shopping list use cases', () => {
     mutation.createShoppingList.mockRejectedValue(
       new PantryQuotaExceededError('Saved shopping list quota exceeded'),
     );
-    const useCase = new CreateShoppingListUseCase(mutation);
+    const useCase = new CreateShoppingListUseCase(mutation, freePlans);
 
     await expect(
       useCase.execute({
+        householdId: 'household-1',
         ownerUserId: 'user-1',
         title: 'Lista extra',
         items: [

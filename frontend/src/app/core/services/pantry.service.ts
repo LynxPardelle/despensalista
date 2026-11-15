@@ -40,6 +40,7 @@ import {
   PantryLotSummary,
   PantryOverview,
   PantryOverviewItem,
+  PlusHouseholdSummary,
   PantryStapleCatalogGroup,
   PantryStapleItem,
   PriceReferenceItem,
@@ -89,6 +90,12 @@ export class PantryService {
         withCredentials: true,
       })
       .pipe(map((overview) => this.normalizeWasteOverview(overview)));
+  }
+
+  getPlusHouseholdSummary(): Observable<PlusHouseholdSummary> {
+    return this.http.get<PlusHouseholdSummary>(`${this.apiUrl}/pantry/plus-summary`, {
+      withCredentials: true,
+    });
   }
 
   searchProductTypes(search: string): Observable<ProductType[]> {

@@ -114,10 +114,25 @@ export class CloseShoppingPurchaseUseCase {
       const preparedItems = command.items.map((item) =>
         this.prepareItem(item, productTypeById.get(item.productTypeId)),
       );
-      const purchaseDate = mexicoCityDateLabel(new Date());
+      const purchaseDate = mexicoCityDateLabel(receipt.createdAt);
+      const purchaseSpend = {
+        month: purchaseDate.toISOString().slice(0, 7),
+        amountMinor: 0,
+        pricedItemCount: 0,
+        unpricedItemCount: 0,
+      };
       const lots: InventoryLot[] = [];
 
       for (const [index, prepared] of preparedItems.entries()) {
+        const { paidUnitPrice, quantity } = prepared.command;
+        if (typeof paidUnitPrice !== 'number') {
+          purchaseSpend.unpricedItemCount += 1;
+        } else {
+          purchaseSpend.pricedItemCount += 1;
+          purchaseSpend.amountMinor += Math.round(
+            paidUnitPrice * quantity * 100,
+          );
+        }
         const generatedLot = InventoryLot.create(
           userId,
           prepared.productType.id,
@@ -143,6 +158,12 @@ export class CloseShoppingPurchaseUseCase {
         }
       }
 
+      if (!Number.isSafeInteger(purchaseSpend.amountMinor)) {
+        throw new BadRequestException(
+          'The recorded purchase amount is too large',
+        );
+      }
+
       productTypeChanges.forEach((change) => {
         change.changed =
           JSON.stringify(change.expected.toPrimitives()) !==
@@ -152,6 +173,7 @@ export class CloseShoppingPurchaseUseCase {
         receipt,
         lots,
         productTypes: productTypeChanges,
+        purchaseSpend,
       });
 
       return {

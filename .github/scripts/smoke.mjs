@@ -2,7 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
-export async function verifyDeployment({ baseUrl, fetchImpl = fetch }) {
+export async function verifyDeployment({ baseUrl, verifyFeedback = false, fetchImpl = fetch }) {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   await verifyJsonEndpoint({
     fetchImpl,
@@ -29,18 +29,29 @@ export async function verifyDeployment({ baseUrl, fetchImpl = fetch }) {
   ) {
     throw new Error('login route did not contain the Angular application shell');
   }
+
+  if (verifyFeedback) {
+    const feedbackResponse = await fetchImpl(
+      `${normalizedBaseUrl}/api/feedback/status`,
+      { ...requestOptions(), redirect: 'error' },
+    );
+    if (feedbackResponse.status !== 401) {
+      throw new Error(`feedback status returned HTTP ${feedbackResponse.status}; expected 401`);
+    }
+  }
 }
 
 export async function verifyWithRetries({
   baseUrl,
   attempts = 1,
   delayMs = 0,
+  verifyFeedback = false,
   fetchImpl = fetch,
 }) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      await verifyDeployment({ baseUrl, fetchImpl });
+      await verifyDeployment({ baseUrl, verifyFeedback, fetchImpl });
       return;
     } catch (error) {
       lastError = error;
@@ -110,7 +121,7 @@ function parseArguments(argv) {
 async function main() {
   const options = parseArguments(process.argv.slice(2));
   if (!options['base-url']) {
-    throw new Error('Usage: smoke.mjs --base-url <url> [--attempts N --delay-ms N]');
+    throw new Error('Usage: smoke.mjs --base-url <url> [--attempts N --delay-ms N --verify-feedback true]');
   }
   const attempts = Number.parseInt(options.attempts ?? '1', 10);
   const delayMs = Number.parseInt(options['delay-ms'] ?? '0', 10);
@@ -125,6 +136,7 @@ async function main() {
     baseUrl: options['base-url'],
     attempts,
     delayMs,
+    verifyFeedback: options['verify-feedback'] === 'true',
   });
   process.stdout.write(`Smoke passed for ${options['base-url']}.\n`);
 }

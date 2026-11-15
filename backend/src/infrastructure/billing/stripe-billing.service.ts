@@ -17,6 +17,7 @@ import {
   type StripeBillingSettings,
 } from './stripe-billing-config';
 import { StripeBillingStore, type BillingRecord } from './stripe-billing.store';
+import { paidPlusThrough } from './stripe-household-plan';
 
 const householdMetadata = 'despensalistaHouseholdId';
 const checkoutMetadata = 'despensalistaCheckoutToken';
@@ -65,12 +66,7 @@ export class StripeBillingService {
     return {
       available: true,
       mode: settings.mode,
-      hasPlus: Boolean(
-        !record?.closed &&
-        record?.status === 'active' &&
-        record.paidThrough &&
-        record.paidThrough > epochSeconds(),
-      ),
+      hasPlus: paidPlusThrough(record) !== undefined,
       ...(record?.paidThrough && {
         currentPeriodEnd: new Date(record.paidThrough * 1000).toISOString(),
         cancelAtPeriodEnd: record.cancelAtPeriodEnd === true,

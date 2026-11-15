@@ -201,12 +201,15 @@ idempotent after interruption. An inactive prefix is cleaned before the next
 transaction; the journal is written before snapshot upload so an interrupted upload
 also remains discoverable.
 
-The stack publishes `PantryQuotaSchemaVersion=2`. Only when the deployed output is
-older does the workflow scan `pk`, `entityType`, and `deleting` in the `users` table
-and conditionally delete `PANTRY_QUOTA` rows whose deletion fence is absent or false.
-A row with `deleting=true` is never selected or deleted. Matching schema versions
-skip this purge, but not the transaction drain. Increment the output/contract for
-the next incompatible quota change. API 5xx remains an operational/SNS alarm but is
+The stack publishes `PantryQuotaSchemaVersion=2`. The workflow skips the legacy
+quota rebuild when the stack uses schema 2 and either the alias points at its
+published version or the captured alias advertises backend data contract 1 or
+later. An alias on another version after a compatible rollback still uses quota
+schema 2, so the next deployment preserves the monthly purchase totals. In the
+legacy path, the workflow scans `pk`, `entityType`, and `deleting` in the `users`
+table and conditionally deletes `PANTRY_QUOTA` rows whose deletion fence is absent
+or false. A row with `deleting=true` is excluded. Both paths drain writers.
+Increment the quota schema output for the next incompatible quota change. API 5xx remains an operational/SNS alarm but is
 not attached to CodeDeploy because the intentional concurrency-zero window can
 produce 5xx responses. Initial deployments have no previous release to restore.
 
@@ -250,14 +253,16 @@ already successful release, run the rollback workflow with that release's exact
 stage receipt; for a failed unpublished release, ship a reviewed release.
 
 The release manifest, backend stack, and deployment receipt carry
-`BackendDataContractVersion=1`. A manual rollback requires all three values to
-equal the currently deployed contract; a legacy manifest/receipt with no value is
-version `0` and is rejected after this cutover. Version 1 introduces durable
-account-deletion identity state and device-cap reservations. Once writers have
-opened on it, never restore a pre-version-1 Lambda: fix forward instead. The
-automatic restore captured by a failed publish remains valid only because writers
-stay drained until verification. Increment both the manifest constant and stack
-output before any future incompatible persisted-data change.
+`BackendDataContractVersion=2`. A manual rollback requires the selected release
+and receipt to match the deployed contract. Missing contract values are treated
+as version `0`. Version 1 protects durable account-deletion identity state and
+device-cap reservations. Version 2 also protects the household member manifest and
+monthly purchase totals. A version 1 writer could change memberships without
+updating the manifest or finish pantry changes without retaining monthly totals.
+Before the initial upgrade reopens writers, an automatic restore can return to
+the captured release while concurrency remains at zero. After reopening, use a
+successful version 2 release or fix forward. Increment both the manifest constant
+and stack output before a future incompatible persisted-data change.
 
 If smoke fails after writers were confirmed open on a newer contract, automatic
 rollback intentionally refuses the downgrade and leaves the `reopening` or
