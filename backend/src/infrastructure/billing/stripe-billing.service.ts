@@ -25,7 +25,7 @@ import {
 } from './stripe-billing.store';
 import { paidPlusThrough } from './stripe-household-plan';
 import { renewalNoticeConfig } from './renewals/renewal-notice.config';
-import { buildRenewalNoticeEnqueue } from './renewals/renewal-notice.store';
+import { RenewalNoticeStore } from './renewals/renewal-notice.store';
 import type { RenewalNoticeCandidate } from './renewals/renewal-notice.types';
 
 const householdMetadata = 'despensalistaHouseholdId';
@@ -50,6 +50,7 @@ export class StripeBillingService {
     @Inject(HOUSEHOLD_REPOSITORY)
     private readonly households: HouseholdRepository,
     private readonly access: ResolveHouseholdPantryAccessUseCase,
+    private readonly renewalNotices: RenewalNoticeStore,
     @Optional() private readonly noticeConfig?: ConfigService,
   ) {}
 
@@ -395,6 +396,10 @@ export class StripeBillingService {
       );
       const paidUntil = paidThrough(settings, subscription, customer.id);
       const renewal = renewalCandidate(record, subscription, paidUntil);
+      const renewalWrite =
+        renewalTable && renewal
+          ? await this.renewalNotices.prepareEnqueue(renewalTable, renewal)
+          : undefined;
       const saved = await this.store.applyEvent(
         {
           ...record,
@@ -417,9 +422,7 @@ export class StripeBillingService {
         },
         settings.table,
         event.id,
-        renewalTable && renewal
-          ? buildRenewalNoticeEnqueue(renewalTable, renewal)
-          : undefined,
+        renewalWrite,
       );
       if (saved) {
         return;

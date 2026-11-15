@@ -133,7 +133,9 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
     }) : undefined;
-    const renewalNoticeTable = renewalNotice ? new dynamodb.Table(this, 'RenewalNoticeTable', {
+    // The production queue stays managed by this stack across notice mode changes.
+    const provisionRenewalTable = renewalNotice !== undefined || (isProduction && stripeBilling.enabled);
+    const renewalNoticeTable = provisionRenewalTable ? new dynamodb.Table(this, 'RenewalNoticeTable', {
       tableName: `${projectName}-${stage}-renewal-notices`,
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
       timeToLiveAttribute: 'expiresAt',

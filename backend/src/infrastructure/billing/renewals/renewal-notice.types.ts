@@ -32,7 +32,12 @@ export interface RenewalNoticeMessage {
   noticeId: string;
 }
 
+export interface RenewalNoticeProductionAllowance {
+  maxSends: number;
+  intervalMs: number;
+}
+
 export interface RenewalNoticeTransport {
-  assertProductionAccess(): Promise<void>;
+  assertProductionAccess(): Promise<RenewalNoticeProductionAllowance>;
   send(message: RenewalNoticeMessage): Promise<{ messageId: string }>;
 }

@@ -13,6 +13,8 @@ import { AccessTokenGuard } from '../http/auth/access-token.guard';
 import type { StripeBillingConfig } from './stripe-billing-config';
 import { StripeBillingService } from './stripe-billing.service';
 import type { BillingRecord, StripeBillingStore } from './stripe-billing.store';
+import type { DynamoDbDocumentClientService } from '../database/dynamodb/dynamodb-document-client.service';
+import { RenewalNoticeStore } from './renewals/renewal-notice.store';
 
 describe('StripeBillingService', () => {
   const secret = 'whsec_unit_test_secret';
@@ -59,10 +61,12 @@ describe('StripeBillingService', () => {
   let endCheckout: jest.Mock;
   let saveRecord: jest.Mock;
   let noticeValues: Record<string, string>;
+  let noticeRead: jest.Mock;
 
   beforeEach(() => {
     record = undefined;
     noticeValues = {};
+    noticeRead = jest.fn().mockResolvedValue({});
     exists = jest.fn().mockResolvedValue(false);
     settings = jest.fn().mockResolvedValue(billing);
     customerMapping = jest.fn().mockResolvedValue(undefined);
@@ -107,6 +111,9 @@ describe('StripeBillingService', () => {
       {
         executeOwner: permissions,
       } as unknown as ResolveHouseholdPantryAccessUseCase,
+      new RenewalNoticeStore({
+        send: noticeRead,
+      } as unknown as DynamoDbDocumentClientService),
       { get: (key: string) => noticeValues[key] } as ConfigService,
     );
     jest.spyOn(stripe.prices, 'retrieve').mockResolvedValue({
@@ -258,6 +265,44 @@ describe('StripeBillingService', () => {
       amountMinor: 5900,
       currency: 'mxn',
     });
+
+    const previous = {
+      householdId: 'household-1',
+      subscriptionId: 'sub_test',
+      renewalAt,
+      generation: 'older-generation',
+    };
+    noticeRead
+      .mockResolvedValueOnce({ Item: { ...previous, state: 'queued' } })
+      .mockResolvedValueOnce({
+        Item: { ...previous, state: 'skipped', result: 'nonrenewing' },
+      });
+    commit.mockResolvedValueOnce(false);
+    await deliver('evt_resume_after_worker_conflict');
+    expect(commit).toHaveBeenCalledTimes(3);
+    expect(commit).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      billing.table,
+      'evt_resume_after_worker_conflict',
+      {
+        Update: expect.objectContaining({
+          UpdateExpression: 'SET #generation = :generation',
+        }),
+      },
+    );
+    expect(commit).toHaveBeenLastCalledWith(
+      expect.anything(),
+      billing.table,
+      'evt_resume_after_worker_conflict',
+      {
+        Update: expect.objectContaining({
+          ConditionExpression: expect.stringContaining(
+            '#state = :skipped AND #result = :nonrenewing',
+          ),
+        }),
+      },
+    );
 
     // A fresh Stripe state can become nonrenewing before its webhook arrives.
     subscription.cancel_at = renewalAt;

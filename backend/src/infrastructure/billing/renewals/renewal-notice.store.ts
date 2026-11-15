@@ -14,7 +14,11 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { DynamoDbDocumentClientService } from '../../database/dynamodb/dynamodb-document-client.service';
-import { renewalNoticeDueDay, renewalNoticeKey } from './renewal-notice.policy';
+import {
+  noticeWindow,
+  renewalNoticeDueDay,
+  renewalNoticeKey,
+} from './renewal-notice.policy';
 import type { RenewalNoticeCandidate } from './renewal-notice.types';
 
 const queue = 'DUE';
@@ -30,6 +34,7 @@ type Write = NonNullable<TransactWriteCommandInput['TransactItems']>[number];
 export type RenewalNoticeRow = RenewalNoticeCandidate & {
   pk: string;
   nextDay: number;
+  generation?: string;
 } & (
     | { state: 'queued' }
     | { state: 'sending'; claim: string; claimExpiresAt: number }
@@ -45,7 +50,84 @@ type Outcome =
 export function buildRenewalNoticeEnqueue(
   table: string,
   candidate: RenewalNoticeCandidate,
-): Write {
+  observed?: Record<string, unknown>,
+  now = new Date(),
+): Write | undefined {
+  const pk = renewalNoticeKey(candidate);
+  const nextDay = renewalNoticeDueDay(candidate);
+  const generation = randomUUID();
+  if (observed) {
+    if (
+      observed.householdId !== candidate.householdId ||
+      observed.subscriptionId !== candidate.subscriptionId ||
+      observed.renewalAt !== candidate.renewalAt ||
+      (observed.generation !== undefined &&
+        typeof observed.generation !== 'string')
+    )
+      return undefined;
+
+    const condition = observeGeneration(observed.generation);
+    if (observed.state === 'queued') {
+      // Fence a worker that resolved an earlier cancellation but has not yet
+      // committed its decision. Keep the existing retry day and claim state.
+      return {
+        Update: {
+          TableName: table,
+          Key: { pk },
+          ConditionExpression: `#state = :queued AND ${condition.expression}`,
+          UpdateExpression: 'SET #generation = :generation',
+          ExpressionAttributeNames: {
+            '#state': 'state',
+            '#generation': 'generation',
+          },
+          ExpressionAttributeValues: {
+            ...condition.values,
+            ':queued': 'queued',
+            ':generation': generation,
+          },
+        },
+      };
+    }
+    if (
+      observed.state !== 'skipped' ||
+      observed.result !== 'nonrenewing' ||
+      'sendAttempted' in observed ||
+      'claim' in observed ||
+      'claimExpiresAt' in observed ||
+      noticeWindow(candidate, now) === 'late'
+    )
+      return undefined;
+
+    return {
+      Update: {
+        TableName: table,
+        Key: { pk },
+        ConditionExpression: `#state = :skipped AND #result = :nonrenewing AND attribute_not_exists(sendAttempted) AND attribute_not_exists(#claim) AND attribute_not_exists(claimExpiresAt) AND ${condition.expression}`,
+        UpdateExpression:
+          'SET #state = :queued, #nextDay = :nextDay, #generation = :generation, #amountMinor = :amountMinor, #currency = :currency REMOVE #result, completedAt',
+        ExpressionAttributeNames: {
+          '#state': 'state',
+          '#result': 'result',
+          '#claim': 'claim',
+          '#nextDay': 'nextDay',
+          '#generation': 'generation',
+          '#amountMinor': 'amountMinor',
+          '#currency': 'currency',
+        },
+        ExpressionAttributeValues: {
+          ...condition.values,
+          ':skipped': 'skipped',
+          ':nonrenewing': 'nonrenewing',
+          ':queued': 'queued',
+          ':nextDay': nextDay,
+          ':generation': generation,
+          ':amountMinor': candidate.amountMinor,
+          ':currency': candidate.currency,
+        },
+      },
+    };
+  }
+
   const defaults = {
     householdId: candidate.householdId,
     subscriptionId: candidate.subscriptionId,
@@ -53,18 +135,18 @@ export function buildRenewalNoticeEnqueue(
     amountMinor: candidate.amountMinor,
     currency: candidate.currency,
     queue,
-    nextDay: renewalNoticeDueDay(candidate),
+    nextDay,
     expiresAt: candidate.renewalAt + noticeRetentionSeconds,
     state: 'queued',
+    generation,
   };
-  // Preserve completed states, the claim and the retry date when Stripe
-  // delivers another event for the same subscription and renewal.
   const attributes = Object.entries(defaults);
   return {
     Update: {
       TableName: table,
-      Key: { pk: renewalNoticeKey(candidate) },
-      UpdateExpression: `SET ${attributes.map(([name]) => `#${name} = if_not_exists(#${name}, :${name})`).join(', ')}`,
+      Key: { pk },
+      ConditionExpression: 'attribute_not_exists(pk)',
+      UpdateExpression: `SET ${attributes.map(([name]) => `#${name} = :${name}`).join(', ')}`,
       ExpressionAttributeNames: Object.fromEntries(
         attributes.map(([name]) => [`#${name}`, name]),
       ),
@@ -75,13 +157,53 @@ export function buildRenewalNoticeEnqueue(
   };
 }
 
+function observeGeneration(generation?: string) {
+  return generation === undefined
+    ? { expression: 'attribute_not_exists(#generation)', values: {} }
+    : {
+        expression: '#generation = :observedGeneration',
+        values: { ':observedGeneration': generation },
+      };
+}
+
+function queuedCondition(job: Queued) {
+  const condition = observeGeneration(job.generation);
+  return {
+    ConditionExpression: `#state = :queued AND nextDay = :observedDay AND ${condition.expression}`,
+    ExpressionAttributeNames: {
+      '#state': 'state',
+      '#generation': 'generation',
+    },
+    ExpressionAttributeValues: {
+      ...condition.values,
+      ':queued': 'queued',
+      ':observedDay': job.nextDay,
+    },
+  };
+}
+
 @Injectable()
 export class RenewalNoticeStore {
   constructor(
     @Optional() private readonly db?: DynamoDbDocumentClientService,
   ) {}
 
+  async prepareEnqueue(
+    table: string,
+    candidate: RenewalNoticeCandidate,
+  ): Promise<Write | undefined> {
+    const row = await this.readRow(table, renewalNoticeKey(candidate));
+    return buildRenewalNoticeEnqueue(table, candidate, row);
+  }
+
   async read(table: string, pk: string): Promise<RenewalNoticeRow | undefined> {
+    const row = await this.readRow(table, pk);
+    return row?.state === 'queued' || row?.state === 'sending'
+      ? (row as RenewalNoticeRow)
+      : undefined;
+  }
+
+  private async readRow(table: string, pk: string) {
     const result = await this.client.send(
       new GetCommand({
         TableName: table,
@@ -89,10 +211,7 @@ export class RenewalNoticeStore {
         ConsistentRead: true,
       }),
     );
-    const row = result.Item;
-    return row?.state === 'queued' || row?.state === 'sending'
-      ? (row as RenewalNoticeRow)
-      : undefined;
+    return result.Item;
   }
 
   async due(
@@ -127,17 +246,21 @@ export class RenewalNoticeStore {
   ): Promise<Sending | undefined> {
     const claim = randomUUID();
     const claimExpiresAt = now + claimSeconds;
+    const expected = queuedCondition(job);
     const changed = await this.update({
       TableName: table,
       Key: { pk: job.pk },
-      ConditionExpression: '#state = :queued AND nextDay = :observedDay',
+      ...expected,
       UpdateExpression:
-        'SET #state = :sending, #claim = :claim, claimExpiresAt = :claimExpiresAt',
-      ExpressionAttributeNames: { '#state': 'state', '#claim': 'claim' },
+        'SET #state = :sending, #claim = :claim, claimExpiresAt = :claimExpiresAt, sendAttempted = :attempted',
+      ExpressionAttributeNames: {
+        ...expected.ExpressionAttributeNames,
+        '#claim': 'claim',
+      },
       ExpressionAttributeValues: {
-        ':queued': 'queued',
+        ...expected.ExpressionAttributeValues,
         ':sending': 'sending',
-        ':observedDay': job.nextDay,
+        ':attempted': true,
         ':claim': claim,
         ':claimExpiresAt': claimExpiresAt,
       },
@@ -150,15 +273,14 @@ export class RenewalNoticeStore {
     job: Queued,
     tomorrow: number,
   ): Promise<boolean> {
+    const expected = queuedCondition(job);
     return this.update({
       TableName: table,
       Key: { pk: job.pk },
-      ConditionExpression: '#state = :queued AND nextDay = :observedDay',
+      ...expected,
       UpdateExpression: 'SET nextDay = :tomorrow',
-      ExpressionAttributeNames: { '#state': 'state' },
       ExpressionAttributeValues: {
-        ':queued': 'queued',
-        ':observedDay': job.nextDay,
+        ...expected.ExpressionAttributeValues,
         ':tomorrow': tomorrow,
       },
     });
@@ -170,25 +292,31 @@ export class RenewalNoticeStore {
     outcome: Outcome,
     now: number,
   ): Promise<boolean> {
+    const expected =
+      job.state === 'queued'
+        ? queuedCondition(job)
+        : {
+            ConditionExpression:
+              '#state = :sending AND #claim = :observedClaim',
+            ExpressionAttributeNames: { '#state': 'state' },
+            ExpressionAttributeValues: {
+              ':sending': 'sending',
+              ':observedClaim': job.claim,
+            },
+          };
     return this.update({
       TableName: table,
       Key: { pk: job.pk },
-      ConditionExpression:
-        job.state === 'queued'
-          ? '#state = :expected AND nextDay = :observedDay'
-          : '#state = :expected AND #claim = :observedClaim',
+      ...expected,
       UpdateExpression:
         'SET #state = :outcome, nextDay = :finished, completedAt = :now, #result = :result REMOVE #claim, claimExpiresAt',
       ExpressionAttributeNames: {
-        '#state': 'state',
+        ...expected.ExpressionAttributeNames,
         '#claim': 'claim',
         '#result': 'result',
       },
       ExpressionAttributeValues: {
-        ':expected': job.state,
-        ...(job.state === 'queued'
-          ? { ':observedDay': job.nextDay }
-          : { ':observedClaim': job.claim }),
+        ...expected.ExpressionAttributeValues,
         ':outcome': outcome.state,
         ':finished': finishedDay,
         ':now': now,
