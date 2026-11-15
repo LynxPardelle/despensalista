@@ -106,9 +106,14 @@ export function renewalNoticeDeployment(stack: cdk.Stack, project: string, stage
 export function renewalNoticeSesPolicy(stack: cdk.Stack, recipient: string): iam.PolicyStatement {
   return new iam.PolicyStatement({
     actions: ['ses:SendEmail'],
-    resources: [stack.formatArn({ service: 'ses', resource: 'identity', resourceName: 'despensalista.lynxpardelle.com' })],
+    // SES rejected the identity ARN grant in dev. Keep the actual send
+    // limited to the approved sender, destination, and region.
+    resources: ['*'],
     conditions: {
-      StringEquals: { 'ses:FromAddress': renewalNoticeSender },
+      StringEquals: {
+        'aws:RequestedRegion': stack.region,
+        'ses:FromAddress': renewalNoticeSender,
+      },
       'ForAllValues:StringEquals': { 'ses:Recipients': [recipient] },
       Null: { 'ses:Recipients': 'false' },
     },

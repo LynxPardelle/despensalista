@@ -100,8 +100,12 @@ test('renewal notices deploy only in dev with one scoped SES destination', () =>
   dev.hasResourceProperties('AWS::IAM::Policy', {
     PolicyDocument: { Statement: Match.arrayWith([Match.objectLike({
       Action: 'ses:SendEmail',
+      Resource: '*',
       Condition: {
-        StringEquals: { 'ses:FromAddress': 'no-reply@despensalista.lynxpardelle.com' },
+        StringEquals: {
+          'aws:RequestedRegion': 'us-east-1',
+          'ses:FromAddress': 'no-reply@despensalista.lynxpardelle.com',
+        },
         'ForAllValues:StringEquals': { 'ses:Recipients': ['mailbox@example.com'] },
         Null: { 'ses:Recipients': 'false' },
       },
