@@ -27,6 +27,8 @@ const noticeIdPattern = /^renewal-[a-f0-9]{64}$/;
 const dryRunConcurrency = 4;
 // Reserve the remainder of the 15-second invocation for any work in progress.
 const scheduledWorkAdmissionMs = 3_000;
+// Leave six seconds for a production claim, bounded SES request, and completion.
+const productionClaimAdmissionMs = 9_000;
 const blankCounts = {
   wouldSend: 0,
   accepted: 0,
@@ -68,37 +70,77 @@ export class RenewalNoticeDispatcher {
     }
     if (onlyNoticeId) {
       const job = await this.store.read(settings.table, onlyNoticeId);
-      if (job) counts[await this.process(settings, job, now)]++;
+      const outcome = job ? await this.process(settings, job, now) : undefined;
+      if (outcome) counts[outcome]++;
       return {
         enabled: true,
-        processed: Number(job !== undefined),
+        processed: Number(outcome !== undefined),
         hasMoreDue: false,
         ...counts,
       };
     }
 
-    const admissionDeadline = performance.now() + scheduledWorkAdmissionMs;
+    const productionSending =
+      settings.stage === 'prod' && settings.mode === 'ses';
+    const admissionDeadline =
+      performance.now() +
+      (productionSending
+        ? productionClaimAdmissionMs
+        : scheduledWorkAdmissionMs);
     const { jobs, hasMoreDue } = await this.store.due(
       settings.table,
       mexicoDay(today),
     );
-    if (settings.stage === 'prod' && settings.mode === 'ses' && jobs.length) {
-      // Keep the queue intact if the account is sandboxed or sending has paused.
-      await this.transport.assertProductionAccess();
+    // Keep the queue intact if the account is sandboxed, paused, or at quota.
+    const allowance =
+      productionSending && jobs.length && performance.now() < admissionDeadline
+        ? await this.transport.assertProductionAccess()
+        : undefined;
+    if (allowance?.maxSends === 0) {
+      throw new Error('SES production daily sending quota exhausted');
     }
     const concurrency = settings.mode === 'dry-run' ? dryRunConcurrency : 1;
     let processed = 0;
-    while (processed < jobs.length && performance.now() < admissionDeadline) {
+    while (
+      processed < jobs.length &&
+      performance.now() < admissionDeadline &&
+      (!allowance || counts.accepted < allowance.maxSends)
+    ) {
       const outcomes = await Promise.all(
         jobs
           .slice(processed, processed + concurrency)
-          .map((job) => this.process(settings, job, now)),
+          .map((job) =>
+            this.process(
+              settings,
+              job,
+              now,
+              productionSending ? admissionDeadline : undefined,
+            ),
+          ),
       );
-      for (const outcome of outcomes) counts[outcome]++;
-      processed += outcomes.length;
-      // The sandbox can accept one message per second. Leave further rows
-      // queued for another poll after a possible delivery.
-      if (settings.mode === 'ses' && (counts.accepted || counts.unknown)) break;
+      for (const outcome of outcomes) {
+        if (!outcome) break;
+        counts[outcome]++;
+        processed++;
+      }
+      if (
+        outcomes.includes(undefined) ||
+        (settings.mode === 'ses' &&
+          (counts.unknown || (settings.stage === 'dev' && counts.accepted)))
+      )
+        break;
+      if (
+        allowance &&
+        outcomes.includes('accepted') &&
+        processed < jobs.length &&
+        counts.accepted < allowance.maxSends
+      ) {
+        if (performance.now() + allowance.intervalMs >= admissionDeadline)
+          break;
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, allowance.intervalMs),
+        );
+      }
     }
     if (
       settings.stage === 'prod' &&
@@ -123,9 +165,12 @@ export class RenewalNoticeDispatcher {
     settings: RenewalNoticeSettings,
     job: RenewalNoticeRow,
     calendarOverride?: Date,
-  ): Promise<DispatchOutcome> {
+    claimDeadline?: number,
+  ): Promise<DispatchOutcome | undefined> {
     const calendarNow = () => calendarOverride ?? new Date();
     const wallSeconds = () => Math.floor(Date.now() / 1000);
+    const budgetExhausted = () =>
+      claimDeadline !== undefined && performance.now() >= claimDeadline;
     const finish = async (
       outcome: 'skipped' | 'late' | 'blocked' | 'unknown',
       reason: string,
@@ -160,6 +205,7 @@ export class RenewalNoticeDispatcher {
       resolution = await this.recipient.resolve(job);
     } catch {
       // No send has been attempted. A later run can still retry the lookup.
+      if (budgetExhausted()) return undefined;
       if (settings.mode === 'dry-run') return 'deferred';
       return (await this.store.reschedule(
         settings.table,
@@ -169,6 +215,7 @@ export class RenewalNoticeDispatcher {
         ? 'deferred'
         : 'busy';
     }
+    if (budgetExhausted()) return undefined;
     if (resolution.status === 'skip') {
       return resolution.reason === 'missing_verified_recipient'
         ? finish('blocked', resolution.reason)
@@ -199,6 +246,7 @@ export class RenewalNoticeDispatcher {
       settings.stage === 'prod' ? verifiedAddress : settings.testRecipient,
       settings.stage,
     );
+    if (budgetExhausted()) return undefined;
     const claimed = await this.store.claim(settings.table, job, wallSeconds());
     if (!claimed) return 'busy';
 

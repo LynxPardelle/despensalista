@@ -88,7 +88,10 @@ describe('renewal notice dispatching', () => {
       recipient: recipientAddress,
     });
     transport.send.mockResolvedValue({ messageId: 'provider-id' });
-    transport.assertProductionAccess.mockResolvedValue(undefined);
+    transport.assertProductionAccess.mockResolvedValue({
+      maxSends: 5,
+      intervalMs: 1_000,
+    });
   });
 
   afterEach(() => jest.useRealTimers());
@@ -114,6 +117,161 @@ describe('renewal notice dispatching', () => {
     expect(transport.send.mock.calls[0][0].text).not.toMatch(
       /No se realizará un cobro real|https:\/\/dev\./,
     );
+  });
+
+  it('drains a bounded batch of production notices in one scheduled poll', async () => {
+    jest.useFakeTimers().setSystemTime(dueAt);
+    const jobs = Array.from({ length: 7 }, (_, index) => ({
+      ...queued,
+      pk: `production-notice-${index}`,
+    }));
+    store.due.mockResolvedValueOnce({ jobs, hasMoreDue: false });
+    store.claim.mockImplementation((_table: string, job: RenewalNoticeRow) =>
+      Promise.resolve({ ...claimed, pk: job.pk }),
+    );
+
+    await Promise.all([
+      expect(production().dispatch()).resolves.toMatchObject({
+        processed: 5,
+        accepted: 5,
+        hasMoreDue: true,
+      }),
+      jest.runAllTimersAsync(),
+    ]);
+
+    expect(transport.assertProductionAccess).toHaveBeenCalledTimes(1);
+    expect(store.claim.mock.calls).toEqual(
+      jobs
+        .slice(0, 5)
+        .map((job) => [
+          'despensalista-prod-renewal-notices',
+          job,
+          expect.any(Number),
+        ]),
+    );
+  });
+
+  it('paces production requests and leaves the rest due at the SES daily allowance', async () => {
+    jest.useFakeTimers().setSystemTime(dueAt);
+    store.due.mockResolvedValueOnce({
+      jobs: [queued, { ...queued, pk: 'next' }, { ...queued, pk: 'pending' }],
+      hasMoreDue: false,
+    });
+    transport.assertProductionAccess.mockResolvedValueOnce({
+      maxSends: 2,
+      intervalMs: 500,
+    });
+
+    const result = expect(production().dispatch()).resolves.toMatchObject({
+      processed: 2,
+      accepted: 2,
+      hasMoreDue: true,
+    });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(transport.send).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(499);
+    expect(transport.send).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(1);
+    await result;
+    expect(transport.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('alarms when SES has no daily allowance left without touching the queue', async () => {
+    jest.useFakeTimers().setSystemTime(dueAt);
+    transport.assertProductionAccess.mockResolvedValueOnce({
+      maxSends: 0,
+      intervalMs: 1_000,
+    });
+
+    await expect(production().dispatch()).rejects.toThrow(
+      'SES production daily sending quota exhausted',
+    );
+    expect(recipient.resolve).not.toHaveBeenCalled();
+    expect(store.claim).not.toHaveBeenCalled();
+    expect(store.finish).not.toHaveBeenCalled();
+  });
+
+  it('leaves a row due if the next paced send would exceed the worker budget', async () => {
+    jest.useFakeTimers().setSystemTime(dueAt);
+    store.due.mockResolvedValueOnce({
+      jobs: [queued, { ...queued, pk: 'pending' }],
+      hasMoreDue: false,
+    });
+    transport.assertProductionAccess.mockResolvedValueOnce({
+      maxSends: 5,
+      intervalMs: 10_000,
+    });
+
+    await expect(production().dispatch()).resolves.toMatchObject({
+      accepted: 1,
+      processed: 1,
+      hasMoreDue: true,
+    });
+    expect(store.claim).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not claim a production row when the verified recipient lookup used the admission window', async () => {
+    jest.useFakeTimers().setSystemTime(dueAt);
+    recipient.resolve.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 9_000));
+      return { status: 'eligible', recipient: recipientAddress };
+    });
+
+    await Promise.all([
+      expect(production().dispatch()).resolves.toMatchObject({
+        processed: 0,
+        accepted: 0,
+        hasMoreDue: true,
+      }),
+      jest.runAllTimersAsync(),
+    ]);
+    expect(store.claim).not.toHaveBeenCalled();
+    expect(store.reschedule).not.toHaveBeenCalled();
+    expect(store.finish).not.toHaveBeenCalled();
+    expect(transport.send).not.toHaveBeenCalled();
+  });
+
+  it('does not start an SES probe when the queue lookup used the admission window', async () => {
+    jest.useFakeTimers().setSystemTime(dueAt);
+    store.due.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 9_000));
+      return { jobs: [queued], hasMoreDue: false };
+    });
+
+    await Promise.all([
+      expect(production().dispatch()).resolves.toMatchObject({
+        processed: 0,
+        hasMoreDue: true,
+      }),
+      jest.runAllTimersAsync(),
+    ]);
+    expect(transport.assertProductionAccess).not.toHaveBeenCalled();
+    expect(store.claim).not.toHaveBeenCalled();
+  });
+
+  it('stops processing after the first uncertain production delivery', async () => {
+    jest.useFakeTimers().setSystemTime(dueAt);
+    store.due.mockResolvedValueOnce({
+      jobs: [
+        queued,
+        { ...queued, pk: 'unknown' },
+        { ...queued, pk: 'pending' },
+      ],
+      hasMoreDue: false,
+    });
+    transport.send
+      .mockResolvedValueOnce({ messageId: 'first-accepted' })
+      .mockRejectedValueOnce(new Error('provider timeout'));
+
+    await Promise.all([
+      expect(production().dispatch()).rejects.toThrow(
+        'late=0, blocked=0, unknown=1',
+      ),
+      jest.runAllTimersAsync(),
+    ]);
+
+    expect(transport.send).toHaveBeenCalledTimes(2);
+    expect(store.claim).toHaveBeenCalledTimes(2);
   });
 
   it('does not claim or send production jobs while SES is unavailable', async () => {
@@ -246,7 +404,7 @@ describe('renewal notice dispatching', () => {
     expect(transport.send).not.toHaveBeenCalled();
   });
 
-  it('limits a live poll to one possible delivery and leaves the rest for later', async () => {
+  it('limits a dev poll to one possible delivery and leaves the rest for later', async () => {
     store.due.mockResolvedValueOnce({
       jobs: [queued, { ...queued, pk: 'next-notice' }],
       hasMoreDue: false,

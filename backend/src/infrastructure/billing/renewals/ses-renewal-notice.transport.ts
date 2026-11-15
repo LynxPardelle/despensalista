@@ -11,12 +11,15 @@ import {
 } from './renewal-notice.config';
 import type {
   RenewalNoticeMessage,
+  RenewalNoticeProductionAllowance,
   RenewalNoticeTransport,
 } from './renewal-notice.types';
 
 const senderDomain = 'despensalista.lynxpardelle.com';
 const sender = `no-reply@${senderDomain}`;
 const productionAccessWindowMs = 15_000;
+const productionBatchLimit = 5;
+const productionSendTimeoutMs = 2_000;
 const knownErrors = new Set([
   'AccessDenied',
   'AccessDeniedException',
@@ -35,7 +38,14 @@ const knownErrors = new Set([
 @Injectable()
 export class SesRenewalNoticeTransport implements RenewalNoticeTransport {
   private readonly logger = new Logger(SesRenewalNoticeTransport.name);
-  private productionAccessUntil = -1;
+  private productionAccess:
+    | {
+        until: number;
+        remaining: number;
+        intervalMs: number;
+        nextSendAt: number;
+      }
+    | undefined;
   private readonly ses = new SESv2Client({
     region: 'us-east-1',
     maxAttempts: 1,
@@ -43,9 +53,9 @@ export class SesRenewalNoticeTransport implements RenewalNoticeTransport {
 
   constructor(private readonly config: ConfigService) {}
 
-  async assertProductionAccess(): Promise<void> {
+  async assertProductionAccess(): Promise<RenewalNoticeProductionAllowance> {
     const settings = renewalNoticeConfig(this.config);
-    this.productionAccessUntil = -1;
+    this.productionAccess = undefined;
     if (settings?.stage !== 'prod' || settings.mode !== 'ses') {
       throw new Error('SES production sending is unavailable');
     }
@@ -62,19 +72,56 @@ export class SesRenewalNoticeTransport implements RenewalNoticeTransport {
     ) {
       throw new Error('SES production sending is unavailable');
     }
-    // The worker checks again on each nonempty poll. This short proof lets it
-    // claim the row after validation and covers at most one Lambda invocation.
-    this.productionAccessUntil = performance.now() + productionAccessWindowMs;
+    const {
+      Max24HourSend: daily,
+      SentLast24Hours: sent,
+      MaxSendRate: rate,
+    } = account.SendQuota ?? {};
+    if (
+      typeof daily !== 'number' ||
+      !Number.isFinite(daily) ||
+      (daily < 0 && daily !== -1) ||
+      typeof sent !== 'number' ||
+      !Number.isFinite(sent) ||
+      sent < 0 ||
+      typeof rate !== 'number' ||
+      !Number.isFinite(rate) ||
+      rate <= 0
+    ) {
+      throw new Error('SES production sending quota is unavailable');
+    }
+    const intervalMs = Math.ceil(1_000 / rate);
+    if (!Number.isSafeInteger(intervalMs)) {
+      throw new Error('SES production sending quota is unavailable');
+    }
+    const maxSends =
+      daily === -1
+        ? productionBatchLimit
+        : Math.min(productionBatchLimit, Math.max(0, Math.floor(daily - sent)));
+    // Refresh account access and limits once for each nonempty scheduled poll.
+    const now = performance.now();
+    this.productionAccess = {
+      until: now + productionAccessWindowMs,
+      remaining: maxSends,
+      intervalMs,
+      nextSendAt: now,
+    };
+    return { maxSends, intervalMs };
   }
 
   async send(message: RenewalNoticeMessage): Promise<{ messageId: string }> {
     const settings = renewalNoticeConfig(this.config);
+    const access = this.productionAccess;
+    const now = performance.now();
     if (
       settings?.mode !== 'ses' ||
       (settings.stage === 'dev' &&
         settings.testRecipient !== message.recipient) ||
       (settings.stage === 'prod' &&
-        (performance.now() >= this.productionAccessUntil ||
+        (!access ||
+          now >= access.until ||
+          now < access.nextSendAt ||
+          access.remaining <= 0 ||
           !isRenewalRecipient(message.recipient) ||
           message.recipient.toLowerCase().endsWith('@simulator.amazonses.com')))
     ) {
@@ -83,7 +130,10 @@ export class SesRenewalNoticeTransport implements RenewalNoticeTransport {
       );
       throw new Error('Renewal notice transport is unavailable');
     }
-    if (settings.stage === 'prod') this.productionAccessUntil = -1;
+    if (settings.stage === 'prod' && access) {
+      access.remaining--;
+      access.nextSendAt = now + access.intervalMs;
+    }
 
     const sent = await this.ses
       .send(
@@ -97,8 +147,12 @@ export class SesRenewalNoticeTransport implements RenewalNoticeTransport {
             },
           },
         }),
+        settings.stage === 'prod'
+          ? { abortSignal: AbortSignal.timeout(productionSendTimeoutMs) }
+          : undefined,
       )
       .catch((error: unknown) => {
+        if (settings.stage === 'prod') this.productionAccess = undefined;
         const info = error as {
           name?: unknown;
           message?: unknown;
@@ -135,6 +189,7 @@ export class SesRenewalNoticeTransport implements RenewalNoticeTransport {
         throw error;
       });
     if (!sent.MessageId) {
+      if (settings.stage === 'prod') this.productionAccess = undefined;
       this.logger.warn('SES SendEmail returned no message ID');
       throw new Error('SES did not return a message ID');
     }

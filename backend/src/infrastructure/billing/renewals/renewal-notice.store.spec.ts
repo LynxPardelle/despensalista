@@ -27,8 +27,8 @@ describe('renewal notice persistence', () => {
 
   beforeEach(() => send.mockReset());
 
-  it('adds a per-period idempotent outbox upsert to the Stripe event transaction', () => {
-    const entry = buildRenewalNoticeEnqueue(table, candidate).Update;
+  it('adds a conditional per-period outbox creation to the Stripe event transaction', () => {
+    const entry = buildRenewalNoticeEnqueue(table, candidate)?.Update;
     expect(entry).toMatchObject({
       TableName: table,
       Key: { pk },
@@ -39,16 +39,107 @@ describe('renewal notice persistence', () => {
         ':expiresAt': candidate.renewalAt + 90 * 86_400,
       },
     });
-    expect(entry?.UpdateExpression).toContain(
-      '#state = if_not_exists(#state, :state)',
-    );
-    expect(entry?.UpdateExpression).toContain(
-      '#nextDay = if_not_exists(#nextDay, :nextDay)',
-    );
+    expect(entry?.UpdateExpression).toContain('#state = :state');
+    expect(entry?.UpdateExpression).toContain('#nextDay = :nextDay');
     expect(Object.keys(entry?.ExpressionAttributeValues ?? {})).not.toContain(
       ':recipient',
     );
-    expect(entry?.ConditionExpression).toBeUndefined();
+    expect(entry?.ConditionExpression).toBe('attribute_not_exists(pk)');
+  });
+
+  it('only reopens a never-attempted notice skipped after cancellation when renewal resumes in its window', () => {
+    const skipped = {
+      ...candidate,
+      pk,
+      nextDay: 10_000_000,
+      state: 'skipped',
+      result: 'nonrenewing',
+    };
+    const resume = new Date(nextDay * 86_400_000 + 18 * 3_600_000);
+    const plan = (saved: Record<string, unknown>, asOf = resume) =>
+      buildRenewalNoticeEnqueue(table, candidate, saved, asOf);
+
+    const reopen = plan(skipped)?.Update;
+    expect(reopen).toMatchObject({
+      Key: { pk },
+      ConditionExpression: expect.stringContaining(
+        '#result = :nonrenewing AND attribute_not_exists(sendAttempted)',
+      ),
+      UpdateExpression: expect.stringContaining(
+        '#state = :queued, #nextDay = :nextDay, #generation = :generation',
+      ),
+      ExpressionAttributeValues: {
+        ':queued': 'queued',
+        ':nextDay': nextDay,
+        ':nonrenewing': 'nonrenewing',
+      },
+    });
+    expect(plan({ ...skipped, sendAttempted: true })).toBeUndefined();
+    expect(
+      plan({ ...skipped, result: 'subscription_changed' }),
+    ).toBeUndefined();
+    expect(plan({ ...skipped, state: 'sending' })).toBeUndefined();
+    expect(plan({ ...skipped, state: 'unknown' })).toBeUndefined();
+    expect(plan({ ...skipped, state: 'accepted' })).toBeUndefined();
+    expect(
+      plan({ ...skipped, householdId: 'another-household' }),
+    ).toBeUndefined();
+    expect(
+      plan(skipped, new Date(resume.getTime() + 3 * 86_400_000)),
+    ).toBeUndefined();
+  });
+
+  it('fences a worker that observed cancellation before a queued renewal resumed', async () => {
+    const stale = {
+      ...candidate,
+      pk,
+      nextDay,
+      state: 'queued' as const,
+      generation: 'before-resume',
+    };
+    send.mockResolvedValueOnce({ Item: stale });
+    const resume = await store.prepareEnqueue(table, candidate);
+    expect((send.mock.calls[0] as [GetCommand])[0].input).toMatchObject({
+      Key: { pk },
+      ConsistentRead: true,
+    });
+    expect(resume?.Update).toMatchObject({
+      ConditionExpression:
+        '#state = :queued AND #generation = :observedGeneration',
+      UpdateExpression: 'SET #generation = :generation',
+      ExpressionAttributeValues: {
+        ':observedGeneration': stale.generation,
+        ':generation': expect.any(String),
+      },
+    });
+    expect(resume?.Update?.ExpressionAttributeValues?.[':generation']).not.toBe(
+      stale.generation,
+    );
+
+    const generationConflict = new ConditionalCheckFailedException({
+      $metadata: {},
+      message: 'Generation changed',
+    });
+    send
+      .mockRejectedValueOnce(generationConflict)
+      .mockRejectedValueOnce(generationConflict);
+    await expect(
+      store.finish(
+        table,
+        stale,
+        { state: 'skipped', reason: 'nonrenewing' },
+        100,
+      ),
+    ).resolves.toBe(false);
+    await expect(store.claim(table, stale, 101)).resolves.toBeUndefined();
+    for (const [update] of send.mock.calls.slice(1) as [UpdateCommand][]) {
+      expect(update.input.ConditionExpression).toContain(
+        '#generation = :observedGeneration',
+      );
+      expect(
+        update.input.ExpressionAttributeValues?.[':observedGeneration'],
+      ).toBe(stale.generation);
+    }
   });
 
   it('reads only the explicitly targeted notice using a strong read', async () => {
@@ -118,7 +209,8 @@ describe('renewal notice persistence', () => {
     expect(update).toBeInstanceOf(UpdateCommand);
     expect(update.input).toMatchObject({
       Key: { pk },
-      ConditionExpression: '#state = :queued AND nextDay = :observedDay',
+      ConditionExpression:
+        '#state = :queued AND nextDay = :observedDay AND attribute_not_exists(#generation)',
       ExpressionAttributeValues: {
         ':queued': 'queued',
         ':observedDay': nextDay,
