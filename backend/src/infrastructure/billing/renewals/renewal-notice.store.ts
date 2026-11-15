@@ -3,6 +3,7 @@ import {
   GetCommand,
   QueryCommand,
   UpdateCommand,
+  type QueryCommandInput,
   type TransactWriteCommandInput,
   type UpdateCommandInput,
 } from '@aws-sdk/lib-dynamodb';
@@ -20,6 +21,8 @@ const queue = 'DUE';
 const finishedDay = 10_000_000;
 const noticeRetentionSeconds = 90 * 86_400;
 const claimSeconds = 120;
+const duePageSize = 10;
+const maxDuePages = 2;
 export const renewalNoticeDueIndex = 'RenewalNoticeDueIndex';
 
 type Write = NonNullable<TransactWriteCommandInput['TransactItems']>[number];
@@ -92,18 +95,29 @@ export class RenewalNoticeStore {
       : undefined;
   }
 
-  async due(table: string, today: number): Promise<RenewalNoticeRow[]> {
-    const result = await this.client.send(
-      new QueryCommand({
-        TableName: table,
-        IndexName: renewalNoticeDueIndex,
-        KeyConditionExpression: '#queue = :queue AND nextDay <= :today',
-        ExpressionAttributeNames: { '#queue': 'queue' },
-        ExpressionAttributeValues: { ':queue': queue, ':today': today },
-        Limit: 10,
-      }),
-    );
-    return (result.Items ?? []) as RenewalNoticeRow[];
+  async due(
+    table: string,
+    today: number,
+  ): Promise<{ jobs: RenewalNoticeRow[]; hasMoreDue: boolean }> {
+    const jobs: RenewalNoticeRow[] = [];
+    let cursor: QueryCommandInput['ExclusiveStartKey'];
+    for (let page = 0; page < maxDuePages; page++) {
+      const result = await this.client.send(
+        new QueryCommand({
+          TableName: table,
+          IndexName: renewalNoticeDueIndex,
+          KeyConditionExpression: '#queue = :queue AND nextDay <= :today',
+          ExpressionAttributeNames: { '#queue': 'queue' },
+          ExpressionAttributeValues: { ':queue': queue, ':today': today },
+          Limit: duePageSize,
+          ExclusiveStartKey: cursor,
+        }),
+      );
+      jobs.push(...((result.Items ?? []) as RenewalNoticeRow[]));
+      cursor = result.LastEvaluatedKey;
+      if (!cursor) break;
+    }
+    return { jobs, hasMoreDue: cursor !== undefined };
   }
 
   async claim(

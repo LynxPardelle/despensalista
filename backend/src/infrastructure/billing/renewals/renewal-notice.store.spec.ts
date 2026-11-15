@@ -65,7 +65,10 @@ describe('renewal notice persistence', () => {
 
   it('uses the due index with a bounded query rather than a scan', async () => {
     send.mockResolvedValueOnce({});
-    await expect(store.due(table, nextDay)).resolves.toEqual([]);
+    await expect(store.due(table, nextDay)).resolves.toEqual({
+      jobs: [],
+      hasMoreDue: false,
+    });
     const [query] = send.mock.calls[0] as [QueryCommand];
     expect(query).toBeInstanceOf(QueryCommand);
     expect(query.input).toMatchObject({
@@ -74,6 +77,31 @@ describe('renewal notice persistence', () => {
       KeyConditionExpression: '#queue = :queue AND nextDay <= :today',
       Limit: 10,
     });
+  });
+
+  it('follows the due-index cursor and reports when its page budget is exhausted', async () => {
+    const firstRows = Array.from({ length: 10 }, (_, index) => ({
+      ...candidate,
+      pk: `test-${index}`,
+      nextDay,
+      state: 'queued',
+    }));
+    const followingRow = { ...firstRows[0], pk: 'test-10' };
+    const cursor = { pk: firstRows[9].pk, queue: 'DUE', nextDay };
+    send
+      .mockResolvedValueOnce({ Items: firstRows, LastEvaluatedKey: cursor })
+      .mockResolvedValueOnce({
+        Items: [followingRow],
+        LastEvaluatedKey: { pk: followingRow.pk, queue: 'DUE', nextDay },
+      });
+
+    await expect(store.due(table, nextDay)).resolves.toEqual({
+      jobs: [...firstRows, followingRow],
+      hasMoreDue: true,
+    });
+    const [followingQuery] = send.mock.calls[1] as [QueryCommand];
+    expect(followingQuery.input.ExclusiveStartKey).toEqual(cursor);
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
   it('returns no claim when another worker already updated the queued record', async () => {

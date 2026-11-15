@@ -65,7 +65,7 @@ describe('renewal notice dispatching', () => {
 
   beforeEach(() => {
     jest.resetAllMocks();
-    store.due.mockResolvedValue([queued]);
+    store.due.mockResolvedValue({ jobs: [queued], hasMoreDue: false });
     store.read.mockResolvedValue(queued);
     store.claim.mockResolvedValue(claimed);
     store.finish.mockResolvedValue(true);
@@ -119,6 +119,39 @@ describe('renewal notice dispatching', () => {
       expect.any(Number),
     );
     expect(transport.send).not.toHaveBeenCalled();
+  });
+
+  it('checks more than ten notices in dry-run without updating the queue', async () => {
+    const jobs = Array.from({ length: 11 }, (_, index) => ({
+      ...queued,
+      pk: `test-${index}`,
+    }));
+    store.due.mockResolvedValueOnce({ jobs, hasMoreDue: false });
+    const dryRun = dispatcher({ RENEWAL_NOTICE_MODE: 'dry-run' });
+
+    expect(await dryRun.dispatch(dueAt)).toMatchObject({
+      processed: 11,
+      wouldSend: 11,
+      hasMoreDue: false,
+    });
+    expect(store.claim).not.toHaveBeenCalled();
+    expect(store.reschedule).not.toHaveBeenCalled();
+    expect(store.finish).not.toHaveBeenCalled();
+    expect(transport.send).not.toHaveBeenCalled();
+  });
+
+  it('limits a live poll to one possible delivery and leaves the rest for later', async () => {
+    store.due.mockResolvedValueOnce({
+      jobs: [queued, { ...queued, pk: 'next-notice' }],
+      hasMoreDue: false,
+    });
+    expect(await dispatcher().dispatch(dueAt)).toMatchObject({
+      processed: 1,
+      accepted: 1,
+      hasMoreDue: true,
+    });
+    expect(transport.send).toHaveBeenCalledTimes(1);
+    expect(store.claim).toHaveBeenCalledTimes(1);
   });
 
   it('rejects recipients other than the configured sandbox address', async () => {
@@ -194,7 +227,7 @@ describe('renewal notice dispatching', () => {
 
   it('never re-sends an expired claim', async () => {
     const expired = { ...claimed, claimExpiresAt: 0 };
-    store.due.mockResolvedValueOnce([expired]);
+    store.due.mockResolvedValueOnce({ jobs: [expired], hasMoreDue: false });
     expect(await dispatcher().dispatch(dueAt)).toMatchObject({
       unknown: 1,
       accepted: 0,

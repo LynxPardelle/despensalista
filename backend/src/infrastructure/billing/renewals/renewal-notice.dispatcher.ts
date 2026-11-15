@@ -23,6 +23,9 @@ import {
 } from './renewal-notice.types';
 
 const noticeIdPattern = /^renewal-[a-f0-9]{64}$/;
+const dryRunConcurrency = 4;
+// Reserve the remainder of the 15-second invocation for any work in progress.
+const scheduledWorkAdmissionMs = 3_000;
 const blankCounts = {
   wouldSend: 0,
   accepted: 0,
@@ -50,7 +53,8 @@ export class RenewalNoticeDispatcher {
   async dispatch(now?: Date, onlyNoticeId?: string) {
     const settings = renewalNoticeConfig(this.config);
     const counts = { ...blankCounts };
-    if (!settings) return { enabled: false, processed: 0, ...counts };
+    if (!settings)
+      return { enabled: false, processed: 0, hasMoreDue: false, ...counts };
 
     const today = now ?? new Date();
     if (
@@ -59,17 +63,42 @@ export class RenewalNoticeDispatcher {
     ) {
       throw new BadRequestException('Invalid renewal notice target');
     }
-    const jobs = onlyNoticeId
-      ? [await this.store.read(settings.table, onlyNoticeId)].filter(
-          (job): job is RenewalNoticeRow => job !== undefined,
-        )
-      : await this.store.due(settings.table, mexicoDay(today));
+    if (onlyNoticeId) {
+      const job = await this.store.read(settings.table, onlyNoticeId);
+      if (job) counts[await this.process(settings, job, now)]++;
+      return {
+        enabled: true,
+        processed: Number(job !== undefined),
+        hasMoreDue: false,
+        ...counts,
+      };
+    }
 
-    const outcomes = await Promise.all(
-      jobs.map((job) => this.process(settings, job, now)),
+    const admissionDeadline = performance.now() + scheduledWorkAdmissionMs;
+    const { jobs, hasMoreDue } = await this.store.due(
+      settings.table,
+      mexicoDay(today),
     );
-    for (const outcome of outcomes) counts[outcome]++;
-    return { enabled: true, processed: outcomes.length, ...counts };
+    const concurrency = settings.mode === 'dry-run' ? dryRunConcurrency : 1;
+    let processed = 0;
+    while (processed < jobs.length && performance.now() < admissionDeadline) {
+      const outcomes = await Promise.all(
+        jobs
+          .slice(processed, processed + concurrency)
+          .map((job) => this.process(settings, job, now)),
+      );
+      for (const outcome of outcomes) counts[outcome]++;
+      processed += outcomes.length;
+      // The sandbox can accept one message per second. Leave further rows
+      // queued for another poll after a possible delivery.
+      if (settings.mode === 'ses' && (counts.accepted || counts.unknown)) break;
+    }
+    return {
+      enabled: true,
+      processed,
+      hasMoreDue: hasMoreDue || processed < jobs.length,
+      ...counts,
+    };
   }
 
   private async process(

@@ -383,10 +383,10 @@ Plus Hogar renewal notices currently run only in the dev Stripe sandbox. The
 dev deployment uses `PLUS_RENEWAL_NOTICE_MODE` and the environment secret
 `PLUS_RENEWAL_NOTICE_TEST_TO`. The allowed SES address must be verified before
 using `ses` mode. The dev Cognito delivery stack needs the matching bootstrap
-policy for the exact verified recipient and the daily EventBridge rule. The
-rule invokes the dev Lambda alias at 15:00 UTC. The worker calculates the due
-date using the Mexico City calendar and remains independent of Stripe's
-account-wide reminder settings. The `dry-run` mode preserves pending notices.
+policy for the exact verified recipient and the hourly EventBridge rule. The
+worker calculates the due date using the Mexico City calendar and remains
+independent of Stripe's account-wide reminder settings. The `dry-run` mode
+preserves pending notices.
 
 To check delivery, use a disposable test subscription, verify the calendar
 gates at eight and seven days before renewal, and confirm the message ID and

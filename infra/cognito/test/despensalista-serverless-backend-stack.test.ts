@@ -95,7 +95,7 @@ test('renewal notices deploy only in dev with one scoped SES destination', () =>
   });
   dev.hasResourceProperties('AWS::Events::Rule', {
     Name: 'despensalista-dev-plus-renewal-notices',
-    ScheduleExpression: 'cron(0 15 * * ? *)',
+    ScheduleExpression: 'rate(1 hour)',
   });
   dev.hasResourceProperties('AWS::IAM::Policy', {
     PolicyDocument: { Statement: Match.arrayWith([Match.objectLike({
