@@ -19,6 +19,7 @@ interface ApiCognitoProviders {
 }
 
 type GoogleMfaCeremony = 'registration' | 'authentication' | 'recovery';
+export type CognitoAccountFlow = 'signup' | 'recovery';
 
 export function isGoogleMfaRequired(error: unknown): boolean {
   return error instanceof HttpErrorResponse &&
@@ -90,6 +91,7 @@ export class AuthApiService {
   buildCognitoLoginUrl(
     provider?: string | null,
     redirectTo?: string | null,
+    flow?: CognitoAccountFlow,
   ): string {
     const params = new URLSearchParams();
 
@@ -99,6 +101,10 @@ export class AuthApiService {
 
     if (redirectTo) {
       params.set('redirectTo', redirectTo);
+    }
+
+    if (flow) {
+      params.set('flow', flow);
     }
 
     const queryString = params.toString();

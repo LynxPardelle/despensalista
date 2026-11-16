@@ -55,16 +55,30 @@
           </button>
         }
 
-        @if (!hasSocialProviders(providerOptions)) {
-          <p class="status-copy">
-            Usa tu correo para entrar o crear una cuenta.
-          </p>
+        @if (hasProvider(providerOptions, 'COGNITO')) {
+          <nav class="auth-links" aria-label="Opciones de cuenta con correo">
+            <a [href]="nativeAccountUrl('signup')">Crear cuenta con correo</a>
+            <a [href]="nativeAccountUrl('recovery')">Recuperar contraseña de DespensaLista</a>
+          </nav>
+          <details class="account-help">
+            <summary>Ayuda con el correo</summary>
+            <p class="status-copy">Si no ves el código en tu bandeja de entrada, revisa el correo no deseado.</p>
+            <a [href]="feedbackUrl('registration')">Reportar un problema de registro</a>
+            <a [href]="feedbackUrl('recovery')">Reportar un problema de recuperación</a>
+          </details>
+        }
+        @if (hasProvider(providerOptions, 'Google')) {
+          <details class="account-help">
+            <summary>Ayuda con Google</summary>
+            <p class="status-copy">Si creaste tu cuenta con Google, vuelve a entrar con la misma cuenta. Google gestiona la verificación de ese correo y la recuperación de tu cuenta de Google.</p>
+            <a href="https://accounts.google.com/signin/recovery">Recuperar mi cuenta de Google</a>
+          </details>
         }
       }
     </div>
 
-    <p class="helper-copy">
-      Puedes crear tu cuenta o recuperar el acceso en la siguiente pantalla.
+    <p class="auth-links">
+      <a [href]="feedbackUrl('access')">Reportar un problema de acceso</a>
     </p>
   </section>
 </main>

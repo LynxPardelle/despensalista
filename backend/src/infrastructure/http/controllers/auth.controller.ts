@@ -1,8 +1,10 @@
 import {
+  BadRequestException,
   Controller,
   Get,
   HttpCode,
   Inject,
+  Logger,
   Post,
   Query,
   Req,
@@ -22,6 +24,7 @@ import {
 import {
   CognitoAuthUrlBuilder,
   CognitoTokenClient,
+  CognitoTokenSet,
   CognitoTokenVerifier,
 } from '../../../application/ports/cognito-auth.port';
 import { CognitoAuthTransactionService } from '../../../application/services/cognito-auth-transaction.service';
@@ -38,6 +41,8 @@ import { AuthUserMapper } from '../mappers/auth-user.mapper';
 @Controller('auth')
 @ApiTags('auth')
 export class AuthController {
+  private readonly logger = new Logger(AuthController.name);
+
   constructor(
     private readonly getCurrentUserUseCase: GetCurrentUserUseCase,
     private readonly transactionService: CognitoAuthTransactionService,
@@ -59,15 +64,23 @@ export class AuthController {
     @Query('provider') provider: string | undefined,
     @Query('redirectTo') redirectTo: string | undefined,
     @Res() reply: FastifyReply,
+    @Query('flow') flow?: string,
   ): void {
     this.ensureCognitoEnabled();
-    const transaction = this.transactionService.createTransaction();
     const normalizedRedirectTo =
       this.transactionService.normalizeRedirectTo(redirectTo);
     const normalizedProvider = this.transactionService.normalizeProvider(
       provider,
       this.getAllowedProviders(),
     );
+    if (
+      flow !== undefined &&
+      ((flow !== 'signup' && flow !== 'recovery') ||
+        normalizedProvider !== 'COGNITO')
+    ) {
+      throw new BadRequestException('Selecciona una opción de acceso válida.');
+    }
+    const transaction = this.transactionService.createTransaction();
 
     this.authCookieService.setCognitoAuthTransactionCookies(reply, {
       state: transaction.state,
@@ -83,6 +96,7 @@ export class AuthController {
       codeChallengeMethod: transaction.codeChallengeMethod,
       redirectUri: this.getRedirectUri(reply.request),
       scopes: this.getScopes(),
+      flow,
       provider:
         normalizedProvider === 'COGNITO' ? undefined : normalizedProvider,
     });
@@ -126,40 +140,58 @@ export class AuthController {
       return;
     }
 
-    const tokenSet = await this.tokenClient.exchangeCode({
-      code,
-      codeVerifier: transaction.codeVerifier,
-      redirectUri: this.getRedirectUri(request),
-    });
-    const idClaims = await this.tokenVerifier.verifyIdToken(tokenSet.idToken);
-
-    if (idClaims.nonce !== transaction.nonce) {
-      throw new UnauthorizedException('Invalid Cognito auth nonce');
-    }
-
+    let tokenSet: CognitoTokenSet;
     let redirectTo = transaction.redirectTo;
-    if (this.googleMfa.enabled) {
-      const accessClaims = await this.tokenVerifier.verifyAccessToken(
-        tokenSet.accessToken,
-      );
-      if (
-        accessClaims.sub !== idClaims.sub ||
-        accessClaims.cognitoUsername !== idClaims.cognitoUsername
-      ) {
-        throw new UnauthorizedException('Invalid Cognito login identity');
+    try {
+      tokenSet = await this.tokenClient.exchangeCode({
+        code,
+        codeVerifier: transaction.codeVerifier,
+        redirectUri: this.getRedirectUri(request),
+      });
+      const idClaims = await this.tokenVerifier.verifyIdToken(tokenSet.idToken);
+
+      if (idClaims.nonce !== transaction.nonce) {
+        throw new UnauthorizedException('Invalid Cognito auth nonce');
       }
-      if (this.googleMfa.requiresProof(accessClaims)) {
-        if (!idClaims.emailVerified) {
-          throw new UnauthorizedException('Verified Google email is required');
+
+      if (this.googleMfa.enabled) {
+        const accessClaims = await this.tokenVerifier.verifyAccessToken(
+          tokenSet.accessToken,
+        );
+        if (
+          accessClaims.sub !== idClaims.sub ||
+          accessClaims.cognitoUsername !== idClaims.cognitoUsername
+        ) {
+          throw new UnauthorizedException('Invalid Cognito login identity');
         }
-        const destination =
-          this.transactionService.normalizeRedirectTo(redirectTo);
-        redirectTo = `/mfa-google?redirectTo=${encodeURIComponent(destination)}`;
+        if (this.googleMfa.requiresProof(accessClaims)) {
+          if (!idClaims.emailVerified) {
+            throw new UnauthorizedException(
+              'Verified Google email is required',
+            );
+          }
+          const destination =
+            this.transactionService.normalizeRedirectTo(redirectTo);
+          redirectTo = `/mfa-google?redirectTo=${encodeURIComponent(destination)}`;
+        }
       }
-      this.authCookieService.clearGoogleMfaCookie(reply);
+
+      await this.profileSyncService.syncFromClaims(idClaims);
+    } catch (error) {
+      const unexpected = !(error instanceof UnauthorizedException);
+      if (unexpected) this.logger.error('cognito_callback_dependency_error');
+      this.authCookieService.clearCognitoAuthTransactionCookies(reply);
+      reply.redirect(
+        unexpected
+          ? '/login?authError=cognito_unexpected'
+          : '/login?authError=cognito_callback',
+        302,
+      );
+      return;
     }
 
-    await this.profileSyncService.syncFromClaims(idClaims);
+    if (this.googleMfa.enabled)
+      this.authCookieService.clearGoogleMfaCookie(reply);
     this.authCookieService.setSessionCookies(reply, {
       accessToken: tokenSet.accessToken,
       refreshToken: tokenSet.refreshToken,

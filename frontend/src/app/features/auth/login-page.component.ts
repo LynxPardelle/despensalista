@@ -3,7 +3,7 @@ import { ActivatedRoute } from '@angular/router';
 import { Observable, of } from 'rxjs';
 import { catchError, map } from 'rxjs/operators';
 import { environment } from '../../../environments/environment';
-import { AuthApiService } from '../../core/services/auth-api.service';
+import { AuthApiService, type CognitoAccountFlow } from '../../core/services/auth-api.service';
 import { AuthFacade } from '../../core/services/auth.facade';
 
 interface LoginProviderOption {
@@ -11,6 +11,12 @@ interface LoginProviderOption {
   label: string;
   primary: boolean;
 }
+
+const COGNITO_CALLBACK_ERRORS = new Map([
+  ['cognito_state', 'El inicio de sesión caducó o se abrió otro intento. Vuelve a elegir cómo quieres entrar.'],
+  ['cognito_callback', 'No pudimos confirmar tu acceso. Vuelve a intentarlo o reporta el problema.'],
+  ['cognito_unexpected', 'No pudimos verificar tu acceso en este momento. Vuelve a intentarlo o reporta el problema.'],
+]);
 
 @Component({
   selector: 'app-login-page',
@@ -49,6 +55,21 @@ export class LoginPageComponent implements OnInit {
     );
   }
 
+  nativeAccountUrl(flow: CognitoAccountFlow): string {
+    return this.authApiService.buildCognitoLoginUrl(
+      'COGNITO', this.route.snapshot.queryParamMap.get('redirectTo'), flow,
+    );
+  }
+
+  feedbackUrl(source: 'access' | 'registration' | 'recovery'): string {
+    const params = new URLSearchParams({ source });
+    const error = this.route.snapshot.queryParamMap.get('authError');
+    if (source === 'access' && error && COGNITO_CALLBACK_ERRORS.has(error)) {
+      params.set('errorCode', error === 'cognito_unexpected' ? 'unexpected' : 'oauth_callback');
+    }
+    return `/feedback?${params.toString()}`;
+  }
+
   getPendingButtonLabel(provider: string): string {
     return `Abriendo ${this.getProviderDisplayName(provider)}...`;
   }
@@ -59,8 +80,8 @@ export class LoginPageComponent implements OnInit {
     )} para iniciar sesión.`;
   }
 
-  hasSocialProviders(options: LoginProviderOption[]): boolean {
-    return options.some((option) => option.provider !== 'COGNITO');
+  hasProvider(options: LoginProviderOption[], provider: string): boolean {
+    return options.some((option) => option.provider === provider);
   }
 
   private toProviderOptions(providers: string[]): LoginProviderOption[] {
@@ -99,15 +120,8 @@ export class LoginPageComponent implements OnInit {
   }
 
   private getCallbackErrorMessage(error: string | null): string | null {
-    const messages: Record<string, string> = {
-      cognito_state:
-        'El inicio de sesion caduco o se abrio otro intento. Vuelve a elegir tu proveedor.',
-      cognito_callback:
-        'No recibimos la confirmación de acceso. Vuelve a iniciar sesión.',
-    };
-
     return error
-      ? (messages[error] ?? 'No pudimos completar el inicio de sesion.')
+      ? (COGNITO_CALLBACK_ERRORS.get(error) ?? 'No pudimos completar el inicio de sesión. Vuelve a intentarlo.')
       : null;
   }
 }

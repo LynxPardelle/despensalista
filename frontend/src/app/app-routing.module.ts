@@ -86,8 +86,6 @@ const routes: Routes = [
       import('./features/feedback/feedback-page.component').then(
         (module) => module.FeedbackPageComponent,
       ),
-    canActivate: [AuthGuard],
-    data: { authMode: 'authenticated' },
   },
   {
     path: '',

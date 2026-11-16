@@ -60,6 +60,50 @@ describe('FeedbackPageComponent', () => {
     expect(message.value).toBe('');
   });
 
+  it('lets a signed-out visitor report without sending session cookies', () => {
+    http.expectOne('/api/feedback/status').flush({}, { status: 401, statusText: 'Unauthorized' });
+    const available = http.expectOne('/api/feedback/anonymous/status');
+    expect(available.request.credentials).toBe('omit');
+    available.flush({ available: true });
+    fixture.detectChanges();
+
+    fillReport();
+    submit();
+    const request = http.expectOne({ method: 'POST', url: '/api/feedback/anonymous' });
+    expect(request.request.credentials).toBe('omit');
+    expect(request.request.body.message).toBe('No recibí el código de recuperación.');
+    request.flush({ id: request.request.body.submissionId });
+    expect(page().querySelector('textarea')?.value).toBe('');
+  });
+
+  it('preserves the draft when an account session expires before submission', () => {
+    http.expectOne('/api/feedback/status').flush({ available: true });
+    fixture.detectChanges();
+    fillReport();
+    submit();
+
+    http.expectOne({ method: 'POST', url: '/api/feedback' }).flush({}, {
+      status: 401, statusText: 'Unauthorized',
+    });
+    fixture.detectChanges();
+    const button = Array.from(page().querySelectorAll('button')).find((item) =>
+      item.textContent?.includes('Enviar sin iniciar sesión'));
+    expect(button).toBeDefined();
+    button!.click();
+    http.expectOne('/api/feedback/anonymous/status').flush({ available: true });
+    fixture.detectChanges();
+    expect(page().querySelector('textarea')?.value).toBe('No recibí el código de recuperación.');
+  });
+
+  function fillReport(): void {
+    const category = page().querySelector('select')!;
+    category.value = 'bug';
+    category.dispatchEvent(new Event('change'));
+    const message = page().querySelector('textarea')!;
+    message.value = 'No recibí el código de recuperación.';
+    message.dispatchEvent(new Event('input'));
+  }
+
   function page(): HTMLElement {
     return fixture.nativeElement as HTMLElement;
   }

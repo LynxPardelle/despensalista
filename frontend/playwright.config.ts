@@ -2,7 +2,12 @@ import { defineConfig, devices } from '@playwright/test';
 
 const mobile = process.env.DESPLA_MOBILE_E2E === '1';
 const chrome = process.env.PLAYWRIGHT_BROWSER_CHANNEL ?? 'chrome';
-const mobileSpecs = ['**/pwa.spec.ts', '**/auth-cognito-smoke.spec.ts', '**/marketing.spec.ts'];
+const mobileSpecs = [
+  '**/pwa.spec.ts',
+  '**/auth-cognito-smoke.spec.ts',
+  '**/marketing.spec.ts',
+  '**/feedback-access.spec.ts',
+];
 
 export default defineConfig({
   testDir: './e2e',

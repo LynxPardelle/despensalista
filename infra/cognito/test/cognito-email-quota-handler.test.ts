@@ -167,27 +167,55 @@ test('does not meter TOTP authentication messages', async () => {
 
 test('fails closed without a recipient and sanitizes DynamoDB failures', async () => {
   const { createHandler } = loadHandler();
+  const categories: string[] = [];
+  const logFailure = (category: string) => categories.push(category);
   const missingRecipient = createHandler({
     environment,
+    logFailure,
     now: () => new Date('2026-09-26T12:00:00.000Z'),
     transactWrite: async () => undefined,
   });
   const unavailableStore = createHandler({
     environment,
+    logFailure,
     now: () => new Date('2026-09-26T12:00:00.000Z'),
     transactWrite: async () => { throw new Error('sensitive DynamoDB detail'); },
   });
 
   await assert.rejects(
     missingRecipient(event('CustomMessage_SignUp', '   ')),
-    /Email delivery temporarily unavailable/,
+    /El envío de correo no está disponible por el momento/,
   );
   await assert.rejects(
     unavailableStore(event('CustomMessage_ForgotPassword')),
     (error: Error) => {
-      assert.match(error.message, /Email delivery temporarily unavailable/);
+      assert.match(error.message, /El envío de correo no está disponible por el momento/);
       assert.doesNotMatch(error.message, /DynamoDB|sensitive/);
       return true;
     },
   );
+  assert.deepEqual(categories, ['missing_recipient', 'unexpected_failure']);
+});
+
+test('reports whether a transaction hit quota, lacked permission or had another failure', async () => {
+  const { createHandler } = loadHandler();
+  const categories: string[] = [];
+  const cases = [
+    { name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'ConditionalCheckFailed', Item: { email: 'alice@example.test' } }] },
+    { name: 'AccessDeniedException' },
+    { name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'TransactionConflict' }] },
+    { name: 'ThrottlingException' },
+    { name: 'ResourceNotFoundException' },
+  ];
+  for (const failure of cases) {
+    const handler = createHandler({
+      environment,
+      logFailure: (category: string) => categories.push(category),
+      transactWrite: async () => { throw { ...failure, message: 'alice@example.test', requestId: 'private' }; },
+    });
+    await assert.rejects(handler(event('CustomMessage_SignUp')), {
+      message: 'El envío de correo no está disponible por el momento. Vuelve a intentarlo más tarde.',
+    });
+  }
+  assert.deepEqual(categories, ['quota_exceeded', 'storage_access_denied', 'transaction_cancelled', 'storage_throttled', 'storage_missing']);
 });

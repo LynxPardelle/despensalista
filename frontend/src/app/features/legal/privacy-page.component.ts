@@ -94,14 +94,15 @@ import { RouterLink } from '@angular/router';
 
         <h2>Reportes de errores, quejas y sugerencias</h2>
         <p>
-          Si envías un reporte desde tu perfil, guardamos su categoría, mensaje, fecha y folio
-          para revisar el problema o la sugerencia. Asociamos el envío a un identificador
+          Si envías un reporte, guardamos su categoría, mensaje, fecha, folio y, cuando se incluye,
+          la sección de la app y un código de error. Si lo envías con tu sesión, lo asociamos a un identificador
           seudónimo de tu cuenta para aplicar el límite de envíos y eliminar tus reportes si
           borras la cuenta. El equipo autorizado de Despensa Lista puede consultar el reporte.
         </p>
         <p>
-          Los reportes vencen después de 90 días. Evita incluir contraseñas, datos de pago
-          o información personal en el mensaje.
+          Los reportes asociados a una cuenta vencen después de 90 días. Los reportes enviados
+          sin sesión vencen después de 30 días. Evita incluir contraseñas, datos de pago o
+          información personal en el mensaje.
         </p>
 
         <h2>Con quien compartimos datos</h2>
