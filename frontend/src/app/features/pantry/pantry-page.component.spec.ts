@@ -40,6 +40,7 @@ import {
   selectExpiredEntryAlert,
   selectPantryInitialLoading,
   selectPantryGroupsSorted,
+  selectPantryOverview,
   selectPriceReferenceItems,
   selectShoppingPlanItems,
 } from '../../store/pantry/pantry.selectors';
@@ -68,6 +69,7 @@ describe('PantryPageComponent', () => {
     clearPantryLocalState();
     pantryService = jasmine.createSpyObj<PantryService>('PantryService', [
       'searchProductTypes',
+      'createProductType',
       'registerLot',
       'consumeInventoryLot',
       'updateProductTypeDepletionRule',
@@ -397,9 +399,107 @@ describe('PantryPageComponent', () => {
     const compiled = fixture.nativeElement as HTMLElement;
 
     expect(compiled.textContent).toContain('Cargando despensa');
+    expect(compiled.querySelector('#first-purchase-form')).toBeNull();
     expect(compiled.textContent).not.toContain(
       'No hay lotes urgentes por ahora.',
     );
+  });
+
+  it('registers a first purchase through the same atomic close as a shopping trip', () => {
+    store.select.and.callFake((selector) => selector === selectPantryOverview
+      ? of({ items: [], shoppingPlanItems: [], preferences: { showGuidanceTips: true } })
+      : of(null));
+    pantryService.createProductType.and.returnValue(of(makeProductType({
+      id: 'first-product', baseName: 'Arroz', defaultUnit: 'piezas', archivedAt: null,
+    })));
+    pantryService.closeShoppingPurchase.and.returnValue(of(makeCheckoutResult([
+      makeInventoryLot({ productTypeId: 'first-product', quantity: 2 }),
+    ])));
+
+    fixture = TestBed.createComponent(PantryPageComponent);
+    fixture.detectChanges();
+    const page = fixture.nativeElement as HTMLElement;
+    const form = page.querySelector<HTMLFormElement>('#first-purchase-form');
+    expect(form).not.toBeNull();
+    if (!form) return;
+
+    const nameInput = form.querySelector<HTMLInputElement>('#first-purchase-name')!;
+    nameInput.value = 'Arroz';
+    nameInput.dispatchEvent(new Event('input'));
+    const quantityInput = form.querySelector<HTMLInputElement>('#first-purchase-quantity')!;
+    quantityInput.value = '2';
+    quantityInput.dispatchEvent(new Event('input'));
+    form.dispatchEvent(new Event('submit', { cancelable: true }));
+    fixture.detectChanges();
+
+    expect(pantryService.createProductType).toHaveBeenCalledOnceWith({
+      baseName: 'Arroz', category: 'food', defaultUnit: 'piezas',
+    });
+    expect(pantryService.closeShoppingPurchase).toHaveBeenCalledOnceWith({
+      items: [{ productTypeId: 'first-product', quantity: 2, unit: 'piezas' }],
+    }, jasmine.any(String));
+    expect(page.querySelector('#first-purchase-form')).toBeNull();
+    expect(page.querySelector('#first-purchase-result')?.textContent).toContain('Arroz');
+  });
+
+  it('keeps the first purchase entry out of an existing pantry', () => {
+    store.select.and.callFake((selector) => selector === selectPantryOverview
+      ? of({ items: [makePantryGroup()], shoppingPlanItems: [], preferences: { showGuidanceTips: true } })
+      : of(null));
+    fixture = TestBed.createComponent(PantryPageComponent);
+    fixture.detectChanges();
+
+    expect((fixture.nativeElement as HTMLElement).querySelector('#first-purchase-form')).toBeNull();
+  });
+
+  it('saves the first purchase offline and restores it without writing to the server', () => {
+    fixture.componentInstance.isOffline = true;
+    fixture.componentInstance.firstPurchaseForm.patchValue({ name: 'Avena', quantity: 2 });
+    fixture.componentInstance.submitFirstPurchase();
+
+    expect(pantryService.createProductType).not.toHaveBeenCalled();
+    expect(pantryService.closeShoppingPurchase).not.toHaveBeenCalled();
+
+    fixture.destroy();
+    fixture = TestBed.createComponent(PantryPageComponent);
+    fixture.detectChanges();
+    const restoredName = (fixture.nativeElement as HTMLElement).querySelector<HTMLInputElement>('#first-purchase-name');
+    expect(restoredName?.value).toBe('Avena');
+  });
+
+  it('finds the already-created first product when its creation response was lost', () => {
+    const product = makeProductType({ id: 'coffee', baseName: 'Café', defaultUnit: 'piezas', archivedAt: null });
+    pantryService.searchProductTypes.and.returnValues(of([]), of([product]));
+    pantryService.createProductType.and.returnValue(throwError(() => new TimeoutError()));
+    component.firstPurchaseForm.patchValue({ name: 'Café', quantity: 2 });
+
+    component.submitFirstPurchase();
+    expect(pantryService.closeShoppingPurchase).not.toHaveBeenCalled();
+    component.submitFirstPurchase();
+
+    expect(pantryService.createProductType.calls.count()).toBe(1);
+    expect(pantryService.closeShoppingPurchase).toHaveBeenCalledOnceWith({
+      items: [{ productTypeId: 'coffee', quantity: 2, unit: 'piezas' }],
+    }, jasmine.any(String));
+  });
+
+  it('retries an uncertain first purchase with its original checkout key after reload', () => {
+    const product = makeProductType({ id: 'beans', baseName: 'Frijol', defaultUnit: 'piezas', archivedAt: null });
+    pantryService.searchProductTypes.and.returnValue(of([product]));
+    pantryService.closeShoppingPurchase.and.returnValue(throwError(() => new TimeoutError()));
+    component.firstPurchaseForm.patchValue({ name: 'Frijol' });
+    component.submitFirstPurchase();
+    const firstKey = pantryService.closeShoppingPurchase.calls.mostRecent().args[1];
+
+    fixture.destroy();
+    pantryService.closeShoppingPurchase.and.returnValue(of(makeCheckoutResult([makeInventoryLot()], true)));
+    fixture = TestBed.createComponent(PantryPageComponent);
+    fixture.detectChanges();
+
+    expect(pantryService.closeShoppingPurchase.calls.count()).toBe(2);
+    expect(pantryService.closeShoppingPurchase.calls.mostRecent().args[1]).toBe(firstKey);
+    expect((fixture.nativeElement as HTMLElement).querySelector('#first-purchase-result')?.textContent).toContain('Frijol');
+    expect(pantryService.createProductType).not.toHaveBeenCalled();
   });
 
   it('shows a neutral lot unit preview until an existing type is selected', () => {
@@ -2091,6 +2191,7 @@ function clearPantryLocalState(): void {
   const pantryStoragePrefixes = [
     'despensalista.shoppingBudget',
     'despensalista.quickCaptureDrafts',
+    'despensalista.firstPurchaseDraft',
     'despensalista.shoppingTripDraft',
     'despensalista.pendingShoppingCheckouts',
     'despensalista.pendingInventoryMutations',

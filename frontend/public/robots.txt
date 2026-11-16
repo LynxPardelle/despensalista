@@ -1,0 +1,14 @@
+User-agent: *
+Disallow: /api/
+Disallow: /feedback
+Disallow: /forgot-password
+Disallow: /index.csr.html
+Disallow: /login
+Disallow: /mfa-google
+Disallow: /pantry
+Disallow: /profile
+Disallow: /register
+Disallow: /reset-password
+Disallow: /shared-shopping-list
+
+Sitemap: https://despensalista.com/sitemap.xml

@@ -1,6 +1,7 @@
 import { provideZoneChangeDetection } from '@angular/core';
 import { platformBrowser } from '@angular/platform-browser';
 import { AppModule } from './app/app.module';
+import { environment } from './environments/environment';
 
 platformBrowser()
   .bootstrapModule(AppModule, {
@@ -12,13 +13,19 @@ platformBrowser()
   .catch((err) => console.error(err));
 
 function registerDespensaListaServiceWorker(): void {
-  if (!('serviceWorker' in navigator)) {
+  if (!environment.production || !window.isSecureContext || !('serviceWorker' in navigator)) {
     return;
   }
 
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/despensalista-sw.js').catch(() => {
+  const register = () => {
+    navigator.serviceWorker.register('/despensalista-sw.js', { updateViaCache: 'none' }).catch(() => {
       // Offline support is optional; a failed registration must not block login.
     });
-  });
+  };
+
+  if (document.readyState === 'complete') {
+    register();
+  } else {
+    window.addEventListener('load', register, { once: true });
+  }
 }

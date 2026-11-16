@@ -1,5 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const mobile = process.env.DESPLA_MOBILE_E2E === '1';
+const chrome = process.env.PLAYWRIGHT_BROWSER_CHANNEL ?? 'chrome';
+const mobileSpecs = ['**/pwa.spec.ts', '**/auth-cognito-smoke.spec.ts', '**/marketing.spec.ts'];
+
 export default defineConfig({
   testDir: './e2e',
   timeout: 60_000,
@@ -17,14 +21,24 @@ export default defineConfig({
   use: {
     baseURL: process.env.E2E_BASE_URL ?? 'http://127.0.0.1:48674',
     serviceWorkers: 'block',
-    channel: process.env.PLAYWRIGHT_BROWSER_CHANNEL ?? 'chrome',
     trace: 'retain-on-failure',
     video: 'retain-on-failure',
   },
-  projects: [
+  projects: mobile ? [
+    {
+      name: 'chrome-android',
+      testMatch: mobileSpecs,
+      use: { ...devices['Pixel 7'], channel: chrome, video: 'off' },
+    },
+    {
+      name: 'webkit-iphone',
+      testMatch: mobileSpecs,
+      use: { ...devices['iPhone 15'], video: 'off' },
+    },
+  ] : [
     {
       name: 'chromium-system',
-      use: { ...devices['Desktop Chrome'] },
+      use: { ...devices['Desktop Chrome'], channel: chrome },
     },
   ],
 });

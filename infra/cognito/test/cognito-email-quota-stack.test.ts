@@ -177,7 +177,7 @@ test('delivery IAM scopes Cognito by stage tags without depending on the user po
   }
 });
 
-test('only production has a no-action Lambda Errors alarm and no WAF resource', () => {
+test('the production email alarm uses the existing operations SNS topic by ARN', () => {
   const prod = synthesize('prod');
   const dev = synthesize('dev');
   const alarm = namedResource(
@@ -190,7 +190,13 @@ test('only production has a no-action Lambda Errors alarm and no WAF resource', 
   assert.equal(alarm.Properties.Namespace, 'AWS/Lambda');
   assert.equal(alarm.Properties.MetricName, 'Errors');
   assert.equal(alarm.Properties.Threshold, 1);
-  assert.equal(alarm.Properties.AlarmActions, undefined);
+  assert.deepEqual(alarm.Properties.AlarmActions, [{
+    'Fn::Join': ['', [
+      'arn:', { Ref: 'AWS::Partition' }, ':sns:', { Ref: 'AWS::Region' },
+      ':', { Ref: 'AWS::AccountId' }, ':despensalista-prod-operations-alarms',
+    ]],
+  }]);
+  assert.equal(Object.values(prod).some((resource) => resource.Type === 'AWS::SNS::Topic'), false);
   assert.equal(
     Object.values(dev).filter((resource) => resource.Type === 'AWS::CloudWatch::Alarm').length,
     0,

@@ -13,10 +13,8 @@ test('renders Cognito login options and starts provider redirect', async ({
 
   await page.route('**/api/auth/cognito/login?**', async (route) => {
     await route.fulfill({
-      status: 302,
-      headers: {
-        location: '/login?cognitoRedirect=stubbed',
-      },
+      contentType: 'text/html; charset=utf-8',
+      body: '<meta http-equiv="refresh" content="0; url=/login?cognitoRedirect=stubbed">',
     });
   });
 
@@ -30,7 +28,9 @@ test('renders Cognito login options and starts provider redirect', async ({
   await expect(page.getByLabel('Correo')).toHaveCount(0);
   await expect(page.getByLabel('Password')).toHaveCount(0);
 
+  const startedLogin = page.waitForRequest('**/api/auth/cognito/login?**');
   await page.getByRole('button', { name: 'Entrar con Google' }).click();
+  expect(new URL((await startedLogin).url()).searchParams.get('provider')).toBe('Google');
 
   await expect(page).toHaveURL(/cognitoRedirect=stubbed/);
 });
