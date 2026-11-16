@@ -6,14 +6,18 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { HOUSEHOLD_REPOSITORY } from '../../../application/tokens';
+import type { UserDao } from '../../../application/ports/daos';
+import { HOUSEHOLD_REPOSITORY, USER_DAO } from '../../../application/tokens';
+import { UserAccountStatus } from '../../../domain/enums';
 import type { HouseholdRepository } from '../../../domain/repositories/household.repository';
+import { UserId } from '../../../domain/value-objects/user-id.vo';
 import { StripeBillingConfig } from '../stripe-billing-config';
 import { StripeBillingStore } from '../stripe-billing.store';
+import { cfdiCatalog } from './cfdi-catalog';
 import { cfdiInvoice, stripeInvoiceId } from './cfdi-invoice';
 import { CfdiMail } from './cfdi-mail';
 import { CfdiRequestStore, cfdiReceipt } from './cfdi-request.store';
-import { readCfdiRequest } from './cfdi-request';
+import { readCfdiRequest, validContactAddress } from './cfdi-request';
 
 @Injectable()
 export class CfdiService {
@@ -26,6 +30,7 @@ export class CfdiService {
     private readonly households: HouseholdRepository,
     private readonly requests: CfdiRequestStore,
     private readonly mail: CfdiMail,
+    @Inject(USER_DAO) private readonly users: UserDao,
   ) {}
 
   async invoices(userId: string, cursor: unknown) {
@@ -38,15 +43,18 @@ export class CfdiService {
     const context = await this.context(userId);
     if (!context) return { available: false, invoices: [] };
     const { settings, owner } = context;
-    const page = await this.fromStripe(() =>
-      settings.stripe.invoices.list({
-        customer: owner.customerId,
-        status: 'paid',
-        limit: 20,
-        expand: ['data.payments'],
-        ...(typeof cursor === 'string' && { starting_after: cursor }),
-      }),
-    );
+    const [page, accountEmail] = await Promise.all([
+      this.fromStripe(() =>
+        settings.stripe.invoices.list({
+          customer: owner.customerId,
+          status: 'paid',
+          limit: 20,
+          expand: ['data.payments'],
+          ...(typeof cursor === 'string' && { starting_after: cursor }),
+        }),
+      ),
+      this.accountEmail(userId),
+    ]);
     const invoices = await Promise.all(
       page.data.flatMap((invoice) => {
         const eligible = cfdiInvoice(invoice, settings, owner);
@@ -57,7 +65,13 @@ export class CfdiService {
     );
     // Advance from the raw page even when it only contains ineligible invoices.
     const nextCursor = page.has_more ? page.data.at(-1)?.id : undefined;
-    return { available: true, invoices, ...(nextCursor && { nextCursor }) };
+    return {
+      available: true,
+      invoices,
+      accountEmail,
+      catalog: cfdiCatalog,
+      ...(nextCursor && { nextCursor }),
+    };
   }
 
   async request(userId: string, invoiceId: string, body: unknown) {
@@ -77,7 +91,7 @@ export class CfdiService {
       owner.householdId,
     );
     if (previous && previous.status !== 'pending') return cfdiReceipt(previous);
-    const data = readCfdiRequest(body);
+    const data = readCfdiRequest(body, await this.accountEmail(userId));
     const request = await this.requests.reserve({
       table: settings.table,
       userId,
@@ -107,6 +121,19 @@ export class CfdiService {
     return cfdiReceipt(
       await this.requests.finish(settings.table, invoiceId, request, result),
     );
+  }
+
+  private async accountEmail(userId: string): Promise<string | null> {
+    const account = await this.users.findById(UserId.fromString(userId));
+    if (
+      !account ||
+      account.status !== UserAccountStatus.ACTIVE ||
+      account.isAccountDeletionPending()
+    ) {
+      return null;
+    }
+    const email = account.email.trim();
+    return validContactAddress(email) ? email : null;
   }
 
   private async context(userId: string) {

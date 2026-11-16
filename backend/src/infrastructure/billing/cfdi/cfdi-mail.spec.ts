@@ -37,7 +37,8 @@ it('sends paid amounts and tax details only to the configured inbox', async () =
   await expect(
     mail.request(mail.options()!, 'folio', invoice, {
       ...fiscalData,
-      email: 'delivery@example.com',
+      accountEmail: 'account@example.com',
+      additionalEmail: 'delivery@example.com',
     }),
   ).resolves.toEqual({ status: 'sent', messageId: 'receipt' });
   const command = send.mock.calls[0][0] as SendEmailCommand;
@@ -51,8 +52,23 @@ it('sends paid amounts and tax details only to the configured inbox', async () =
   expect(simple?.Subject?.Data).not.toContain(fiscalData.rfc);
   expect(simple?.Body?.Text?.Data).toContain('Total pagado: $68.44 MXN');
   expect(simple?.Body?.Text?.Data).toContain(
-    'Correo para entrega: delivery@example.com',
+    'Correo principal de la cuenta: account@example.com',
   );
+  expect(simple?.Body?.Text?.Data).toContain(
+    'Correo adicional: delivery@example.com',
+  );
+});
+
+it('includes the folio contact fallback when both addresses are absent', async () => {
+  const send = jest
+    .spyOn(SESv2Client.prototype, 'send')
+    .mockResolvedValue({ MessageId: 'receipt' } as never);
+  await mail.request(mail.options()!, 'folio', invoice, fiscalData);
+  const command = send.mock.calls[0][0] as SendEmailCommand;
+  const text = command.input.Content?.Simple?.Body?.Text?.Data;
+  expect(text).toContain('Conserva el folio para coordinar la entrega');
+  expect(text).not.toContain('Correo principal de la cuenta');
+  expect(text).not.toContain('Correo adicional');
 });
 
 it.each([

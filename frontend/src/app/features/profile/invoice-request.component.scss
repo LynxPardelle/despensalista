@@ -2,6 +2,7 @@
 .cfdi-panel,
 #cfdi-details:not([hidden]),
 .cfdi-field,
+form,
 fieldset {
   display: grid;
   gap: 0.75rem;

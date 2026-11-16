@@ -1,10 +1,22 @@
 import { HttpErrorResponse } from '@angular/common/http';
-import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, input, signal } from '@angular/core';
-import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { NonNullableFormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  DestroyRef,
+  computed,
+  inject,
+  input,
+  signal,
+} from '@angular/core';
+import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
+import { type AbstractControl, NonNullableFormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { RouterLink } from '@angular/router';
-import { finalize } from 'rxjs';
-import { InvoiceRequestService, PaidInvoice } from '../../core/services/invoice-request.service';
+import { finalize, merge } from 'rxjs';
+import {
+  type FiscalCatalog,
+  InvoiceRequestService,
+  type PaidInvoice,
+} from '../../core/services/invoice-request.service';
 
 const paymentDate = new Intl.DateTimeFormat('es-MX', {
   dateStyle: 'medium',
@@ -16,6 +28,8 @@ const paymentAmount = new Intl.NumberFormat('es-MX', {
   currency: 'MXN',
   currencyDisplay: 'code',
 });
+const rfcPattern = /^[A-ZÑ&]{3,4}\d{6}[A-Z\d]{3}$/i;
+const genericRfcs = new Set(['XAXX010101000', 'XEXX010101000']);
 
 @Component({
   selector: 'app-invoice-request',
@@ -38,6 +52,8 @@ export class InvoiceRequestComponent {
   protected readonly sendError = signal<string | null>(null);
   protected readonly invoices = signal<PaidInvoice[]>([]);
   protected readonly nextCursor = signal<string | null>(null);
+  protected readonly catalog = signal<FiscalCatalog | null>(null);
+  protected readonly accountEmail = signal<string | null>(null);
   protected readonly selectedId = signal('');
   protected readonly selectedInvoice = computed(() =>
     this.invoices().find((invoice) => invoice.id === this.selectedId()),
@@ -48,13 +64,47 @@ export class InvoiceRequestComponent {
       (invoice.request.status === 'pending' && invoice.request.retryable === true));
   });
   protected readonly fiscalForm = inject(NonNullableFormBuilder).group({
-    rfc: ['', [Validators.required, Validators.pattern(/^[A-ZÑ&]{3,4}\d{6}[A-Z\d]{3}$/i)]],
+    rfc: ['', [Validators.required, Validators.pattern(rfcPattern)]],
     legalName: ['', [Validators.required, Validators.pattern(/\S/), Validators.maxLength(254)]],
     postalCode: ['', [Validators.required, Validators.pattern(/^\d{5}$/)]],
-    taxRegime: ['', [Validators.required, Validators.pattern(/^6\d{2}$/)]],
-    cfdiUse: ['', [Validators.required, Validators.pattern(/^[A-Z]{1,2}\d{2}$/i)]],
-    email: ['', [Validators.email, Validators.maxLength(254)]],
+    taxRegime: [{ value: '', disabled: true }, [Validators.required, Validators.pattern(/^6\d{2}$/)]],
+    cfdiUse: [{ value: '', disabled: true }, [Validators.required, Validators.pattern(/^[A-Z]{1,2}\d{2}$/i)]],
+    additionalEmail: ['', [Validators.email, Validators.maxLength(254)]],
   });
+  private readonly rfc = toSignal(this.fiscalForm.controls.rfc.valueChanges, {
+    initialValue: '',
+  });
+  private readonly regimeCode = toSignal(this.fiscalForm.controls.taxRegime.valueChanges, {
+    initialValue: '',
+  });
+  protected readonly recipientKind = computed(() => {
+    const rfc = this.rfc().trim().toUpperCase();
+    if (!rfcPattern.test(rfc)) return null;
+    if (genericRfcs.has(rfc)) return 'generic';
+    return rfc.length === 13 ? 'individual' : 'organization';
+  });
+  protected readonly regimeOptions = computed(() => {
+    const recipient = this.recipientKind();
+    if (!recipient) return [];
+    return (this.catalog()?.regimes ?? []).filter((regime) =>
+      recipient === 'generic' ? regime.code === '616' : regime[recipient],
+    );
+  });
+  protected readonly useOptions = computed(() => {
+    const recipient = this.recipientKind();
+    const regime = this.regimeCode();
+    if (!recipient || !this.regimeOptions().some(({ code }) => code === regime)) return [];
+    return (this.catalog()?.uses ?? []).filter((use) =>
+      use.regimes.includes(regime) && (recipient === 'generic' ? use.code === 'S01' : use[recipient]),
+    );
+  });
+
+  constructor() {
+    const { rfc, taxRegime } = this.fiscalForm.controls;
+    merge(rfc.valueChanges, taxRegime.valueChanges)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => this.updateFiscalSelections());
+  }
 
   protected toggle(): void {
     if (this.sending()) return;
@@ -71,15 +121,19 @@ export class InvoiceRequestComponent {
       takeUntilDestroyed(this.destroyRef),
       finalize(() => this.loading.set(false)),
     ).subscribe({
-      next: ({ available, invoices, nextCursor }) => {
+      next: ({ available, invoices, nextCursor, catalog, accountEmail }) => {
         this.available.set(available);
         this.nextCursor.set(nextCursor ?? null);
         this.invoices.update((current) => cursor ? [...current, ...invoices] : invoices);
+        this.catalog.set(catalog ?? null);
+        this.accountEmail.set(accountEmail ?? null);
         if (!this.selectedInvoice()) {
           this.selectInvoice('');
         } else if (!this.canEnterDetails()) {
           this.fiscalForm.reset();
           this.sendError.set(null);
+        } else {
+          this.updateFiscalSelections();
         }
       },
       error: () => this.loadError.set(true),
@@ -102,7 +156,12 @@ export class InvoiceRequestComponent {
     if (!this.fiscalForm.valid) return;
 
     const invoiceId = this.selectedId();
-    const { rfc, legalName, postalCode, taxRegime, cfdiUse, email } = this.fiscalForm.getRawValue();
+    const { rfc, legalName, postalCode, taxRegime, cfdiUse, additionalEmail } =
+      this.fiscalForm.getRawValue();
+    if (!this.useOptions().some(({ code }) => code === cfdiUse)) return;
+    const copyAddress = additionalEmail.trim();
+    const isNewAddress =
+      !!copyAddress && copyAddress.toLowerCase() !== this.accountEmail()?.toLowerCase();
     this.sendError.set(null);
     this.sending.set(true);
     this.invoicesService.request(invoiceId, {
@@ -111,7 +170,7 @@ export class InvoiceRequestComponent {
       postalCode,
       taxRegime,
       cfdiUse: cfdiUse.toUpperCase(),
-      ...(email ? { email: email.trim() } : {}),
+      ...(isNewAddress ? { additionalEmail: copyAddress } : {}),
     }).pipe(
       takeUntilDestroyed(this.destroyRef),
       finalize(() => this.sending.set(false)),
@@ -132,5 +191,28 @@ export class InvoiceRequestComponent {
         }
       },
     });
+  }
+
+  private updateFiscalSelections(): void {
+    const { taxRegime, cfdiUse } = this.fiscalForm.controls;
+    const regimes = this.regimeOptions();
+    if (taxRegime.value && !regimes.some(({ code }) => code === taxRegime.value)) {
+      taxRegime.reset();
+    }
+    this.setSelectionAvailability(taxRegime, regimes.length > 0);
+
+    const uses = this.useOptions();
+    if (cfdiUse.value && !uses.some(({ code }) => code === cfdiUse.value)) {
+      cfdiUse.reset();
+    }
+    this.setSelectionAvailability(cfdiUse, uses.length > 0);
+  }
+
+  private setSelectionAvailability(control: AbstractControl, available: boolean): void {
+    if (available && control.disabled) {
+      control.enable({ emitEvent: false });
+    } else if (!available && control.enabled) {
+      control.disable({ emitEvent: false });
+    }
   }
 }
