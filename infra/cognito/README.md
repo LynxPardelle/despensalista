@@ -43,8 +43,10 @@ SES sandbox. Cognito's managed sender stays active until direct `DEVELOPER`
 sending is approved for production access.
 
 The CustomMessage guard atomically applies hashed-recipient and daily counters
-without reserving Lambda concurrency. Daily limits are dev 2, tst 3, and prod 30;
-prod caps non-recovery mail at 20 to retain 10 recovery sends, leaving 15 of the
+without reserving Lambda concurrency. Daily limits are dev 2, tst 3, and prod 30.
+In dev, a test address can receive one signup and one recovery code in the same
+window, within the existing two-message daily budget and one-message recovery reserve.
+Prod caps non-recovery mail at 20 to retain 10 recovery sends, leaving 15 of the
 account's approximate 50-message managed quota for other pools. Anonymous direct
 `SignUp`, `ResendConfirmationCode`, and `ForgotPassword` calls can still consume
 those budgets. CustomMessage has no source IP, browser CAPTCHA is bypassable via

@@ -532,8 +532,10 @@ The managed-mail limit is approximately 50 messages/day for the AWS account and
 Region. DespensaLista's atomic guard admits at most 2 dev, 3 tst, and 30 prod
 messages in the same 09:00 UTC quota window, leaving at least 15 for other pools.
 Production admits at most 20 non-recovery messages so 10 remain available for
-forgot-password recovery; recipient caps are 1 dev, 2 tst, and 5 prod. Recipient
-keys are normalized SHA-256 hashes. There is deliberately no reserved Lambda
+forgot-password recovery; recipient caps are 2 dev, 2 tst, and 5 prod. Dev
+can test signup and recovery for the same account within its two-message
+budget, and it still reserves one send for recovery. Recipient keys are
+normalized SHA-256 hashes. There is deliberately no reserved Lambda
 concurrency: a one-slot reservation lets one slow anonymous request block every
 recovery request before any daily limit is reached.
 
