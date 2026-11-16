@@ -20,17 +20,26 @@ import { createHash } from 'node:crypto';
 import type { AccountFeedbackEraser } from '../../application/ports/account-feedback-eraser.port';
 import { UserAccountStatus } from '../../domain/enums';
 import { DynamoDbDocumentClientService } from '../database/dynamodb/dynamodb-document-client.service';
-import type { FeedbackCategory } from '../http/dtos/create-feedback.dto';
+import type {
+  FeedbackCategory,
+  FeedbackErrorCode,
+  FeedbackSource,
+} from '../http/dtos/create-feedback.dto';
 
 interface FeedbackSubmission {
   submissionId: string;
   category: FeedbackCategory;
   message: string;
+  source?: FeedbackSource;
+  errorCode?: FeedbackErrorCode;
 }
 
 const secondsPerDay = 86_400;
 const reportsPerDay = 5;
 const reportRetentionDays = 90;
+const anonymousReportsPerDay = 30;
+const anonymousReportRetentionDays = 30;
+const anonymousPartition = 'ANONYMOUS';
 
 @Injectable()
 export class FeedbackStore implements AccountFeedbackEraser {
@@ -60,38 +69,54 @@ export class FeedbackStore implements AccountFeedbackEraser {
     submission: FeedbackSubmission,
     now = new Date(),
   ) {
+    return this.writeSubmission(userId, submission, now);
+  }
+
+  async submitAnonymous(submission: FeedbackSubmission, now = new Date()) {
+    return this.writeSubmission(null, submission, now);
+  }
+
+  private async writeSubmission(
+    userId: string | null,
+    submission: FeedbackSubmission,
+    now: Date,
+  ) {
     if (!this.storage) throw new NotFoundException('Feedback is unavailable');
 
     const { dynamo, table, usersTable } = this.storage;
     const id = submission.submissionId.toLowerCase();
-    const { category, message } = submission;
+    const { category, message, source, errorCode } = submission;
     const createdAt = now.toISOString();
     const nowSeconds = Math.floor(now.getTime() / 1_000);
     const day = createdAt.slice(0, 10);
-    const pk = accountPartition(userId);
+    const pk = userId === null ? anonymousPartition : accountPartition(userId);
     const key = { pk, sk: `REPORT#${id}` };
 
     try {
       await dynamo.send(
         new TransactWriteCommand({
           TransactItems: [
-            {
-              // A request authenticated before account deletion began may still
-              // be in flight. Check the account alongside the report write.
-              ConditionCheck: {
-                TableName: usersTable,
-                Key: { pk: `USER#${userId}` },
-                ConditionExpression:
-                  'entityType = :user AND #status = :active AND ' +
-                  '(attribute_not_exists(deletionFenceExpiresAt) OR deletionFenceExpiresAt <= :now)',
-                ExpressionAttributeNames: { '#status': 'status' },
-                ExpressionAttributeValues: {
-                  ':user': 'USER',
-                  ':active': UserAccountStatus.ACTIVE,
-                  ':now': createdAt,
-                },
-              },
-            },
+            ...(userId === null
+              ? []
+              : [
+                  {
+                    // A request authenticated before account deletion began may still
+                    // be in flight. Check the account alongside the report write.
+                    ConditionCheck: {
+                      TableName: usersTable,
+                      Key: { pk: `USER#${userId}` },
+                      ConditionExpression:
+                        'entityType = :user AND #status = :active AND ' +
+                        '(attribute_not_exists(deletionFenceExpiresAt) OR deletionFenceExpiresAt <= :now)',
+                      ExpressionAttributeNames: { '#status': 'status' },
+                      ExpressionAttributeValues: {
+                        ':user': 'USER',
+                        ':active': UserAccountStatus.ACTIVE,
+                        ':now': createdAt,
+                      },
+                    },
+                  },
+                ]),
             {
               Update: {
                 TableName: table,
@@ -101,7 +126,8 @@ export class FeedbackStore implements AccountFeedbackEraser {
                 UpdateExpression: 'SET expiresAt = :expiry ADD #count :one',
                 ExpressionAttributeNames: { '#count': 'count' },
                 ExpressionAttributeValues: {
-                  ':max': reportsPerDay,
+                  ':max':
+                    userId === null ? anonymousReportsPerDay : reportsPerDay,
                   ':one': 1,
                   ':expiry': nowSeconds + 2 * secondsPerDay,
                 },
@@ -115,10 +141,17 @@ export class FeedbackStore implements AccountFeedbackEraser {
                   id,
                   category,
                   message,
+                  ...(source !== undefined && { source }),
+                  ...(errorCode !== undefined && { errorCode }),
                   createdAt,
                   inboxMonth: `INBOX#${day.slice(0, 7)}`,
                   inboxOrder: `${createdAt}#${id}`,
-                  expiresAt: nowSeconds + reportRetentionDays * secondsPerDay,
+                  expiresAt:
+                    nowSeconds +
+                    (userId === null
+                      ? anonymousReportRetentionDays
+                      : reportRetentionDays) *
+                      secondsPerDay,
                 },
                 ConditionExpression: 'attribute_not_exists(pk)',
               },
@@ -129,10 +162,12 @@ export class FeedbackStore implements AccountFeedbackEraser {
     } catch (error) {
       if (!(error instanceof TransactionCanceledException)) throw error;
 
-      const [account, limit, report] = error.CancellationReasons ?? [];
+      const reasons = error.CancellationReasons ?? [];
+      const account = userId === null ? undefined : reasons[0];
       if (account?.Code === 'ConditionalCheckFailed') {
         throw new UnauthorizedException('Invalid authenticated user');
       }
+      const [limit, report] = reasons.slice(userId === null ? 0 : 1);
       const reportExists = report?.Code === 'ConditionalCheckFailed';
       const limitReached = limit?.Code === 'ConditionalCheckFailed';
       if (reportExists || limitReached) {
@@ -143,7 +178,12 @@ export class FeedbackStore implements AccountFeedbackEraser {
             ConsistentRead: true,
           }),
         );
-        if (existing?.category === category && existing.message === message) {
+        if (
+          existing?.category === category &&
+          existing.message === message &&
+          existing.source === source &&
+          existing.errorCode === errorCode
+        ) {
           return { id };
         }
         if (reportExists || existing) {

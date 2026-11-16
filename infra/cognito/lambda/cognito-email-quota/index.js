@@ -4,7 +4,7 @@ const { createHash } = require('node:crypto');
 
 const DAY_SECONDS = 86_400;
 const WINDOW_START_SECONDS = 9 * 60 * 60;
-const ERROR_MESSAGE = 'Email delivery temporarily unavailable. Try again later.';
+const ERROR_MESSAGE = 'El envío de correo no está disponible por el momento. Vuelve a intentarlo más tarde.';
 const RECOVERY_TRIGGER = 'CustomMessage_ForgotPassword';
 const METERED_TRIGGERS = new Set([
   'CustomMessage_SignUp',
@@ -70,7 +70,33 @@ function counterUpdate(tableName, key, limit, expiresAt) {
   };
 }
 
-function createHandler({ transactWrite, now = () => new Date(), environment = process.env }) {
+function describeFailure(error) {
+  switch (error?.name) {
+    case 'AccessDeniedException':
+    case 'AccessDenied':
+      return 'storage_access_denied';
+    case 'TransactionCanceledException':
+      return Array.isArray(error.CancellationReasons)
+        && error.CancellationReasons.some((reason) => reason?.Code === 'ConditionalCheckFailed')
+        ? 'quota_exceeded'
+        : 'transaction_cancelled';
+    case 'ProvisionedThroughputExceededException':
+    case 'ThrottlingException':
+    case 'RequestLimitExceeded':
+      return 'storage_throttled';
+    case 'ResourceNotFoundException':
+      return 'storage_missing';
+    default:
+      return 'unexpected_failure';
+  }
+}
+
+function createHandler({
+  transactWrite,
+  now = () => new Date(),
+  environment = process.env,
+  logFailure = (category) => console.warn('Cognito email quota request rejected', { category }),
+}) {
   const config = readConfiguration(environment);
 
   return async (event) => {
@@ -78,10 +104,14 @@ function createHandler({ transactWrite, now = () => new Date(), environment = pr
       return event;
     }
 
-    try {
-      const email = event.request?.userAttributes?.email?.trim().toLowerCase();
-      if (!email) throw new Error('Missing email');
+    const recipient = event.request?.userAttributes?.email;
+    if (typeof recipient !== 'string' || !recipient.trim()) {
+      logFailure('missing_recipient');
+      throw new Error(ERROR_MESSAGE);
+    }
 
+    try {
+      const email = recipient.trim().toLowerCase();
       const nowSeconds = Math.floor(now().getTime() / 1000);
       const windowStart =
         Math.floor((nowSeconds - WINDOW_START_SECONDS) / DAY_SECONDS) * DAY_SECONDS
@@ -112,7 +142,8 @@ function createHandler({ transactWrite, now = () => new Date(), environment = pr
 
       await transactWrite({ TransactItems: transactItems });
       return event;
-    } catch {
+    } catch (error) {
+      logFailure(describeFailure(error));
       throw new Error(ERROR_MESSAGE);
     }
   };

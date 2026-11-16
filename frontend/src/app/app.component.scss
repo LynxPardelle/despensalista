@@ -5,7 +5,22 @@
 .app-shell {
   position: relative;
   min-height: 100vh;
+  padding-bottom: 3.25rem;
   overflow: hidden;
+}
+
+.app-report-link {
+  position: fixed;
+  z-index: 4;
+  inset-inline-end: 1rem;
+  inset-block-end: max(.65rem, env(safe-area-inset-bottom));
+  padding: .6rem .85rem;
+  border: 1px solid var(--color-border);
+  border-radius: .65rem;
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-size: .9rem;
+  font-weight: 700;
 }
 
 .app-shell__glow {

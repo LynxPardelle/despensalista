@@ -6,6 +6,7 @@ export interface CognitoAuthorizeUrlInput {
   redirectUri: string;
   scopes: string[];
   provider?: string;
+  flow?: 'signup' | 'recovery';
 }
 
 export interface CognitoAuthorizeUrlOutput {

@@ -3,6 +3,7 @@ import { ResumeAccountDeletionsUseCase } from './application/use-cases/resume-ac
 import { CognitoTokenClientService } from './infrastructure/auth/cognito/cognito-token-client.service';
 import { CognitoTokenVerifierService } from './infrastructure/auth/cognito/cognito-token-verifier.service';
 import { RenewalNoticeDispatcher } from './infrastructure/billing/renewals/renewal-notice.dispatcher';
+import { DynamoDbDocumentClientService } from './infrastructure/database/dynamodb/dynamodb-document-client.service';
 
 describe('lambda handler', () => {
   let lambda: LambdaModule;
@@ -22,7 +23,8 @@ describe('lambda handler', () => {
       DYNAMODB_PRODUCTS_TABLE: 'test-products',
       DYNAMODB_PRODUCT_TYPES_TABLE: 'test-product-types',
       DYNAMODB_INVENTORY_LOTS_TABLE: 'test-inventory-lots',
-      CORS_ORIGIN: origin,
+      CORS_ORIGIN: `${origin},${secondaryOrigin}`,
+      FEEDBACK_TABLE: 'test-feedback',
       COGNITO_ENABLED: 'true',
       COGNITO_ISSUER:
         'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_7MDhLOulC',
@@ -93,6 +95,110 @@ describe('lambda handler', () => {
         ),
       ]),
     );
+  });
+
+  const feedback = {
+    submissionId: '1f37dc5e-d32b-4bf7-936a-bda451ca7afe',
+    category: 'bug',
+    message: 'No me llegó el correo para confirmar la cuenta.',
+    source: 'registration',
+    errorCode: 'email_delivery',
+  };
+  const publicFeedback = {
+    rawPath: '/api/feedback/anonymous',
+    requestContext: { http: { method: 'POST' } },
+    body: JSON.stringify(feedback),
+  };
+
+  it('reports feedback availability and accepts a same-origin report without session cookies', async () => {
+    const send = jest
+      .spyOn(DynamoDbDocumentClientService.prototype, 'send')
+      .mockResolvedValue({ $metadata: {} });
+    try {
+      const status = await lambda.handler({
+        rawPath: '/api/feedback/anonymous/status',
+        headers: originHeaders,
+        requestContext: { http: { method: 'GET' } },
+      });
+      expect(status.statusCode).toBe(200);
+      expect(status.headers['cache-control']).toBe('no-store');
+      expect(JSON.parse(status.body)).toEqual({ available: true });
+
+      const submitted = await lambda.handler({
+        ...publicFeedback,
+        headers: {
+          ...originHeaders,
+          origin: secondaryOrigin,
+          'content-type': 'application/json; charset=utf-8',
+          'sec-fetch-site': 'same-origin',
+        },
+      });
+      expect(submitted.statusCode).toBe(201);
+      expect(submitted.headers['cache-control']).toBe('no-store');
+      expect(JSON.parse(submitted.body)).toEqual({ id: feedback.submissionId });
+      expect(submitted.cookies).toBeUndefined();
+      expect(send).toHaveBeenCalledTimes(1);
+    } finally {
+      send.mockRestore();
+    }
+  });
+
+  it('rejects missing or foreign origins and cross-origin browser requests before writing feedback', async () => {
+    const send = jest
+      .spyOn(DynamoDbDocumentClientService.prototype, 'send')
+      .mockResolvedValue({ $metadata: {} });
+    try {
+      for (const headers of [
+        {},
+        { origin: 'https://unrelated.example' },
+        { origin, 'sec-fetch-site': 'same-site' },
+      ]) {
+        const response = await lambda.handler({
+          ...publicFeedback,
+          headers: {
+            ...originHeaders,
+            'content-type': 'application/json',
+            ...headers,
+          },
+        });
+        expect(response.statusCode).toBe(403);
+      }
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      send.mockRestore();
+    }
+  });
+
+  it('requires JSON for public submissions and leaves account feedback protected', async () => {
+    const send = jest
+      .spyOn(DynamoDbDocumentClientService.prototype, 'send')
+      .mockResolvedValue({ $metadata: {} });
+    try {
+      const nonJson = await lambda.handler({
+        ...publicFeedback,
+        headers: { ...originHeaders, origin, 'content-type': 'text/plain' },
+      });
+      expect(nonJson.statusCode).toBe(415);
+      const accountStatus = await lambda.handler({
+        rawPath: '/api/feedback/status',
+        headers: originHeaders,
+        requestContext: { http: { method: 'GET' } },
+      });
+      expect(accountStatus.statusCode).toBe(401);
+      const accountPost = await lambda.handler({
+        ...publicFeedback,
+        rawPath: '/api/feedback',
+        headers: {
+          ...originHeaders,
+          origin,
+          'content-type': 'application/json',
+        },
+      });
+      expect(accountPost.statusCode).toBe(401);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      send.mockRestore();
+    }
   });
 
   it('routes only the private scheduled event to the deletion worker', async () => {

@@ -37,6 +37,8 @@ describe('LoginPageComponent', () => {
           provide: AuthApiService,
           useValue: {
             getCognitoProviders: () => of(['Google', 'COGNITO']),
+            buildCognitoLoginUrl: (_provider: string, redirectTo: string, flow: string) =>
+              `/api/auth/cognito/login?redirectTo=${encodeURIComponent(redirectTo)}&flow=${flow}`,
           },
         },
         {
@@ -67,5 +69,14 @@ describe('LoginPageComponent', () => {
       'Abriendo Google para iniciar sesión.',
     );
     expect(fixture.nativeElement.textContent).toContain('Abriendo Google...');
+  });
+
+  it('offers separate links for email signup, password recovery, Google recovery and access feedback', () => {
+    const links = Array.from(fixture.nativeElement.querySelectorAll('a') as NodeListOf<HTMLAnchorElement>);
+
+    expect(links.some((link) => link.href.endsWith('redirectTo=%2Fpantry&flow=signup'))).toBeTrue();
+    expect(links.some((link) => link.href.endsWith('redirectTo=%2Fpantry&flow=recovery'))).toBeTrue();
+    expect(links.some((link) => link.href === 'https://accounts.google.com/signin/recovery')).toBeTrue();
+    expect(links.some((link) => link.href.endsWith('/feedback?source=access'))).toBeTrue();
   });
 });

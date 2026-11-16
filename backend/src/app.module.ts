@@ -179,7 +179,10 @@ import { HouseholdController } from './infrastructure/http/controllers/household
 import { InventoryLotsController } from './infrastructure/http/controllers/inventory-lots.controller';
 import { PantryController } from './infrastructure/http/controllers/pantry.controller';
 import { ProfileController } from './infrastructure/http/controllers/profile.controller';
-import { FeedbackController } from './infrastructure/http/controllers/feedback.controller';
+import {
+  AnonymousFeedbackController,
+  FeedbackController,
+} from './infrastructure/http/controllers/feedback.controller';
 import { FeedbackStore } from './infrastructure/feedback/feedback.store';
 import { ProductTypesController } from './infrastructure/http/controllers/product-types.controller';
 import { ProductsController } from './infrastructure/http/controllers/products.controller';
@@ -516,6 +519,7 @@ const wasteEventRepositoryProvider = useDynamoDb
     PantryController,
     ProfileController,
     FeedbackController,
+    AnonymousFeedbackController,
     ShoppingSharesController,
   ],
   providers: [

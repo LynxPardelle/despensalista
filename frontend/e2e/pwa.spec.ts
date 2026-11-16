@@ -52,7 +52,7 @@ test('opens the app shell offline without caching account requests or deleting u
   await page.goto('/login');
   await expect.poll(() => page.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
   await page.goto('/login?authError=cognito_state');
-  await expect(page.getByRole('alert')).toContainText('El inicio de sesion caduco');
+  await expect(page.getByRole('alert')).toContainText('El inicio de sesión caducó');
   await page.evaluate(() => fetch('/api/auth/cognito/providers'));
 
   const cached = await page.evaluate(async () => {

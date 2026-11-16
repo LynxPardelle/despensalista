@@ -95,13 +95,27 @@ h1 {
   margin-top: 1rem;
 }
 
-.auth-links a {
+.auth-links a,
+.account-help a {
   color: var(--color-accent-deep);
   font-weight: 600;
   text-decoration: none;
 }
 
 .auth-links a:hover,
-.auth-links a:focus-visible {
+.auth-links a:focus-visible,
+.account-help a:hover,
+.account-help a:focus-visible {
   text-decoration: underline;
+}
+
+.account-help summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.account-help p,
+.account-help a {
+  display: block;
+  margin-top: .5rem;
 }

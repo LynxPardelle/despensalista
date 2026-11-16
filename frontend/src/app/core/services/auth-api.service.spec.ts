@@ -48,6 +48,12 @@ describe('AuthApiService', () => {
     );
   });
 
+  it('keeps native recovery and its destination in the application-owned OAuth URL', () => {
+    expect(service.buildCognitoLoginUrl('COGNITO', '/pantry', 'recovery')).toBe(
+      `${environment.apiUrl}/auth/cognito/login?provider=COGNITO&redirectTo=%2Fpantry&flow=recovery`,
+    );
+  });
+
   it('loads enabled Cognito providers from the backend', () => {
     let providers: string[] | undefined;
 

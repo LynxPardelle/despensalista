@@ -31,6 +31,17 @@ describe('CreateFeedbackDto', () => {
     ).resolves.toMatchObject(submission);
   });
 
+  it('accepts the fixed source and error code for support triage', async () => {
+    const feedback = {
+      ...submission,
+      source: 'registration',
+      errorCode: 'email_delivery',
+    };
+    await expect(pipe.transform(feedback, metadata)).resolves.toMatchObject(
+      feedback,
+    );
+  });
+
   it.each([
     { category: 'other' },
     { message: '      \n' },
@@ -38,6 +49,12 @@ describe('CreateFeedbackDto', () => {
     { message: 'a'.repeat(2001) },
     { submissionId: 'not-a-uuid' },
     { email: 'persona@example.com' },
+    { source: '/login?account=personal' },
+    { source: null },
+    { errorCode: 'arbitrary server message' },
+    { errorCode: null },
+    { url: 'https://despensalista.com/pantry' },
+    { userAgent: 'Personal diagnostic data' },
   ])('rejects malformed or unrecognized fields (%j)', async (changes) => {
     await expect(
       pipe.transform({ ...submission, ...changes }, metadata),
