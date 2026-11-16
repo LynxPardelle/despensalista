@@ -68,9 +68,10 @@ import { RouterLink } from '@angular/router';
         </p>
         <p>
           Si solicitas un CFDI, el equipo de facturación de ZooBeriah Systems recibe tu RFC,
-          nombre o razón social, código postal fiscal, régimen fiscal, uso del CFDI y correo de
-          entrega si lo proporcionas. Recibe también la referencia y los datos del pago para
-          comprobar el cobro y emitir tu factura.
+          nombre o razón social, código postal fiscal, régimen fiscal y uso del CFDI. Para entregar
+          la factura, recibe el correo de tu cuenta cuando esté disponible y el correo adicional que
+          indiques. Recibe también la referencia y los datos del pago para comprobar el cobro y emitir
+          tu factura.
         </p>
         <p>
           Para solicitar tu factura por correo o consultar una solicitud, escribe a

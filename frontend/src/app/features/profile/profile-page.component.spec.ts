@@ -917,7 +917,7 @@ describe('ProfilePageComponent', () => {
     panel.querySelector<HTMLButtonElement>('button')!.click();
     const invoiceList = http.expectOne('/api/billing/invoices');
     expect(invoiceList.request.withCredentials).toBeTrue();
-    invoiceList.flush({ available: true, invoices: [paidInvoice()] });
+    invoiceList.flush(invoicePage());
     fixture.detectChanges();
 
     const selection = panel.querySelector<HTMLSelectElement>('#cfdi-invoice')!;
@@ -926,20 +926,26 @@ describe('ProfilePageComponent', () => {
     selection.dispatchEvent(new Event('change'));
     fixture.detectChanges();
 
-    fillTaxFields(panel);
+    const accountEmail = panel.querySelector<HTMLInputElement>('#cfdi-account-email')!;
+    expect(accountEmail.value).toBe('chef@example.com');
+    expect(accountEmail.readOnly).toBeTrue();
+
+    fillTaxFields(panel, () => fixture.detectChanges());
+    setFiscalInput(panel, 'additional-email', 'contabilidad@example.com');
     const form = panel.querySelector('form')!;
     form.dispatchEvent(new Event('submit'));
     form.dispatchEvent(new Event('submit'));
     const request = http.expectOne({ method: 'POST', url: '/api/billing/invoices/in_paid/cfdi-requests' });
     expect(request.request.withCredentials).toBeTrue();
     expect(request.request.body).toEqual({
-      rfc: 'DEMO010101AB1', legalName: 'COMERCIAL ÑANDÚ', postalCode: '01001', taxRegime: '601', cfdiUse: 'G03',
+      rfc: 'DEMO010101AB1', legalName: 'COMERCIAL ÑANDÚ', postalCode: '01001', taxRegime: '612', cfdiUse: 'G03',
+      additionalEmail: 'contabilidad@example.com',
     });
     request.flush({ id: 'cfdi-folio-1', status: 'sent' });
     fixture.detectChanges();
 
     expect(panel.textContent).toContain('cfdi-folio-1');
-    expect(panel.textContent).toContain('Si omitiste el correo de entrega');
+    expect(panel.textContent).not.toContain('No hay un correo de entrega en tu cuenta');
     expect(panel.querySelector('#cfdi-rfc')).toBeNull();
     expect(panel.textContent).not.toContain('COMERCIAL ÑANDÚ');
     expect(panel.querySelector('button[type="submit"]')).toBeNull();
@@ -950,16 +956,19 @@ describe('ProfilePageComponent', () => {
     fixture.detectChanges();
     const panel: HTMLElement = fixture.nativeElement.querySelector('.cfdi-panel');
     panel.querySelector<HTMLButtonElement>('button')!.click();
-    http.expectOne('/api/billing/invoices').flush({ available: true, invoices: [paidInvoice()] });
+    http.expectOne('/api/billing/invoices').flush(invoicePage());
     fixture.detectChanges();
 
     const selection = panel.querySelector<HTMLSelectElement>('#cfdi-invoice')!;
     selection.value = 'in_paid';
     selection.dispatchEvent(new Event('change'));
     fixture.detectChanges();
-    fillTaxFields(panel);
+    fillTaxFields(panel, () => fixture.detectChanges());
+    setFiscalInput(panel, 'additional-email', 'CHEF@EXAMPLE.COM');
     panel.querySelector('form')!.dispatchEvent(new Event('submit'));
-    http.expectOne('/api/billing/invoices/in_paid/cfdi-requests').flush({
+    const initialRequest = http.expectOne('/api/billing/invoices/in_paid/cfdi-requests');
+    expect(initialRequest.request.body.additionalEmail).toBeUndefined();
+    initialRequest.flush({
       id: 'cfdi-folio-2', status: 'pending', retryable: true,
     });
     fixture.detectChanges();
@@ -985,7 +994,7 @@ describe('ProfilePageComponent', () => {
     const panel: HTMLElement = fixture.nativeElement.querySelector('.cfdi-panel');
     panel.querySelector<HTMLButtonElement>('button')!.click();
     http.expectOne('/api/billing/invoices').flush({
-      available: true, invoices: [], nextCursor: 'in_previous',
+      ...invoicePage(), invoices: [], nextCursor: 'in_previous',
     });
     fixture.detectChanges();
 
@@ -995,14 +1004,84 @@ describe('ProfilePageComponent', () => {
       .find((button) => button.textContent?.includes('Ver pagos anteriores'));
     expect(earlierPayments).toBeDefined();
     earlierPayments!.click();
-    http.expectOne('/api/billing/invoices?cursor=in_previous').flush({
-      available: true, invoices: [paidInvoice()],
-    });
+    http.expectOne('/api/billing/invoices?cursor=in_previous').flush(invoicePage());
     fixture.detectChanges();
 
     const selection = panel.querySelector<HTMLSelectElement>('#cfdi-invoice');
     expect(selection?.options[1].value).toBe('in_paid');
     expect(panel.textContent).not.toContain('Ver pagos anteriores');
+  });
+
+  it('shows SAT choices for the RFC and clears incompatible selections when they change', () => {
+    http.expectOne('/api/billing/status').flush({ ...subscription, mode: 'live', canCheckout: false });
+    fixture.detectChanges();
+    const panel: HTMLElement = fixture.nativeElement.querySelector('.cfdi-panel');
+    panel.querySelector<HTMLButtonElement>('button')!.click();
+    http.expectOne('/api/billing/invoices').flush(invoicePage());
+    fixture.detectChanges();
+    setFiscalSelect(panel, 'invoice', 'in_paid');
+    fixture.detectChanges();
+
+    const regime = panel.querySelector<HTMLSelectElement>('#cfdi-tax-regime')!;
+    const use = panel.querySelector<HTMLSelectElement>('#cfdi-use')!;
+    expect(regime.disabled).toBeTrue();
+    expect(use.disabled).toBeTrue();
+    expect(panel.querySelector('a[href^="https://www.sat.gob.mx/"]')?.textContent).toContain('Constancia');
+
+    setFiscalInput(panel, 'rfc', 'DEMO010101AB1');
+    fixture.detectChanges();
+    expect(Array.from(regime.options).map(({ value }) => value)).toEqual(['', '605', '612', '616']);
+    expect(regime.options[2].textContent).toContain('Actividades Empresariales');
+    expect(regime.value).toBe('');
+    expect(use.disabled).toBeTrue();
+    setFiscalSelect(panel, 'tax-regime', '612');
+    fixture.detectChanges();
+    expect(Array.from(use.options).map(({ value }) => value)).toEqual(['', 'G03', 'S01']);
+    setFiscalSelect(panel, 'use', 'G03');
+    setFiscalSelect(panel, 'tax-regime', '605');
+    fixture.detectChanges();
+    expect(use.value).toBe('');
+    expect(Array.from(use.options).map(({ value }) => value)).toEqual(['', 'D01', 'S01']);
+
+    setFiscalInput(panel, 'rfc', 'DEM010101AB1');
+    fixture.detectChanges();
+    expect(regime.value).toBe('');
+    expect(Array.from(regime.options).map(({ value }) => value)).toEqual(['', '601', '616']);
+    expect(use.disabled).toBeTrue();
+
+    for (const genericRfc of ['XAXX010101000', 'XEXX010101000']) {
+      setFiscalInput(panel, 'rfc', genericRfc);
+      fixture.detectChanges();
+      expect(panel.querySelector('#cfdi-postal-code-help')?.textContent).toContain('código postal de expedición');
+      expect(Array.from(regime.options).map(({ value }) => value)).toEqual(['', '616']);
+      setFiscalSelect(panel, 'tax-regime', '616');
+      fixture.detectChanges();
+      expect(Array.from(use.options).map(({ value }) => value)).toEqual(['', 'S01']);
+      expect(use.value).toBe('');
+    }
+  });
+
+  it('keeps delivery email optional without a usable account address', () => {
+    http.expectOne('/api/billing/status').flush({ ...subscription, mode: 'live', canCheckout: false });
+    fixture.detectChanges();
+    const panel: HTMLElement = fixture.nativeElement.querySelector('.cfdi-panel');
+    panel.querySelector<HTMLButtonElement>('button')!.click();
+    http.expectOne('/api/billing/invoices').flush({ ...invoicePage(), accountEmail: null });
+    fixture.detectChanges();
+    setFiscalSelect(panel, 'invoice', 'in_paid');
+    fixture.detectChanges();
+
+    expect(panel.textContent).toContain('No hay un correo de entrega en tu cuenta');
+    expect(panel.querySelector('#cfdi-account-email')).toBeNull();
+    fillTaxFields(panel, () => fixture.detectChanges());
+    panel.querySelector('form')!.dispatchEvent(new Event('submit'));
+    const request = http.expectOne('/api/billing/invoices/in_paid/cfdi-requests');
+    expect(request.request.body).toEqual({
+      rfc: 'DEMO010101AB1', legalName: 'COMERCIAL ÑANDÚ', postalCode: '01001', taxRegime: '612', cfdiUse: 'G03',
+    });
+    request.flush({ id: 'cfdi-folio-3', status: 'sent' });
+    fixture.detectChanges();
+    expect(panel.textContent).toContain('con este folio');
   });
 
   it('keeps the request card hidden from members who do not manage billing', () => {
@@ -1018,17 +1097,50 @@ function paidInvoice() {
   return { id: 'in_paid', paidAt: '2026-11-15T14:30:00.000Z', amountMinor: 6844, currency: 'mxn' };
 }
 
-function fillTaxFields(panel: HTMLElement) {
+function invoicePage() {
+  return {
+    available: true,
+    invoices: [paidInvoice()],
+    accountEmail: 'chef@example.com',
+    catalog: {
+      regimes: [
+        { code: '601', label: 'General de Ley Personas Morales', individual: false, organization: true },
+        { code: '605', label: 'Sueldos y Salarios', individual: true, organization: false },
+        { code: '612', label: 'Personas Físicas con Actividades Empresariales', individual: true, organization: false },
+        { code: '616', label: 'Sin obligaciones fiscales', individual: true, organization: true },
+      ],
+      uses: [
+        { code: 'G03', label: 'Gastos en general', individual: true, organization: true, regimes: ['601', '612'] },
+        { code: 'D01', label: 'Honorarios médicos', individual: true, organization: false, regimes: ['605'] },
+        { code: 'S01', label: 'Sin efectos fiscales', individual: true, organization: true, regimes: ['601', '605', '612', '616'] },
+      ],
+    },
+  };
+}
+
+function fillTaxFields(panel: HTMLElement, detectChanges: () => void) {
   const fields: Record<string, string> = {
     rfc: 'demo010101ab1', 'legal-name': 'Comercial Ñandú', 'postal-code': '01001',
-    'tax-regime': '601', use: 'g03',
   };
   for (const [name, value] of Object.entries(fields)) {
-    const input = panel.querySelector<HTMLInputElement>(`#cfdi-${name}`);
-    if (!input) throw new Error(`Missing fiscal field: ${name}`);
-    input.value = value;
-    input.dispatchEvent(new Event('input'));
+    setFiscalInput(panel, name, value);
   }
+  detectChanges();
+  setFiscalSelect(panel, 'tax-regime', '612');
+  detectChanges();
+  setFiscalSelect(panel, 'use', 'G03');
+}
+
+function setFiscalInput(panel: HTMLElement, name: string, value: string) {
+  const input = panel.querySelector<HTMLInputElement>(`#cfdi-${name}`)!;
+  input.value = value;
+  input.dispatchEvent(new Event('input'));
+}
+
+function setFiscalSelect(panel: HTMLElement, name: string, value: string) {
+  const select = panel.querySelector<HTMLSelectElement>(`#cfdi-${name}`)!;
+  select.value = value;
+  select.dispatchEvent(new Event('change'));
 }
 
 function makeHouseholdWorkspace() {

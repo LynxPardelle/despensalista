@@ -51,8 +51,11 @@
             @switch (receipt.status) {
               @case ('sent') {
                 <p>Solicitud enviada al equipo de facturación.</p>
-                @if (!testMode()) {
-                  <p>Si omitiste el correo de entrega, escribe a facturación con este folio para recibir tu CFDI.</p>
+                @if (!testMode() && !accountEmail()) {
+                  <p>
+                    Si dejaste la solicitud sin correo de entrega,
+                    escribe a facturación con este folio para recibir tu CFDI.
+                  </p>
                 }
               }
               @case ('delivery_unknown') {
@@ -70,7 +73,12 @@
           </div>
         }
 
-        @if (canEnterDetails()) {
+        @if (canEnterDetails() && !catalog()) {
+          <p class="helper-copy" role="status">
+            El catálogo fiscal no está disponible. Actualiza los pagos para volver a consultarlo.
+          </p>
+        }
+        @if (canEnterDetails() && catalog()) {
           <form [formGroup]="fiscalForm" (ngSubmit)="submit()" autocomplete="off">
             @if (testMode()) {
               <p class="helper-copy" id="cfdi-data-use">Usa datos fiscales ficticios en este entorno de prueba.</p>
@@ -82,6 +90,16 @@
             }
             <fieldset [disabled]="loading() || sending()" aria-describedby="cfdi-data-use">
               <legend>Datos fiscales</legend>
+              <p class="helper-copy">
+                Comprueba tu RFC, nombre, código postal y régimen en la
+                <a
+                  href="https://www.sat.gob.mx/portal/public/tramites/constancia-de-situacion-fiscal"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Constancia de Situación Fiscal del SAT
+                </a>.
+              </p>
               <div class="cfdi-field">
                 <label for="cfdi-rfc">RFC</label>
                 <input
@@ -132,60 +150,105 @@
                   id="cfdi-postal-code-help"
                   [class.field-error]="fiscalForm.controls.postalCode.invalid && fiscalForm.controls.postalCode.touched"
                   class="helper-copy"
-                >Escribe los cinco dígitos del código postal registrado ante el SAT.</small>
+                >
+                  @if (recipientKind() === 'generic') {
+                    Si usas un RFC genérico, consulta a facturación por el código postal de expedición.
+                  } @else {
+                    Escribe los cinco dígitos del código postal registrado ante el SAT.
+                  }
+                </small>
               </div>
               <div class="cfdi-field">
-                <label for="cfdi-tax-regime">Clave del régimen fiscal</label>
-                <input
+                <label for="cfdi-tax-regime">Régimen fiscal</label>
+                <select
                   id="cfdi-tax-regime"
                   formControlName="taxRegime"
                   required
-                  inputmode="numeric"
-                  maxlength="3"
                   [attr.aria-invalid]="fiscalForm.controls.taxRegime.invalid && fiscalForm.controls.taxRegime.touched"
                   aria-describedby="cfdi-tax-regime-help"
-                />
+                >
+                  <option value="">Elige tu régimen fiscal</option>
+                  @for (regime of regimeOptions(); track regime.code) {
+                    <option [value]="regime.code">{{ regime.label }} ({{ regime.code }})</option>
+                  }
+                </select>
                 <small
                   id="cfdi-tax-regime-help"
                   [class.field-error]="fiscalForm.controls.taxRegime.invalid && fiscalForm.controls.taxRegime.touched"
                   class="helper-copy"
-                >Escribe la clave de tres dígitos de tu régimen fiscal.</small>
+                >
+                  @if (!recipientKind()) {
+                    Ingresa un RFC válido para ver los regímenes que le corresponden.
+                  } @else if (regimeOptions().length === 0) {
+                    Revisa el RFC en los datos registrados ante el SAT.
+                  } @else {
+                    Elige el régimen que figura en tus datos fiscales del SAT.
+                  }
+                </small>
               </div>
               <div class="cfdi-field">
-                <label for="cfdi-use">Clave de uso del CFDI</label>
-                <input
+                <label for="cfdi-use">Uso del CFDI</label>
+                <select
                   id="cfdi-use"
                   formControlName="cfdiUse"
                   required
-                  maxlength="4"
-                  spellcheck="false"
-                  autocapitalize="characters"
                   [attr.aria-invalid]="fiscalForm.controls.cfdiUse.invalid && fiscalForm.controls.cfdiUse.touched"
                   aria-describedby="cfdi-use-help"
-                />
+                >
+                  <option value="">Elige cómo usarás la factura</option>
+                  @for (use of useOptions(); track use.code) {
+                    <option [value]="use.code">{{ use.label }} ({{ use.code }})</option>
+                  }
+                </select>
                 <small
                   id="cfdi-use-help"
                   [class.field-error]="fiscalForm.controls.cfdiUse.invalid && fiscalForm.controls.cfdiUse.touched"
                   class="helper-copy"
-                >Elige un uso permitido para tu régimen fiscal y escribe su clave.</small>
+                >
+                  @if (useOptions().length === 0) {
+                    Elige un régimen fiscal para ver los usos que le corresponden.
+                  } @else {
+                    Elige el uso fiscal que darás a esta factura.
+                  }
+                </small>
               </div>
+            </fieldset>
+            <fieldset [disabled]="loading() || sending()">
+              <legend>Entrega de la factura</legend>
+              @if (accountEmail(); as deliveryEmail) {
+                <div class="cfdi-field">
+                  <label for="cfdi-account-email">Correo de tu cuenta</label>
+                  <input id="cfdi-account-email" type="email" [value]="deliveryEmail" readonly />
+                </div>
+              } @else {
+                <p class="helper-copy">
+                  No hay un correo de entrega en tu cuenta. Puedes añadir uno o acordar la entrega con tu folio.
+                </p>
+              }
               <div class="cfdi-field">
-                <label for="cfdi-email">Correo para recibir el CFDI <span>(opcional)</span></label>
+                <label for="cfdi-additional-email">Correo adicional <span>(opcional)</span></label>
                 <input
-                  id="cfdi-email"
+                  id="cfdi-additional-email"
                   type="email"
-                  formControlName="email"
+                  formControlName="additionalEmail"
                   maxlength="254"
                   spellcheck="false"
-                  [attr.aria-invalid]="fiscalForm.controls.email.invalid && fiscalForm.controls.email.touched"
-                  aria-describedby="cfdi-email-help"
+                  [attr.aria-invalid]="fiscalForm.controls.additionalEmail.invalid && fiscalForm.controls.additionalEmail.touched"
+                  aria-describedby="cfdi-additional-email-help"
                 />
-                @if (fiscalForm.controls.email.invalid && fiscalForm.controls.email.touched) {
-                  <small id="cfdi-email-help" class="field-error">Revisa el formato del correo.</small>
+                @if (fiscalForm.controls.additionalEmail.invalid && fiscalForm.controls.additionalEmail.touched) {
+                  <small id="cfdi-additional-email-help" class="field-error">Revisa el formato del correo.</small>
                 } @else {
-                  <small id="cfdi-email-help" class="helper-copy">Si lo omites, conserva el folio para acordar la entrega con facturación.</small>
+                  <small id="cfdi-additional-email-help" class="helper-copy">
+                    @if (accountEmail()) {
+                      Añade otra dirección si quieres que reciba una copia.
+                    } @else {
+                      Puedes escribir aquí el correo donde deseas recibir tu factura.
+                    }
+                  </small>
                 }
               </div>
+              <p class="helper-copy">Revisa las direcciones antes de enviar tu solicitud.</p>
               <button class="primary-button" type="submit">
                 {{ selectedInvoice()?.request?.retryable ? 'Reintentar envío' : 'Enviar solicitud' }}
               </button>
