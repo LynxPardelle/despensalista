@@ -369,6 +369,7 @@ jobs:
         id: smoke
         env:
           APP_DOMAIN_NAME: ${{ vars.APP_DOMAIN_NAME || 'despensalista.lynxpardelle.com' }}
+          PUBLIC_DOMAIN_ENABLED: ${{ vars.ENABLE_PUBLIC_PRODUCTION_DOMAIN || 'false' }}
         run: |
           set -euo pipefail
           feedback_table="$(aws lambda get-function-configuration \
@@ -376,6 +377,9 @@ jobs:
             --query 'Environment.Variables.FEEDBACK_TABLE' --output text)"
           test "$feedback_table" = despensalista-prod-feedback
           node .github/scripts/smoke.mjs --base-url "https://$APP_DOMAIN_NAME" --attempts 18 --delay-ms 10000 --verify-feedback true
+          if [[ "$PUBLIC_DOMAIN_ENABLED" == true ]]; then
+            node .github/scripts/smoke.mjs --base-url https://despensalista.com --attempts 18 --delay-ms 10000 --verify-feedback true
+          fi
           if [[ "$STRIPE_BILLING_ENABLED" == true ]]; then
             # An unsigned delivery must be rejected after loading the protected settings.
             status="$(curl --silent --show-error --max-time 15 \

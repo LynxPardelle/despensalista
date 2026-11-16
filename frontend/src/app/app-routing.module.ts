@@ -92,7 +92,18 @@ const routes: Routes = [
   {
     path: '',
     pathMatch: 'full',
-    redirectTo: 'pantry',
+    loadComponent: () =>
+      import('./features/marketing/marketing-page.component').then(
+        (module) => module.MarketingPageComponent,
+      ),
+  },
+  {
+    path: 'planes',
+    data: { showPlans: true },
+    loadComponent: () =>
+      import('./features/marketing/marketing-page.component').then(
+        (module) => module.MarketingPageComponent,
+      ),
   },
   {
     path: '**',

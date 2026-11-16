@@ -802,8 +802,9 @@ function handler(event) {
     };
   }
 
-  if (uri === '/privacidad' || uri === '/privacidad/') {
-    request.uri = '/privacidad/index.html';
+  var page = uri.charAt(uri.length - 1) === '/' ? uri.slice(0, -1) : uri;
+  if (page === '/planes' || page === '/privacidad' || page === '/terminos-plus-hogar') {
+    request.uri = page + '/index.html';
     return request;
   }
 
@@ -811,7 +812,7 @@ function handler(event) {
     return request;
   }
 
-  request.uri = '/index.html';
+  request.uri = uri === '/' ? '/index.html' : '/index.csr.html';
   return request;
 }
 `),

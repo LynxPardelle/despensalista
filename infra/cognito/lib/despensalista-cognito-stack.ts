@@ -1,5 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -7,6 +8,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as ses from 'aws-cdk-lib/aws-ses';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import { createStageDeliveryControls, googleMfaEnabled, requireGoogleMfaOrigin } from './stage-delivery';
 import { publicProductionDomain } from './public-production-domain';
 import { Construct } from 'constructs';
@@ -492,7 +494,7 @@ export class DespensaListaCognitoStack extends cdk.Stack {
     });
 
     if (normalizedStage === 'prod') {
-      new cloudwatch.Alarm(this, 'CognitoEmailQuotaErrorsAlarm', {
+      const alarm = new cloudwatch.Alarm(this, 'CognitoEmailQuotaErrorsAlarm', {
         alarmName: `${prefix}-cognito-email-quota-errors`,
         alarmDescription: 'Cognito managed-email quota guard rejected or failed a request.',
         metric: fn.metricErrors({
@@ -504,6 +506,12 @@ export class DespensaListaCognitoStack extends cdk.Stack {
         datapointsToAlarm: 1,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       });
+      // The backend stack depends on this stack. Import by physical ARN to avoid a cycle.
+      const operationsTopic = sns.Topic.fromTopicArn(this, 'OperationsAlarmTopic', this.formatArn({
+        service: 'sns',
+        resource: `${prefix}-operations-alarms`,
+      }));
+      alarm.addAlarmAction(new cloudwatchActions.SnsAction(operationsTopic));
     }
 
     return fn;

@@ -1,74 +1,62 @@
-const CACHE_NAME = 'despensalista-shell-v2';
-const SHELL_URLS = [
-  '/',
-  '/login',
-  '/pantry',
-  '/profile',
-  '/favicon.ico',
-  '/manifest.webmanifest',
-];
+// Replaced at build time by scripts/prepare-pwa.mjs.
+const RELEASE = /* release */ null;
 
-self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches
-      .open(CACHE_NAME)
-      .then((cache) => cache.addAll(SHELL_URLS))
-      .then(() => self.skipWaiting()),
-  );
-});
+if (RELEASE) {
+  const APP_PAGES = new Set(['/login', '/pantry', '/profile', '/feedback', '/mfa-google']);
+  const PUBLIC_PAGES = new Set(['/', '/planes', '/privacidad', '/terminos-plus-hogar', '/shared-shopping-list']);
+  const STATIC_ASSETS = new Set(RELEASE.assets);
 
-self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches
-      .keys()
-      .then((keys) =>
-        Promise.all(
-          keys
-            .filter((key) => key !== CACHE_NAME)
-            .map((key) => caches.delete(key)),
-        ),
-      )
-      .then(() => self.clients.claim()),
-  );
-});
+  self.addEventListener('install', (event) => {
+    event.waitUntil(prepareCache());
+  });
 
-self.addEventListener('fetch', (event) => {
-  const request = event.request;
+  self.addEventListener('activate', (event) => {
+    event.waitUntil(activateRelease());
+  });
 
-  if (request.method !== 'GET') {
-    return;
+  self.addEventListener('fetch', (event) => {
+    const { request } = event;
+    const url = new URL(request.url);
+    if (request.method !== 'GET' || url.origin !== self.location.origin) return;
+
+    const path = url.pathname.replace(/\/$/, '') || '/';
+    if (request.mode === 'navigate') {
+      const fallback = APP_PAGES.has(path) ? RELEASE.shell : PUBLIC_PAGES.has(path) ? '/offline.html' : null;
+      if (fallback) event.respondWith(fetchWithOfflineFallback(request, fallback));
+    } else if (!url.search && STATIC_ASSETS.has(url.pathname)) {
+      event.respondWith(cachedAsset(request));
+    }
+  });
+}
+
+async function prepareCache() {
+  const cache = await caches.open(RELEASE.cacheName);
+  try {
+    const urls = [RELEASE.shell, ...RELEASE.assets];
+    await cache.addAll(urls.map((url) => new Request(url, { cache: 'reload' })));
+  } catch (error) {
+    await caches.delete(RELEASE.cacheName);
+    throw error;
   }
+}
 
-  const url = new URL(request.url);
+async function activateRelease() {
+  const names = await caches.keys();
+  const previous = names.filter((name) => name.startsWith('despensalista-shell-') && name !== RELEASE.cacheName);
+  await Promise.all(previous.map((name) => caches.delete(name)));
+  await self.clients.claim();
+}
 
-  if (url.origin !== self.location.origin || url.pathname.startsWith('/api/')) {
-    return;
+async function fetchWithOfflineFallback(request, fallback) {
+  try {
+    return await fetch(request);
+  } catch {
+    const cache = await caches.open(RELEASE.cacheName);
+    return (await cache.match(fallback)) ?? Response.error();
   }
+}
 
-  const isPublicShell =
-    url.pathname === '/' ||
-    url.pathname === '/login' ||
-    url.pathname === '/pantry' ||
-    url.pathname === '/profile' ||
-    url.pathname === '/favicon.ico' ||
-    url.pathname === '/manifest.webmanifest';
-  const isStaticAsset = ['script', 'style', 'image', 'font'].includes(
-    request.destination,
-  );
-
-  if (!isPublicShell && !isStaticAsset) {
-    return;
-  }
-
-  event.respondWith(
-    fetch(request)
-      .then((response) => {
-        const copy = response.clone();
-
-        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
-
-        return response;
-      })
-      .catch(() => caches.match(request).then((cached) => cached ?? caches.match('/'))),
-  );
-});
+async function cachedAsset(request) {
+  const cache = await caches.open(RELEASE.cacheName);
+  return (await cache.match(request)) ?? fetch(request);
+}

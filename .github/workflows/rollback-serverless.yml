@@ -117,6 +117,7 @@ jobs:
       - name: Post-rollback smoke
         env:
           APP_DOMAIN_NAME: ${{ vars.APP_DOMAIN_NAME }}
+          PUBLIC_DOMAIN_ENABLED: ${{ vars.ENABLE_PUBLIC_PRODUCTION_DOMAIN || 'false' }}
           STAGE: ${{ inputs.stage }}
         run: |
           set -euo pipefail
@@ -130,6 +131,9 @@ jobs:
             --base-url "https://$APP_DOMAIN_NAME" \
             --attempts 18 \
             --delay-ms 10000
+          if [[ "$STAGE" == prod && "$PUBLIC_DOMAIN_ENABLED" == true ]]; then
+            node .github/scripts/smoke.mjs --base-url https://despensalista.com --attempts 18 --delay-ms 10000
+          fi
 
       - name: Record rollback releaseId
         run: >-
