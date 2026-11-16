@@ -114,6 +114,18 @@ h1 {
   font-weight: 600;
 }
 
+.account-help summary:focus-visible {
+  outline: 2px solid var(--color-accent-deep);
+  outline-offset: 3px;
+}
+
+.account-recovery h2 {
+  font: inherit;
+  font-weight: 600;
+  letter-spacing: normal;
+  margin: .85rem 0 0;
+}
+
 .account-help p,
 .account-help a {
   display: block;

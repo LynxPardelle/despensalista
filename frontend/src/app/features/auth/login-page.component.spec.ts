@@ -71,12 +71,23 @@ describe('LoginPageComponent', () => {
     expect(fixture.nativeElement.textContent).toContain('Abriendo Google...');
   });
 
-  it('offers separate links for email signup, password recovery, Google recovery and access feedback', () => {
+  it('shows signup and access feedback and groups recovery choices before starting authentication', () => {
     const links = Array.from(fixture.nativeElement.querySelectorAll('a') as NodeListOf<HTMLAnchorElement>);
+    const signup = links.find((link) => link.href.endsWith('redirectTo=%2Fpantry&flow=signup'));
+    const nativeRecovery = links.find((link) => link.href.endsWith('redirectTo=%2Fpantry&flow=recovery'));
+    const googleRecovery = links.find((link) => link.href === 'https://accounts.google.com/signin/recovery');
+    const recoveryReport = links.find((link) => link.href.endsWith('/feedback?source=recovery'));
+    const disclosure = nativeRecovery?.closest('details');
 
-    expect(links.some((link) => link.href.endsWith('redirectTo=%2Fpantry&flow=signup'))).toBeTrue();
-    expect(links.some((link) => link.href.endsWith('redirectTo=%2Fpantry&flow=recovery'))).toBeTrue();
-    expect(links.some((link) => link.href === 'https://accounts.google.com/signin/recovery')).toBeTrue();
+    expect(signup?.closest('details')).toBeNull();
     expect(links.some((link) => link.href.endsWith('/feedback?source=access'))).toBeTrue();
+    expect(disclosure?.open).toBeFalse();
+    expect(googleRecovery?.closest('details')).toBe(disclosure);
+    expect(recoveryReport?.closest('details')).toBe(disclosure);
+    expect(disclosure?.textContent).toContain('¿Cómo creaste tu cuenta?');
+    expect(disclosure?.textContent).toContain('Si aún no confirmaste tu correo, termina primero el registro.');
+    disclosure?.querySelector('summary')?.click();
+    expect(disclosure?.open).toBeTrue();
+    expect(authFacade.startCognitoLogin).not.toHaveBeenCalled();
   });
 });
