@@ -18,15 +18,24 @@ test('renders Cognito login options and starts provider redirect', async ({
     });
   });
 
-  await page.goto('/login');
+  await page.goto('/login?redirectTo=%2Fpantry');
 
   await expect(page.getByRole('button', { name: 'Entrar con Google' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Entrar con Facebook' })).toBeVisible();
   await expect(
     page.getByRole('button', { name: 'Entrar con correo' }),
   ).toBeVisible();
-  await expect(page.getByLabel('Correo')).toHaveCount(0);
-  await expect(page.getByLabel('Password')).toHaveCount(0);
+  await expect(page.locator('input[type="email"], input[type="password"]')).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Crear cuenta con correo' })).toHaveAttribute(
+    'href', '/api/auth/cognito/login?provider=COGNITO&redirectTo=%2Fpantry&flow=signup',
+  );
+  await expect(page.getByRole('link', { name: 'Recuperar contraseña de DespensaLista' })).toHaveAttribute(
+    'href', '/api/auth/cognito/login?provider=COGNITO&redirectTo=%2Fpantry&flow=recovery',
+  );
+  await page.getByText('Ayuda con Google', { exact: true }).click();
+  await expect(page.getByRole('link', { name: 'Recuperar mi cuenta de Google' })).toHaveAttribute(
+    'href', 'https://accounts.google.com/signin/recovery',
+  );
 
   const startedLogin = page.waitForRequest('**/api/auth/cognito/login?**');
   await page.getByRole('button', { name: 'Entrar con Google' }).click();
@@ -41,6 +50,18 @@ test('shows a recoverable message after an expired Cognito callback state', asyn
   await page.goto('/login?authError=cognito_state');
 
   await expect(page.getByRole('alert')).toContainText(
-    'El inicio de sesion caduco o se abrio otro intento.',
+    'El inicio de sesión caducó o se abrió otro intento.',
+  );
+  await expect(page.getByRole('link', { name: 'Reportar un problema de acceso' })).toHaveAttribute(
+    'href', '/feedback?source=access&errorCode=oauth_callback',
+  );
+});
+
+test('offers a report for an unexpected callback error with its public category', async ({ page }) => {
+  await page.goto('/login?authError=cognito_unexpected');
+
+  await expect(page.getByRole('alert')).toContainText('No pudimos verificar tu acceso en este momento.');
+  await expect(page.getByRole('link', { name: 'Reportar un problema de acceso' })).toHaveAttribute(
+    'href', '/feedback?source=access&errorCode=unexpected',
   );
 });

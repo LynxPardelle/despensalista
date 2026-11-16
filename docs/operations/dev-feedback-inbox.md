@@ -1,6 +1,6 @@
 # Bandeja de reportes de DespensaLista
 
-En Perfil, abre **Ayuda y comentarios → Reportar un error, queja o sugerencia**. El formulario exige una sesión y devuelve un folio cuando guarda el reporte. Una cuenta puede enviar hasta cinco reportes por día UTC. Si reintenta el mismo envío desde el formulario, conserva el folio. [Perfil de dev](https://dev.despensalista.lynxpardelle.com/profile) · [Perfil de tst](https://test.despensalista.lynxpardelle.com/profile) · [Perfil de producción](https://despensalista.com/profile)
+Abre **Reportar un problema** en la app. El formulario recibe reportes con cuenta y sin iniciar sesión. Una cuenta puede enviar hasta cinco reportes por día UTC. Los envíos sin sesión comparten un cupo de 30 reportes por día UTC y entorno. El formulario devuelve un folio al guardar el reporte y conserva ese folio al reintentar el mismo envío. [Reportes en dev](https://dev.despensalista.lynxpardelle.com/feedback) · [Reportes en tst](https://test.despensalista.lynxpardelle.com/feedback) · [Reportes en producción](https://despensalista.com/feedback)
 
 ## Consultar reportes
 
@@ -42,8 +42,10 @@ try {
 
 El índice puede tardar brevemente en reflejar un reporte nuevo o eliminado. Para identificar un reporte, usa el folio devuelto por el formulario. La bandeja muestra el folio, la categoría, la fecha y el texto. Comparte solo el folio y un resumen que omita información personal si necesitas registrar el trabajo en otra herramienta.
 
+Cuando necesites consultar el contexto del reporte, incluye `pk` y `sk` en la proyección anterior y usa esas claves para leer únicamente el registro correspondiente en la tabla base con `dynamodb:GetItem`. Los campos opcionales `source` y `errorCode` son etiquetas de un catálogo fijo que aporta el formulario. El índice de bandeja conserva su proyección actual.
+
 ## Conservación
 
-El formulario avisa que se evite incluir datos personales, contraseñas o información de pago. El registro usa un identificador de cuenta seudonimizado para controlar el límite y eliminar los reportes cuando se borra la cuenta. El sistema almacena la categoría, el mensaje, el folio y la fecha. Los reportes vencen a los 90 días y los contadores a los dos días. DynamoDB retira los registros vencidos de forma asíncrona.
+El formulario avisa que se evite incluir datos personales, contraseñas o información de pago. Para los envíos con sesión, el registro usa un identificador de cuenta seudonimizado para controlar el límite y eliminar los reportes cuando se borra la cuenta. Los envíos sin sesión usan una partición común del entorno. La fila guarda categoría, mensaje, folio, fecha y las etiquetas opcionales. Los reportes con cuenta vencen a los 90 días y los reportes sin sesión a los 30 días. Los contadores vencen a los dos días. DynamoDB retira los registros vencidos de forma asíncrona.
 
 Cada entorno dispone de una tabla DynamoDB bajo demanda. La tabla de producción tiene protección contra borrado y CloudFormation conserva sus datos al retirar o reemplazar el recurso. Si una primera creación falla después de aprovisionar la tabla, revisa a qué stack pertenece antes de reintentar el despliegue. El formulario entrega un folio y no envía correo.

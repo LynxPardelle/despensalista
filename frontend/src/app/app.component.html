@@ -2,4 +2,7 @@
   <div class="app-shell__glow app-shell__glow--left"></div>
   <div class="app-shell__glow app-shell__glow--right"></div>
   <router-outlet />
+  @if (reportUrl; as url) {
+    <a class="app-report-link" [href]="url">Reportar un problema</a>
+  }
 </div>

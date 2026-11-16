@@ -458,8 +458,13 @@ export class DespensaListaCognitoStack extends cdk.Stack {
       ],
     });
     role.addToPolicy(new iam.PolicyStatement({
-      actions: ['dynamodb:TransactWriteItems'],
+      actions: ['dynamodb:UpdateItem'],
       resources: [table.tableArn],
+      conditions: {
+        'ForAnyValue:StringEquals': {
+          'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+        },
+      },
     }));
 
     const logGroup = new logs.LogGroup(this, 'CognitoEmailQuotaLogGroup', {

@@ -1,6 +1,10 @@
 import { ConfigService } from '@nestjs/config';
 import { FastifyReply, FastifyRequest } from 'fastify';
-import { UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import {
   CognitoAuthUrlBuilder,
   CognitoTokenClient,
@@ -285,6 +289,64 @@ describe('AuthController Cognito flow', () => {
     );
   });
 
+  it.each(['signup', 'recovery'])(
+    'forwards the allowed native %s flow and creates transaction cookies',
+    (flow) => {
+      const {
+        controller,
+        transactionService,
+        authUrlBuilder,
+        authCookieService,
+      } = makeController();
+      const reply = makeReply();
+      transactionService.normalizeProvider.mockReturnValue('COGNITO');
+
+      controller.startCognitoLogin('COGNITO', '/pantry', reply, flow);
+
+      expect(authUrlBuilder.buildAuthorizeUrl).toHaveBeenCalledWith(
+        expect.objectContaining({
+          flow,
+          provider: undefined,
+          codeChallengeMethod: 'S256',
+        }),
+      );
+      expect(
+        authCookieService.setCognitoAuthTransactionCookies,
+      ).toHaveBeenCalledWith(
+        reply,
+        expect.objectContaining({
+          state: 'state-value',
+          nonce: 'nonce-value',
+          codeVerifier: 'code-verifier',
+        }),
+      );
+    },
+  );
+
+  it.each([
+    ['COGNITO', 'unknown'],
+    ['Google', 'recovery'],
+  ])(
+    'rejects %s with flow %s before creating a transaction',
+    (provider, flow) => {
+      const {
+        controller,
+        transactionService,
+        authUrlBuilder,
+        authCookieService,
+      } = makeController();
+      transactionService.normalizeProvider.mockReturnValue(provider);
+
+      expect(() =>
+        controller.startCognitoLogin(provider, '/pantry', makeReply(), flow),
+      ).toThrow(BadRequestException);
+      expect(authUrlBuilder.buildAuthorizeUrl).not.toHaveBeenCalled();
+      expect(
+        authCookieService.setCognitoAuthTransactionCookies,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
   it('lists the configured Cognito providers for the login screen', () => {
     const { controller } = makeController();
 
@@ -358,6 +420,66 @@ describe('AuthController Cognito flow', () => {
       '/login?authError=cognito_state',
       302,
     ]);
+  });
+
+  it('returns to login with a public error when the callback token exchange fails', async () => {
+    const { controller, tokenClient, authCookieService, profileSyncService } =
+      makeController();
+    const reply = makeReply();
+    tokenClient.exchangeCode.mockRejectedValueOnce(
+      new UnauthorizedException('Private provider error'),
+    );
+
+    await controller.completeCognitoLogin(
+      'authorization-code',
+      'state-value',
+      {} as FastifyRequest,
+      reply,
+    );
+
+    expect(reply.redirect).toHaveBeenCalledWith(
+      '/login?authError=cognito_callback',
+      302,
+    );
+    expect(
+      authCookieService.clearCognitoAuthTransactionCookies,
+    ).toHaveBeenCalledWith(reply);
+    expect(authCookieService.setSessionCookies).not.toHaveBeenCalled();
+    expect(profileSyncService.syncFromClaims).not.toHaveBeenCalled();
+  });
+
+  it('logs a constant and redirects to a reportable error if profile synchronization fails', async () => {
+    const { controller, profileSyncService, authCookieService } =
+      makeController();
+    const reply = makeReply();
+    const logger = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    profileSyncService.syncFromClaims.mockRejectedValueOnce(
+      new Error('Private dependency error'),
+    );
+
+    try {
+      await controller.completeCognitoLogin(
+        'authorization-code',
+        'state-value',
+        {} as FastifyRequest,
+        reply,
+      );
+      expect(logger.mock.calls).toEqual([
+        ['cognito_callback_dependency_error'],
+      ]);
+      expect(reply.redirect).toHaveBeenCalledWith(
+        '/login?authError=cognito_unexpected',
+        302,
+      );
+      expect(
+        authCookieService.clearCognitoAuthTransactionCookies,
+      ).toHaveBeenCalledWith(reply);
+      expect(authCookieService.setSessionCookies).not.toHaveBeenCalled();
+    } finally {
+      logger.mockRestore();
+    }
   });
 
   it('refreshes Cognito tokens and returns the current user', async () => {
