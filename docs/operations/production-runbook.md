@@ -449,8 +449,9 @@ Alec or Héctor reconcile the Stripe reference, amount, date, payment method
 and refund state before issuing the CFDI. Messages marked `[Prueba]` represent
 Sandbox payments. The app shows a request as sent when SES accepts it. For an
 uncertain result, search the mailbox for the folio before arranging follow-up.
-If the customer omitted the optional email, coordinate delivery using the same
-folio. Before opening sales, verify one authorized request from the target
+Send the issued CFDI to the account email and the additional address, if one was
+provided. If the request has no delivery address, coordinate delivery using the
+same folio. Before opening sales, verify one authorized request from the target
 stage and the copy that actually reaches the mailbox.
 
 ## SES approval blocker

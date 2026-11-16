@@ -69,11 +69,17 @@ export class CfdiMail {
       `Código postal fiscal: ${fiscal.postalCode}`,
       `Régimen fiscal: ${fiscal.taxRegime}`,
       `Uso del CFDI: ${fiscal.cfdiUse}`,
-      ...(fiscal.email
-        ? [`Correo para entrega: ${fiscal.email}`]
-        : [
-            'La persona solicitante omitió el correo de entrega. Conserva el folio para coordinar la entrega si se comunica al buzón de facturas.',
-          ]),
+      ...(fiscal.accountEmail
+        ? [`Correo principal de la cuenta: ${fiscal.accountEmail}`]
+        : []),
+      ...(fiscal.additionalEmail
+        ? [`Correo adicional: ${fiscal.additionalEmail}`]
+        : []),
+      ...(!fiscal.accountEmail && !fiscal.additionalEmail
+        ? [
+            'Conserva el folio para coordinar la entrega si la persona solicitante se comunica al buzón de facturas.',
+          ]
+        : []),
       '',
       'Consulta el pago en Stripe para confirmar su forma de pago y cualquier reembolso antes de emitir o corregir el CFDI.',
     ].join('\n');

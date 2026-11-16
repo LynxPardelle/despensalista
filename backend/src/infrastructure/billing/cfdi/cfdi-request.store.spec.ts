@@ -50,7 +50,12 @@ describe('reserva transaccional de una solicitud por factura', () => {
   beforeEach(() => send.mockReset().mockResolvedValue({}));
 
   it('reserva un folio separado del ítem fiscal y quita los datos al obtener confirmación de SES', async () => {
-    const reserved = (await store.reserve(input))!;
+    const accountEmail = 'owner@example.com';
+    const additionalEmail = 'other@example.com';
+    const reserved = (await store.reserve({
+      ...input,
+      data: { ...input.data, accountEmail, additionalEmail },
+    }))!;
     const [account, billing, receipt, details] =
       send.mock.calls[0][0].input.TransactItems!;
     expect(account.ConditionCheck).toMatchObject({
@@ -67,10 +72,14 @@ describe('reserva transaccional de una solicitud por factura', () => {
     });
     expect(receipt.Put?.Item).not.toHaveProperty('rfc');
     expect(receipt.Put?.Item).not.toHaveProperty('email');
+    expect(receipt.Put?.Item).not.toHaveProperty('accountEmail');
+    expect(receipt.Put?.Item).not.toHaveProperty('additionalEmail');
     expect(details.Put?.Item).toMatchObject({
       pk: 'cfdi-fiscal-data:in_Test',
       requestId: reserved.id,
       rfc: fiscal.rfc,
+      accountEmail,
+      additionalEmail,
     });
     expect(details.Put?.Item?.expiresAt).toBeGreaterThan(
       Math.floor(Date.now() / 1000),
