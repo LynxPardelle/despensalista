@@ -91,11 +91,17 @@ test('quota counters are atomic on-demand DynamoDB records with TTL', () => {
     .flatMap((resource) => resource.Properties.PolicyDocument.Statement);
   const quotaWrite = statements.find((statement: any) => {
     const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
-    return actions.includes('dynamodb:TransactWriteItems');
+    return actions.includes('dynamodb:UpdateItem');
   });
 
   assert.ok(quotaWrite);
-  assert.doesNotMatch(JSON.stringify(quotaWrite.Resource), /\*/);
+  const tableLogicalId = Object.keys(resources).find((key) => resources[key] === table);
+  assert.deepEqual(quotaWrite, {
+    Action: 'dynamodb:UpdateItem',
+    Condition: { 'ForAnyValue:StringEquals': { 'dynamodb:EnclosingOperation': ['TransactWriteItems'] } },
+    Effect: 'Allow',
+    Resource: { 'Fn::GetAtt': [tableLogicalId, 'Arn'] },
+  });
 });
 
 test('Cognito invokes only the bounded CustomMessage Lambda role', () => {

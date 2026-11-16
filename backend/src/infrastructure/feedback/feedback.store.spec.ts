@@ -88,6 +88,105 @@ describe('FeedbackStore', () => {
     expect(read.input.ConsistentRead).toBe(true);
   });
 
+  it('stores the fixed context in the shared inbox and caps anonymous reports globally', async () => {
+    const feedback = {
+      ...submission,
+      source: 'access',
+      errorCode: 'oauth_callback',
+    } as const;
+    send.mockResolvedValue({});
+
+    await expect(store.submitAnonymous(feedback, createdAt)).resolves.toEqual({
+      id: feedback.submissionId,
+    });
+
+    const [command] = send.mock.calls[0] as [TransactWriteCommand];
+    const items = command.input.TransactItems!;
+    expect(items).toHaveLength(2);
+    const [limit, report] = items;
+    expect(limit.Update).toMatchObject({
+      TableName: 'despensalista-dev-feedback',
+      Key: { pk: 'ANONYMOUS', sk: 'LIMIT#2026-11-14' },
+      ConditionExpression: 'attribute_not_exists(#count) OR #count < :max',
+      ExpressionAttributeValues: {
+        ':max': 30,
+        ':expiry': Date.parse('2026-11-16T21:34:00.000Z') / 1000,
+      },
+    });
+    expect(report.Put?.Item).toEqual({
+      pk: 'ANONYMOUS',
+      sk: `REPORT#${feedback.submissionId}`,
+      id: feedback.submissionId,
+      category: feedback.category,
+      message: feedback.message,
+      source: feedback.source,
+      errorCode: feedback.errorCode,
+      createdAt: createdAt.toISOString(),
+      inboxMonth: 'INBOX#2026-11',
+      inboxOrder: `${createdAt.toISOString()}#${feedback.submissionId}`,
+      expiresAt: Date.parse('2026-12-14T21:34:00.000Z') / 1000,
+    });
+  });
+
+  it('honors the public limit and returns the original folio if the anonymous report already exists', async () => {
+    send
+      .mockRejectedValueOnce(
+        transactionCancelled('ConditionalCheckFailed', 'None'),
+      )
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(
+        transactionCancelled(
+          'ConditionalCheckFailed',
+          'ConditionalCheckFailed',
+        ),
+      )
+      .mockResolvedValueOnce({ Item: { ...submission, source: 'pantry' } });
+
+    await expect(
+      store.submitAnonymous(submission, createdAt),
+    ).rejects.toMatchObject({ status: 429 });
+    await expect(
+      store.submitAnonymous({ ...submission, source: 'pantry' }, createdAt),
+    ).resolves.toEqual({
+      id: submission.submissionId,
+    });
+    const [read] = send.mock.calls[3] as [GetCommand];
+    expect(read.input).toMatchObject({
+      ConsistentRead: true,
+      Key: { pk: 'ANONYMOUS', sk: `REPORT#${submission.submissionId}` },
+    });
+  });
+
+  it.each(['account', 'anonymous'] as const)(
+    'rejects changing the diagnostic context on a %s receipt',
+    async (mode) => {
+      send
+        .mockRejectedValueOnce(
+          mode === 'account'
+            ? transactionCancelled('None', 'None', 'ConditionalCheckFailed')
+            : transactionCancelled('None', 'ConditionalCheckFailed'),
+        )
+        .mockResolvedValueOnce({
+          Item: {
+            ...submission,
+            source: 'access',
+            errorCode: 'oauth_callback',
+          },
+        });
+
+      const update = {
+        ...submission,
+        source: 'access',
+        errorCode: 'network',
+      } as const;
+      const result =
+        mode === 'account'
+          ? store.submit(accountId, update, createdAt)
+          : store.submitAnonymous(update, createdAt);
+      await expect(result).rejects.toMatchObject({ status: 409 });
+    },
+  );
+
   it('rejects a new report after the rate budget is exhausted', async () => {
     send
       .mockRejectedValueOnce(

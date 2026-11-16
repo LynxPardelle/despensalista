@@ -1,6 +1,10 @@
 <main class="feedback-page" aria-labelledby="feedback-title">
   <article>
-    <a routerLink="/profile">Volver al perfil</a>
+    @if (channel() === 'account' && availability() === 'ready') {
+      <a routerLink="/profile">Volver al perfil</a>
+    } @else {
+      <a routerLink="/">Volver al inicio</a>
+    }
     <h1 id="feedback-title">Enviar un reporte</h1>
 
     @switch (availability()) {
@@ -13,8 +17,14 @@
       @case ('error') {
         <p role="alert">No pudimos cargar el formulario.</p>
         <button type="button" class="secondary-button" (click)="checkAvailability()">Volver a intentar</button>
+        @if (channel() === 'account') {
+          <button type="button" class="ghost-button" (click)="sendWithoutSession()">Abrir sin iniciar sesión</button>
+        }
       }
       @case ('ready') {
+        @if (channel() === 'anonymous') {
+          <p>Envía tu reporte sin iniciar sesión. Describe qué estabas haciendo y qué mensaje viste.</p>
+        }
         @if (receipt(); as id) {
           <p class="receipt" role="status">Recibimos tu reporte. Tu folio es <strong>{{ id }}</strong>.</p>
         }
@@ -37,9 +47,13 @@
           @if (error(); as message) {
             <p class="field-error" role="alert">{{ message }}</p>
           }
-          <button type="submit" class="primary-button" [disabled]="!canSubmit">
-            {{ sending() ? 'Enviando…' : 'Enviar reporte' }}
-          </button>
+          @if (canSendWithoutSession()) {
+            <button type="button" class="secondary-button" (click)="sendWithoutSession()">Enviar sin iniciar sesión</button>
+          } @else {
+            <button type="submit" class="primary-button" [disabled]="!canSubmit">
+              {{ sending() ? 'Enviando…' : 'Enviar reporte' }}
+            </button>
+          }
         </form>
       }
     }
