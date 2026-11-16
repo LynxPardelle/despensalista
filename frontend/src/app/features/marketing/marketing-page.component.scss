@@ -192,7 +192,7 @@ h3 { font-size: 1.4rem; }
   .hero, .mobile-content, .workflow-grid, .plans { grid-template-columns: 1fr; }
   .hero-copy { padding-block: 2.4rem; }
   .hero-media { min-height: clamp(13rem, 56vw, 24rem); }
-  .workflow-link { display: none; }
+  .site-header .workflow-link { display: none; }
   .site-header { gap: .65rem; }
   nav, .hero-actions { gap: .85rem; }
   .site-header nav { justify-content: flex-end; font-size: .88rem; }
