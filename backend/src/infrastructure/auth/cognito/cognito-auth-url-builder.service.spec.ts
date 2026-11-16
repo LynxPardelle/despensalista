@@ -99,29 +99,34 @@ describe('CognitoAuthUrlBuilderService', () => {
   it.each([
     ['signup', '/signup'],
     ['recovery', '/forgotPassword'],
-  ] as const)('sends the native %s flow to Managed Login with the same OAuth transaction', (flow, path) => {
-    const service = new CognitoAuthUrlBuilderService(makeConfigService());
-    const url = new URL(service.buildAuthorizeUrl({
-      flow,
-      state: 'email-state',
-      nonce: 'email-nonce',
-      codeChallenge: 'email-challenge',
-      codeChallengeMethod: 'S256',
-      redirectUri: 'https://despensalista.com/api/auth/cognito/callback',
-      scopes: ['openid', 'email', 'profile'],
-    }).url);
+  ] as const)(
+    'sends the native %s flow to Managed Login with the same OAuth transaction',
+    (flow, path) => {
+      const service = new CognitoAuthUrlBuilderService(makeConfigService());
+      const url = new URL(
+        service.buildAuthorizeUrl({
+          flow,
+          state: 'email-state',
+          nonce: 'email-nonce',
+          codeChallenge: 'email-challenge',
+          codeChallengeMethod: 'S256',
+          redirectUri: 'https://despensalista.com/api/auth/cognito/callback',
+          scopes: ['openid', 'email', 'profile'],
+        }).url,
+      );
 
-    expect(url.pathname).toBe(path);
-    expect(Object.fromEntries(url.searchParams)).toEqual({
-      response_type: 'code',
-      client_id: 'client-123',
-      redirect_uri: 'https://despensalista.com/api/auth/cognito/callback',
-      scope: 'openid email profile',
-      lang: 'es',
-      state: 'email-state',
-      nonce: 'email-nonce',
-      code_challenge: 'email-challenge',
-      code_challenge_method: 'S256',
-    });
-  });
+      expect(url.pathname).toBe(path);
+      expect(Object.fromEntries(url.searchParams)).toEqual({
+        response_type: 'code',
+        client_id: 'client-123',
+        redirect_uri: 'https://despensalista.com/api/auth/cognito/callback',
+        scope: 'openid email profile',
+        lang: 'es',
+        state: 'email-state',
+        nonce: 'email-nonce',
+        code_challenge: 'email-challenge',
+        code_challenge_method: 'S256',
+      });
+    },
+  );
 });

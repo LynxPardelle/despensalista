@@ -13,9 +13,12 @@ export class CognitoAuthUrlBuilderService implements CognitoAuthUrlBuilder {
   buildAuthorizeUrl(
     input: CognitoAuthorizeUrlInput,
   ): CognitoAuthorizeUrlOutput {
-    const path = input.flow === 'signup'
-      ? '/signup'
-      : input.flow === 'recovery' ? '/forgotPassword' : '/oauth2/authorize';
+    const path =
+      input.flow === 'signup'
+        ? '/signup'
+        : input.flow === 'recovery'
+          ? '/forgotPassword'
+          : '/oauth2/authorize';
     const url = new URL(path, this.getCognitoDomain());
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('client_id', this.getClientId());

@@ -73,9 +73,11 @@ export class AuthController {
       provider,
       this.getAllowedProviders(),
     );
-    if (flow !== undefined && (
-      (flow !== 'signup' && flow !== 'recovery') || normalizedProvider !== 'COGNITO'
-    )) {
+    if (
+      flow !== undefined &&
+      ((flow !== 'signup' && flow !== 'recovery') ||
+        normalizedProvider !== 'COGNITO')
+    ) {
       throw new BadRequestException('Selecciona una opción de acceso válida.');
     }
     const transaction = this.transactionService.createTransaction();
@@ -164,7 +166,9 @@ export class AuthController {
         }
         if (this.googleMfa.requiresProof(accessClaims)) {
           if (!idClaims.emailVerified) {
-            throw new UnauthorizedException('Verified Google email is required');
+            throw new UnauthorizedException(
+              'Verified Google email is required',
+            );
           }
           const destination =
             this.transactionService.normalizeRedirectTo(redirectTo);
@@ -177,11 +181,17 @@ export class AuthController {
       const unexpected = !(error instanceof UnauthorizedException);
       if (unexpected) this.logger.error('cognito_callback_dependency_error');
       this.authCookieService.clearCognitoAuthTransactionCookies(reply);
-      reply.redirect(unexpected ? '/login?authError=cognito_unexpected' : '/login?authError=cognito_callback', 302);
+      reply.redirect(
+        unexpected
+          ? '/login?authError=cognito_unexpected'
+          : '/login?authError=cognito_callback',
+        302,
+      );
       return;
     }
 
-    if (this.googleMfa.enabled) this.authCookieService.clearGoogleMfaCookie(reply);
+    if (this.googleMfa.enabled)
+      this.authCookieService.clearGoogleMfaCookie(reply);
     this.authCookieService.setSessionCookies(reply, {
       accessToken: tokenSet.accessToken,
       refreshToken: tokenSet.refreshToken,
