@@ -9,7 +9,23 @@ export interface FiscalDetails {
   postalCode: string;
   taxRegime: string;
   cfdiUse: string;
-  email?: string;
+  additionalEmail?: string;
+}
+
+export interface FiscalRegimeOption {
+  code: string;
+  label: string;
+  individual: boolean;
+  organization: boolean;
+}
+
+export interface FiscalUseOption extends FiscalRegimeOption {
+  regimes: string[];
+}
+
+export interface FiscalCatalog {
+  regimes: FiscalRegimeOption[];
+  uses: FiscalUseOption[];
 }
 
 export interface InvoiceRequestReceipt {
@@ -30,6 +46,8 @@ interface InvoicePage {
   available: boolean;
   invoices: PaidInvoice[];
   nextCursor?: string | null;
+  catalog?: FiscalCatalog;
+  accountEmail?: string | null;
 }
 
 @Injectable({ providedIn: 'root' })
