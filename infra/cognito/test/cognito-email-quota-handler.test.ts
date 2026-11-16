@@ -109,6 +109,31 @@ test('reserves ten production sends for recovery while enforcing the total and r
   assert.equal(recovery.some(({ key }) => key.endsWith('#standard')), false);
 });
 
+test('dev allows signup and recovery for the same recipient within the two-send daily limit', async () => {
+  const { createHandler } = loadHandler();
+  const used = new Map<string, number>();
+  const handler = createHandler({
+    environment: { ...environment, DAILY_LIMIT: '2', RECOVERY_RESERVE: '1', RECIPIENT_LIMIT: '2' },
+    now: () => new Date('2026-09-26T12:00:00.000Z'),
+    logFailure: () => undefined,
+    transactWrite: async (input: any) => {
+      const counters = updateDetails(input);
+      if (counters.some(({ key, limit }) => (used.get(key) ?? 0) >= limit)) {
+        throw new Error('Transaction cancelled');
+      }
+      for (const { key } of counters) used.set(key, (used.get(key) ?? 0) + 1);
+    },
+  });
+  const signup = event('CustomMessage_SignUp');
+  const recovery = event('CustomMessage_ForgotPassword', 'alice@example.com');
+
+  assert.equal(await handler(signup), signup);
+  await assert.rejects(handler(event('CustomMessage_SignUp', 'bob@example.com')));
+  assert.equal(await handler(recovery), recovery);
+  await assert.rejects(handler(event('CustomMessage_ForgotPassword', 'bob@example.com')));
+  assert.deepEqual([...used.values()].sort((a, b) => a - b), [1, 2, 2]);
+});
+
 test('hashes normalized recipients and never stores their email address', async () => {
   const { createHandler } = loadHandler();
   const inputs: any[] = [];

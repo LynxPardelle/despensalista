@@ -3,6 +3,7 @@ import { expect, test } from '@playwright/test';
 test('renders Cognito login options and starts provider redirect', async ({
   page,
 }) => {
+  let signInRequests = 0;
   await page.route('**/api/auth/cognito/providers', async (route) => {
     await route.fulfill({
       status: 200,
@@ -12,6 +13,7 @@ test('renders Cognito login options and starts provider redirect', async ({
   });
 
   await page.route('**/api/auth/cognito/login?**', async (route) => {
+    signInRequests++;
     await route.fulfill({
       contentType: 'text/html; charset=utf-8',
       body: '<meta http-equiv="refresh" content="0; url=/login?cognitoRedirect=stubbed">',
@@ -29,13 +31,23 @@ test('renders Cognito login options and starts provider redirect', async ({
   await expect(page.getByRole('link', { name: 'Crear cuenta con correo' })).toHaveAttribute(
     'href', '/api/auth/cognito/login?provider=COGNITO&redirectTo=%2Fpantry&flow=signup',
   );
-  await expect(page.getByRole('link', { name: 'Recuperar contraseña de DespensaLista' })).toHaveAttribute(
+  const nativeRecovery = page.getByRole('link', { name: 'Recuperar contraseña de DespensaLista' });
+  await expect(nativeRecovery).toBeHidden();
+  await page.getByText('Recuperar acceso con Google o correo', { exact: true }).press('Enter');
+  await expect(page.getByText('¿Cómo creaste tu cuenta?')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Con Google' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Con mi correo y una contraseña de DespensaLista' })).toBeVisible();
+  await expect(page.getByText('Si aún no confirmaste tu correo, termina primero el registro.')).toBeVisible();
+  await expect(nativeRecovery).toHaveAttribute(
     'href', '/api/auth/cognito/login?provider=COGNITO&redirectTo=%2Fpantry&flow=recovery',
   );
-  await page.getByText('Ayuda con Google', { exact: true }).click();
   await expect(page.getByRole('link', { name: 'Recuperar mi cuenta de Google' })).toHaveAttribute(
     'href', 'https://accounts.google.com/signin/recovery',
   );
+  await expect(page.getByRole('link', { name: 'Reportar un problema de recuperación' })).toHaveAttribute(
+    'href', '/feedback?source=recovery',
+  );
+  expect(signInRequests).toBe(0);
 
   const startedLogin = page.waitForRequest('**/api/auth/cognito/login?**');
   await page.getByRole('button', { name: 'Entrar con Google' }).click();
