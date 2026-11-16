@@ -38,6 +38,20 @@ test('gives required promotion and CDK checks unique stable names', async () => 
   assert.match(cdk, /^    name: Validate Serverless CDK\r?$/m);
 });
 
+test('production smoke regularly checks the public domain and protected feedback route', async () => {
+  const workflow = await readWorkflow('production-smoke.yml');
+  assert.match(workflow, /^  schedule:/m);
+  assert.match(workflow, /--base-url https:\/\/despensalista\.com\s/);
+  assert.match(workflow, /--verify-feedback true\s*$/);
+});
+
+test('production deployment and rollback verify the public domain when configured', async () => {
+  const prod = await readWorkflow('deploy-serverless-prod.yml');
+  const rollback = await readWorkflow('rollback-serverless.yml');
+  assert.match(prod, /Post-deploy smoke[\s\S]+PUBLIC_DOMAIN_ENABLED:.*vars\.ENABLE_PUBLIC_PRODUCTION_DOMAIN[\s\S]+if \[\[ "\$PUBLIC_DOMAIN_ENABLED" == true \]\]; then\s+node \.github\/scripts\/smoke\.mjs --base-url https:\/\/despensalista\.com\s/);
+  assert.match(rollback, /Post-rollback smoke[\s\S]+PUBLIC_DOMAIN_ENABLED:.*vars\.ENABLE_PUBLIC_PRODUCTION_DOMAIN[\s\S]+if \[\[ "\$STAGE" == prod && "\$PUBLIC_DOMAIN_ENABLED" == true \]\]; then\s+node \.github\/scripts\/smoke\.mjs --base-url https:\/\/despensalista\.com\s/);
+});
+
 test('deploy workflows serialize by stage and verify after deployment', async () => {
   for (const workflowName of deployWorkflows) {
     const workflow = await readWorkflow(workflowName);

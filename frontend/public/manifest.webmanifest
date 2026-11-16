@@ -2,6 +2,7 @@
   "name": "Despensa Lista",
   "short_name": "Despensa Lista",
   "description": "Despensa del hogar con compras sugeridas, caducidades y borradores locales.",
+  "id": "/pantry",
   "start_url": "/pantry",
   "scope": "/",
   "display": "standalone",
@@ -9,12 +10,8 @@
   "theme_color": "#c47a4b",
   "lang": "es",
   "icons": [
-    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" },
-    {
-      "src": "/favicon.ico",
-      "sizes": "48x48",
-      "type": "image/x-icon"
-    }
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

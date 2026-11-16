@@ -4,7 +4,7 @@
   "scripts": {
     "ng": "ng",
     "start": "ng serve --proxy-config proxy.conf.cjs",
-    "build": "ng build && node scripts/ensure-static-index.mjs",
+    "build": "ng build && node scripts/ensure-static-index.mjs && node scripts/prepare-pwa.mjs",
     "watch": "ng build --watch --configuration development",
     "test": "ng test --watch=false --browsers=ChromeHeadless",
     "test:ci": "npm run test",
