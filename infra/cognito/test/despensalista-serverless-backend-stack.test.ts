@@ -275,6 +275,20 @@ test('public production domain preserves the legacy site and stamps the trusted 
   assert.equal(wwwResponse.headers.location.value,
     `https://despensalista.com/api/auth/cognito/login?${rawQuery}`);
   assert.equal(route('www.despensalista.com', 'POST').statusCode, 405);
+  for (const [uri, expected] of [
+    ['/', '/index.html'],
+    ['/planes', '/planes/index.html'],
+    ['/planes/', '/planes/index.html'],
+    ['/privacidad', '/privacidad/index.html'],
+    ['/terminos-plus-hogar', '/terminos-plus-hogar/index.html'],
+    ['/pantry', '/index.csr.html'],
+    ['/login', '/index.csr.html'],
+    ['/shared-shopping-list', '/index.csr.html'],
+    ['/robots.txt', '/robots.txt'],
+    ['/sitemap.xml', '/sitemap.xml'],
+  ]) {
+    assert.equal(route('despensalista.com', 'GET', uri).uri, expected, uri);
+  }
   assert.throws(() => synthesizeTemplate('dev', context), /only be enabled/);
 });
 

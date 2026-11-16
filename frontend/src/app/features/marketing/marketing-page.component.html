@@ -1,0 +1,129 @@
+<a class="skip-link" href="#contenido">Ir al contenido</a>
+
+<header class="site-header">
+  <a class="brand" href="/" aria-label="DespensaLista, inicio">
+    <img src="/icon-192.png" alt="" width="36" height="36" />
+    DespensaLista
+  </a>
+  <nav aria-label="Navegación principal">
+    <a class="workflow-link" href="/#como-funciona">Cómo funciona</a>
+    <a href="/planes" [attr.aria-current]="showPlans ? 'page' : null">Planes</a>
+    <a class="login-link" href="/login">Iniciar sesión</a>
+  </nav>
+</header>
+
+<main id="contenido">
+  @if (showPlans) {
+    <section class="plans-section page-width" aria-labelledby="plans-title">
+      <h1 id="plans-title">Planes para tu hogar</h1>
+      <p class="intro">Organiza lo que tienes en casa, prepara la próxima compra y comparte la despensa.</p>
+
+      <div class="plans">
+        <article class="plan" aria-labelledby="free-title">
+          <h2 id="free-title">Gratis</h2>
+          <p class="price">$0 <span>MXN al mes</span></p>
+          <ul>
+            <li>Hasta 2 integrantes por hogar</li>
+            <li>Hasta 3 listas reutilizables</li>
+            <li>Inventario, caducidades y alertas de reposición en la app</li>
+            <li>Registro de compras, consumo y desperdicio</li>
+            <li>Listas compartidas y exportación de datos</li>
+          </ul>
+          <a class="action" href="/login">Empieza gratis</a>
+          <p class="plan-note">Puedes crear tu cuenta sin tarjeta.</p>
+        </article>
+
+        <article class="plan plan-plus" aria-labelledby="plus-title">
+          <h2 id="plus-title">Plus Hogar</h2>
+          <p class="price">$68.44 <span>MXN al mes · IVA incluido</span></p>
+          <ul>
+            <li>Todo lo que incluye Gratis</li>
+            <li>Hasta 5 integrantes por hogar</li>
+            <li>Hasta 15 listas reutilizables</li>
+            <li>Resumen semanal de tu despensa</li>
+            <li>Consulta del gasto mensual</li>
+          </ul>
+          <p class="availability">Apertura de suscripciones pendiente</p>
+          <a class="text-link" href="/terminos-plus-hogar">Consulta las condiciones de Plus Hogar</a>
+        </article>
+      </div>
+
+      <section class="plan-questions" aria-labelledby="plan-questions-title">
+        <h2 id="plan-questions-title">Preguntas sobre los planes</h2>
+        <details>
+          <summary>¿El plan cubre a todo mi hogar?</summary>
+          <p>Sí. Los límites incluyen a la persona propietaria y a los integrantes invitados al hogar.</p>
+        </details>
+        <details>
+          <summary>¿Qué pasa con mis datos si cancelo Plus Hogar?</summary>
+          <p>Conservas Plus durante el periodo pagado. Después tu hogar vuelve a Gratis y conserva la despensa y las listas guardadas.</p>
+        </details>
+      </section>
+    </section>
+  } @else {
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <h1 id="hero-title">Tu despensa,<br />a la vista.</h1>
+        <p>Ve qué tienes en casa, qué conviene usar primero y qué te falta comprar.</p>
+        <div class="hero-actions">
+          <a class="action" href="/login">Empieza gratis <span aria-hidden="true">↗</span></a>
+          <a class="text-link" href="/planes">Ver planes</a>
+        </div>
+      </div>
+      <picture class="hero-media">
+        <source media="(max-width: 720px)" srcset="/marketing/despensa-mobile.webp" />
+        <img src="/marketing/despensa.webp" alt="Una mano guarda un frasco entre los alimentos de la despensa" width="1440" height="960" fetchpriority="high" />
+      </picture>
+    </section>
+
+    <section class="workflow page-width" id="como-funciona" aria-labelledby="workflow-title">
+      <h2 id="workflow-title">De la compra a tu cocina</h2>
+      <div class="workflow-grid">
+        <article>
+          <h3>Registra lo que compras</h3>
+          <p>Agrega los productos y las cantidades. Tu despensa se actualiza cuando guardas la compra.</p>
+        </article>
+        <article>
+          <h3>Usa primero lo que vence</h3>
+          <p>Anota las caducidades y revisa qué alimentos conviene usar pronto.</p>
+        </article>
+        <article>
+          <h3>Comparte la siguiente lista</h3>
+          <p>Prepara la lista con lo que falta y compártela con tu hogar antes de salir.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="mobile-section" aria-labelledby="mobile-title">
+      <div class="page-width mobile-content">
+        <div>
+          <h2 id="mobile-title">Instálala en tu celular</h2>
+          <p>Abre DespensaLista desde un icono en la pantalla de inicio.</p>
+        </div>
+        <div class="install-steps">
+          <p><strong>iPhone</strong> En Safari, toca Compartir, elige «Agregar a inicio» y activa «Abrir como app web» si aparece.</p>
+          <p><strong>Android</strong> En Chrome, abre el menú y elige «Instalar aplicación» o «Agregar a la pantalla principal».</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="start-section page-width" aria-labelledby="start-title">
+      <div>
+        <h2 id="start-title">Empieza con lo que ya tienes</h2>
+        <p>Crea tu hogar Gratis y registra tu primera compra.</p>
+      </div>
+      <a class="action" href="/login">Crear mi cuenta gratis</a>
+    </section>
+  }
+</main>
+
+<footer class="site-footer">
+  <div class="page-width footer-content">
+    <a class="brand" href="/">DespensaLista</a>
+    <nav aria-label="Enlaces del pie de página">
+      <a href="/planes">Planes</a>
+      <a href="/privacidad">Privacidad</a>
+      <a href="/terminos-plus-hogar">Condiciones de Plus Hogar</a>
+    </nav>
+  </div>
+</footer>

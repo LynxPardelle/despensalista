@@ -314,14 +314,21 @@ secret prevents direct API Gateway bypass. Do not enable verbose request/respons
 logging while debugging.
 
 Four production alarms cover Lambda errors, Lambda throttling, API 5xx, and
-CloudFront 5xx rate. Their SNS topic has no invented email subscriber: an operator
-must subscribe and confirm an actual notification destination to receive SNS
-alerts. A fifth, no-action alarm records managed-email guard rejections/errors;
-it has no invented SNS or email destination. The Lambda-error alarm feeds
-CodeDeploy rollback; API 5xx remains operational so the intentional quota-schema
-drain cannot abort its own deployment. The hourly **Production Smoke** GitHub workflow
-checks public availability without a paid Synthetics canary; ensure relevant
-operators receive GitHub failure notices.
+CloudFront 5xx rate. The Cognito managed-email alarm sends quota rejections and
+guard errors to the same operations SNS topic. An operator must confirm the SNS
+subscription and verify receipt of an alarm notification. When updating the
+Cognito alarm independently, review an administrator change set scoped to
+`despensalista-prod-cognito` with the active production domain and billing
+contexts. Verify `despensalista-prod-cognito-email-quota-errors` has the existing
+`despensalista-prod-operations-alarms` ARN in `AlarmActions` after deployment.
+The Lambda-error alarm feeds CodeDeploy rollback. The API 5xx alarm alerts
+operators during an intentional quota-schema drain without aborting the deployment.
+
+The **Production Smoke** GitHub workflow is scheduled hourly on the default
+branch and checks `https://despensalista.com` without a paid Synthetics canary.
+The production release and rollback workflows also check the public domain
+when the public alias is enabled. Confirm the relevant operators receive GitHub
+failure notices. GitHub scheduling can delay or skip individual runs.
 
 Production invokes the `live` backend alias every 15 minutes to resume durable
 account deletions. EventBridge retries are disabled; a failed run remains durable
@@ -355,7 +362,7 @@ shared account already exceeded its free standard alarm allowance.
 | CloudFront FREE + included WAF | Not deployed | AWS returned distribution-ineligible validation errors; no orphan subscription/WebACL remains |
 | Standalone WAF | Excluded; at least USD 6/month before requests for one ACL + one rule | Above the approved USD 1/month ceiling |
 | Origin secrets | USD 1.20/month current; USD 0.40/month net increase vs previous two secrets, plus API calls | Exactly three active stage secrets at USD 0.40 each; the old nonproduction secret is pending deletion and not billed during that period |
-| Five standard alarms | About USD 0.50/month | Prod only: four operational alarms plus the no-action managed-email guard alarm |
+| Five standard alarms | About USD 0.50/month | Prod only. The managed-email guard shares the operations topic with the other four alarms. |
 | Cognito managed-email guard | At the 35 admitted messages/day ceiling: DynamoDB at most USD 0.0041/month and Lambda below USD 0.01/month if shared free tiers are exhausted | On-demand atomic counters; denied/attack traffic is usage-based and not a spending cap |
 | API/Lambda logs | Expected below USD 1/month | 7/30-day retention; standard ingestion about USD 0.50/GB beyond shared allowance; no bodies/queries |
 | Lambda versions/alias and CodeDeploy all-at-once rollback | No fixed service fee | Existing runtime usage plus the Lambda-error deployment alarm; every prod release drains for the Lambda timeout plus five seconds until backend, frontend, and invalidation are verified |
@@ -539,8 +546,8 @@ with the per-recipient cap. The CustomMessage event has no trustworthy source IP
 and a browser CAPTCHA can be bypassed by calling the public Cognito client API
 directly. A user-pool WAF/IP control starts at about USD 6/month before requests
 and CAPTCHA charges, above the approved USD 1/month feature ceiling. Intentional
-quota rejection and DynamoDB failure both increment the fifth alarm, but the alarm
-has no subscriber until an operator supplies and confirms a real destination.
+quota rejection and DynamoDB failure both increment the managed-email alarm.
+Verify a confirmed operations SNS subscription to receive those notifications.
 Lambda/DynamoDB work from denied attack traffic remains usage-based and is not
 hard-capped by the 35 admitted-message budget.
 

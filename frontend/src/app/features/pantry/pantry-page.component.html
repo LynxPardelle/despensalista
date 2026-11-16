@@ -1,4 +1,69 @@
 <main class="pantry-page" aria-labelledby="pantry-page-title">
+  @let offeringFirstPurchase = showFirstPurchase(overview$ | async);
+  @if (firstPurchaseResult; as purchase) {
+    <section id="first-purchase-result" class="panel first-purchase-panel" aria-labelledby="first-purchase-result-title">
+      <div role="status">
+        <h2 id="first-purchase-result-title">Compra registrada</h2>
+        @if (purchase.name) {
+          <p><strong>{{ purchase.name }}</strong> ya está en tu despensa.</p>
+        } @else {
+          <p>El producto ya está en tu despensa.</p>
+        }
+      </div>
+      <button class="secondary-button" type="button" (click)="showLotRegistration()">Agregar otro producto</button>
+    </section>
+  } @else if (offeringFirstPurchase) {
+    <section class="panel first-purchase-panel" aria-labelledby="first-purchase-title">
+      <h2 id="first-purchase-title">Registra tu primera compra</h2>
+      <p>Empieza con un alimento que ya compraste. Agrega su fecha de caducidad si la conoces.</p>
+
+      <form id="first-purchase-form" class="lot-form" [formGroup]="firstPurchaseForm" (ngSubmit)="submitFirstPurchase()">
+        <label class="field field-full" for="first-purchase-name">
+          <span>Producto</span>
+          <input id="first-purchase-name" type="text" formControlName="name" maxlength="80"
+            placeholder="Por ejemplo, arroz" required [readOnly]="firstPurchaseBusy || firstPurchasePending" />
+        </label>
+        <label class="field" for="first-purchase-quantity">
+          <span>Cantidad</span>
+          <input id="first-purchase-quantity" type="number" formControlName="quantity" min="0.01" step="0.01"
+            required [readOnly]="firstPurchaseBusy || firstPurchasePending" />
+        </label>
+        <label class="field" for="first-purchase-unit">
+          <span>Unidad</span>
+          <select id="first-purchase-unit" formControlName="unit" [attr.disabled]="firstPurchaseBusy || firstPurchasePending ? '' : null">
+            @for (unit of unitOptions; track unit) {
+              <option [value]="unit">{{ unit }}</option>
+            }
+          </select>
+        </label>
+        <label class="field field-full" for="first-purchase-expiration">
+          <span>Caducidad (opcional)</span>
+          <input id="first-purchase-expiration" type="date" formControlName="expiresAt"
+            [readOnly]="firstPurchaseBusy || firstPurchasePending" />
+        </label>
+
+        @if (!firstPurchasePending) {
+          <button class="primary-button field-full" type="submit" [disabled]="firstPurchaseBusy">
+            {{ isOffline ? 'Guardar borrador' : 'Registrar compra' }}
+          </button>
+          @if (firstPurchaseDraft) {
+            <button class="ghost-button field-full" type="button" [disabled]="firstPurchaseBusy"
+              (click)="discardFirstPurchaseDraft()">Descartar borrador</button>
+          }
+        } @else if (hasExpiredPendingCheckouts) {
+          <button class="ghost-button field-full" type="button" [disabled]="firstPurchaseBusy"
+            (click)="discardExpiredPendingCheckouts()">Descartar cierre vencido tras revisar la despensa</button>
+        } @else if (!isOffline) {
+          <button class="secondary-button field-full" type="button" [disabled]="firstPurchaseBusy"
+            (click)="retryFirstPurchase()">Reintentar guardado</button>
+        }
+      </form>
+      <p class="helper-copy" role="status">
+        {{ shoppingCheckoutStatus || (firstPurchasePending ? 'Compra pendiente de sincronizar.' : '') }}
+      </p>
+    </section>
+  }
+
   <section class="hero-card">
     <div class="hero-copy">
       <p class="eyebrow">Despensa viva</p>
@@ -154,7 +219,7 @@
   }
 
   <section class="content-grid">
-    <article class="panel register-panel">
+    <article class="panel register-panel" id="register-pantry-lot" tabindex="-1">
       <div class="panel-header">
         <div>
           <p class="panel-kicker">Registrar lote</p>
@@ -1074,7 +1139,7 @@
               }
             </section>
 
-            @if (shoppingCheckoutStatus) {
+            @if (shoppingCheckoutStatus && !offeringFirstPurchase) {
               <p class="helper-copy" aria-live="polite">{{ shoppingCheckoutStatus }}</p>
             }
             @if (pendingShoppingCheckoutCount > 0) {
@@ -1082,7 +1147,7 @@
                 {{ pendingShoppingCheckoutCount }} cierres de compra pendientes de sincronizar.
               </p>
             }
-            @if (hasExpiredPendingCheckouts) {
+            @if (hasExpiredPendingCheckouts && !offeringFirstPurchase) {
               <button type="button" class="ghost-button" (click)="discardExpiredPendingCheckouts()">
                 Ya revisé la despensa: descartar cierres vencidos
               </button>
@@ -1523,19 +1588,6 @@
             @if (quickCapturePhotoStatus) {
               <p class="helper-copy" aria-live="polite">{{ quickCapturePhotoStatus }}</p>
             }
-          </section>
-
-          <section class="selection-card plus-preview-card capture-plus-preview field-full" aria-labelledby="capture-plus-preview-title">
-            <div>
-              <p class="panel-kicker">Plus preview</p>
-              <h3 id="capture-plus-preview-title">Cr&eacute;ditos de captura AI</h3>
-              <p class="helper-copy">
-                OCR de ticket, foto de anaquel y caducidad autom&aacute;tica quedar&aacute;n detr&aacute;s de confirmaci&oacute;n manual antes de cobrar.
-              </p>
-            </div>
-            <button type="button" class="secondary-button" disabled>
-              Sin cobro real
-            </button>
           </section>
 
           @if (isOffline) {
