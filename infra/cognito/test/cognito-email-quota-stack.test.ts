@@ -32,7 +32,7 @@ function namedResource(
 
 test('each stage gets its conservative email budget without a one-slot concurrency choke', () => {
   const expected = {
-    dev: { total: '2', recovery: '1', recipient: '1' },
+    dev: { total: '2', recovery: '1', recipient: '2' },
     tst: { total: '3', recovery: '1', recipient: '2' },
     prod: { total: '30', recovery: '10', recipient: '5' },
   } as const;

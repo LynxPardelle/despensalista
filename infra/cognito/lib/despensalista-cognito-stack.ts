@@ -18,7 +18,7 @@ import * as path from 'node:path';
 type ContextValue = string | undefined;
 
 const EMAIL_QUOTAS = {
-  dev: { dailyLimit: 2, recoveryReserve: 1, recipientLimit: 1 },
+  dev: { dailyLimit: 2, recoveryReserve: 1, recipientLimit: 2 },
   tst: { dailyLimit: 3, recoveryReserve: 1, recipientLimit: 2 },
   prod: { dailyLimit: 30, recoveryReserve: 10, recipientLimit: 5 },
 } as const;
