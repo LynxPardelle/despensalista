@@ -18,6 +18,26 @@ import { DynamoDbHouseholdRepository } from './dynamodb-household.repository';
 import { HouseholdMemberLimitError } from '../../../domain/repositories/household.repository';
 
 describe('DynamoDbHouseholdRepository', () => {
+  it('skips further writes once a household is marked as used', async () => {
+    const send = jest.fn().mockResolvedValue({
+      Item: { pristine: false, contextRequired: true },
+    });
+    const repository = new DynamoDbHouseholdRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      makeConfigService(),
+    );
+
+    await repository.markHouseholdUsed('user-1');
+
+    expect(send).toHaveBeenCalledTimes(1);
+    const command = send.mock.calls[0][0] as GetCommand;
+    expect(command).toBeInstanceOf(GetCommand);
+    expect(command.input).toMatchObject({
+      Key: { pk: 'HOUSEHOLD_SWITCH_STATE#user-1' },
+      ConsistentRead: true,
+    });
+  });
+
   it('claims one household per user and creates the owner atomically', async () => {
     const send = jest.fn().mockResolvedValue({});
     const repository = new DynamoDbHouseholdRepository(

@@ -565,8 +565,48 @@ describe('DynamoDbPantryMutationAdapter', () => {
           joinedAt: new Date('2026-11-16T20:00:00.000Z'),
         },
       }),
-    ).rejects.toThrow('límite de 48 tipos de producto distintos');
+    ).rejects.toMatchObject({
+      code: 'CHECKOUT_CAPACITY_EXCEEDED',
+      message: expect.stringContaining(
+        '48 tipos de producto distintos',
+      ) as string,
+    });
     expect(dynamo.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('still closes a fenced purchase of 49 lots across 48 distinct types', async () => {
+    const dynamo = makeDynamo();
+    dynamo.send
+      .mockResolvedValueOnce({ Item: quotaItem(), $metadata: {} })
+      .mockResolvedValueOnce({ $metadata: {} });
+    const productTypes = Array.from({ length: 48 }, (_, index) =>
+      makeProductType(`type-${index}`),
+    );
+    const lots = [...productTypes, productTypes[0]].map((type, index) =>
+      makeLot(1, `lot-${index}`, type.id.toString()),
+    );
+
+    await makeAdapter(dynamo).checkout({
+      receipt: receipt('close_shopping_purchase'),
+      lots,
+      productTypes: productTypes.map((type) => ({
+        expected: type,
+        updated: type,
+        changed: false,
+      })),
+      membershipFence: {
+        userId: 'user-1',
+        householdId: 'home-1',
+        role: 'owner',
+        joinedAt: new Date('2026-11-16T20:00:00.000Z'),
+      },
+    });
+
+    const command = dynamo.send.mock.calls[1][0] as TransactWriteCommand;
+    expect(command.input.TransactItems).toHaveLength(100);
+    expect(command.input.TransactItems?.[1].ConditionCheck?.Key).toEqual({
+      pk: 'HOUSEHOLD_MEMBER_BY_USER#user-1',
+    });
   });
 
   it('fences a household checkout in the same transaction as its receipt and lots', async () => {

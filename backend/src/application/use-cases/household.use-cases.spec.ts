@@ -15,7 +15,10 @@ import {
   HouseholdInvite,
   HouseholdMembership,
 } from '../../domain/entities/household.entity';
-import { HouseholdRepository } from '../../domain/repositories/household.repository';
+import {
+  HouseholdRepository,
+  HouseholdSwitchConflictError,
+} from '../../domain/repositories/household.repository';
 import { User } from '../../domain/entities/user.entity';
 import { UserAccountStatus } from '../../domain/enums';
 import { UserDao } from '../ports/daos';
@@ -326,6 +329,130 @@ describe('household use cases', () => {
         2,
         previous,
       );
+    },
+  );
+
+  it.each([
+    {
+      name: 'the same confirmed switch',
+      actor: 'invited-user',
+      from: 'old-home',
+      current: 'household-1',
+      replays: true,
+    },
+    {
+      name: 'the same confirmation while the winning transaction is still in flight',
+      actor: 'invited-user',
+      from: 'old-home',
+      current: 'household-1',
+      replays: true,
+      sourceChanged: 'in-flight',
+    },
+    {
+      name: 'the same switch read while the membership is already in the destination',
+      actor: 'invited-user',
+      from: 'old-home',
+      current: 'household-1',
+      replays: true,
+      sourceChanged: 'membership',
+    },
+    {
+      name: 'the same switch read while the original home is no longer eligible',
+      actor: 'invited-user',
+      from: 'old-home',
+      current: 'household-1',
+      replays: true,
+      sourceChanged: 'eligibility',
+    },
+    {
+      name: 'a confirmation by a different account',
+      actor: 'different-user',
+      from: 'old-home',
+      current: 'household-1',
+      replays: false,
+    },
+    {
+      name: 'a confirmation from a different source',
+      actor: 'invited-user',
+      from: 'different-home',
+      current: 'household-1',
+      replays: false,
+    },
+    {
+      name: 'a second move after the original confirmation',
+      actor: 'invited-user',
+      from: 'old-home',
+      current: 'different-home',
+      replays: false,
+    },
+  ])(
+    'checks the stored result after a competing transaction for $name',
+    async ({ actor, from, current, replays, sourceChanged }) => {
+      const invite = makeInvite();
+      const accepted = makeInvite();
+      accepted.accept(new Date(), { userId: actor, fromHouseholdId: from });
+      const config = new ConfigService({ HOUSEHOLD_SWITCH_ENABLED: 'true' });
+      userDao.findById.mockResolvedValue(invitedUser);
+      repository.findInviteByTokenHash.mockResolvedValue(invite);
+      repository.findInviteById.mockResolvedValue(accepted);
+      const previous = makeMembership({
+        householdId:
+          sourceChanged === 'membership' ? 'household-1' : 'old-home',
+        userId: 'invited-user',
+        role: sourceChanged === 'eligibility' ? 'owner' : 'viewer',
+      });
+      repository.findMembershipByUserId.mockResolvedValueOnce(previous);
+      if (sourceChanged === 'in-flight') {
+        repository.findInviteById.mockResolvedValueOnce(makeInvite());
+        repository.findMembershipByUserId.mockResolvedValueOnce(previous);
+      }
+      repository.findMembershipByUserId.mockResolvedValueOnce(
+        makeMembership({
+          householdId: current,
+          userId: 'invited-user',
+          role: 'editor',
+        }),
+      );
+      repository.canSwitchFrom.mockResolvedValue(
+        sourceChanged !== 'eligibility',
+      );
+      repository.findHouseholdById.mockImplementation(async (id) =>
+        Household.fromPrimitives({
+          ...makeHousehold().toPrimitives(),
+          id,
+        }),
+      );
+      repository.findMembersByHouseholdId.mockResolvedValue([]);
+      repository.findActiveInvitesByHouseholdId.mockResolvedValue([]);
+      repository.findActivitiesByHouseholdId.mockResolvedValue([]);
+      const conflict = new HouseholdSwitchConflictError();
+      repository.acceptInvite.mockRejectedValueOnce(conflict);
+
+      const result = new AcceptHouseholdInviteUseCase(
+        repository,
+        userDao,
+        plans,
+        config,
+      ).execute({
+        userId: 'invited-user',
+        token: 'accept-token-safe',
+        switchFromHouseholdId: 'old-home',
+      });
+
+      if (replays) {
+        await expect(result).resolves.toMatchObject({
+          household: { id: 'household-1' },
+          currentMember: { userId: 'invited-user', role: 'editor' },
+        });
+      } else {
+        await expect(result).rejects.toBe(conflict);
+      }
+      expect(repository.acceptInvite).toHaveBeenCalledTimes(
+        sourceChanged === 'membership' || sourceChanged === 'eligibility'
+          ? 0
+          : 1,
+      );
+      expect(repository.saveActivity).not.toHaveBeenCalled();
     },
   );
 

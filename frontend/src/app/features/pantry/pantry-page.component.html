@@ -6,11 +6,14 @@
       <a class="secondary-button" href="/pantry">Recargar despensa</a>
     </section>
   } @else {
-  @if (checkoutReviewCount > 0 || hasShoppingDraftsForReview) {
+  @if (checkoutReviewCount > 0 || checkoutSplitReviewCount > 0 || hasShoppingDraftsForReview) {
     <section class="panel" aria-labelledby="purchases-for-review-title">
       <h2 id="purchases-for-review-title">Cierres de compra que requieren revisión</h2>
       @if (checkoutReviewCount > 0) {
         <p>Conservamos {{ checkoutReviewCount }} cierres de otro hogar o sin hogar identificado en este dispositivo. Revisa la despensa donde hiciste esas compras antes de registrarlas otra vez.</p>
+      }
+      @if (checkoutSplitReviewCount > 0) {
+        <p>Hay cierres del hogar actual que debes dividir. Descarga los datos y registra cada parte con hasta 48 tipos de producto distintos.</p>
       }
       @if (hasShoppingDraftsForReview) {
         <p>Hay borradores o intentos guardados de otro hogar o sin hogar identificado.</p>

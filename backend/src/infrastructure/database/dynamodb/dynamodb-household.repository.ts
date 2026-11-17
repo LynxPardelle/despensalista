@@ -306,6 +306,9 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
   }
 
   async markHouseholdUsed(userId: string): Promise<void> {
+    const state = await this.readSwitchState(userId);
+    if (state?.pristine === false) return;
+
     await this.dynamoDb.send(
       new TransactWriteCommand({
         TransactItems: [

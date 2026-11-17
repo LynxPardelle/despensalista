@@ -15,9 +15,194 @@ const {
   stackOutputs,
 } = require('./deployed-api-smoke.cjs');
 
-async function run() {
+const USAGE = [
+  'Usage: node scripts/deployed-household-switch-smoke.cjs --stage dev|tst|prod',
+  'Add --run in dev or tst to create temporary fixtures.',
+  'Add --run-production-fixtures in prod to create temporary production fixtures.',
+  'Fixture runs require npm run build and COGNITO_TEST_SRP_MODULE_PATH (see scripts/DEPLOYED_API_SMOKE.md).',
+].join('\n');
+
+function parseCommand(args) {
+  if (!args.length || (args.length === 1 && args[0] === '--help')) {
+    return { mode: 'help' };
+  }
+  assert.equal(args[0], '--stage');
+  const { stage } = resolveStage(args[1]);
+  if (args.length === 2) return { stage, mode: 'check' };
+  const fixtureFlag = stage === 'prod' ? '--run-production-fixtures' : '--run';
+  assert.ok(args.length === 3 && args[2] === fixtureFlag);
+  return { stage, mode: 'fixtures' };
+}
+
+function readTarget(stage, readAws = awsJson, readStack = stackOutputs) {
+  const selected = resolveStage(stage);
+  assert.equal(readAws('sts', 'get-caller-identity').Account, ACCOUNT);
+  const auth = readStack(`${selected.prefix}-cognito`);
+  const backend = readStack(`${selected.prefix}-serverless-backend`);
+  const tableName = `${selected.prefix}-users`;
+  const functionName = `${selected.prefix}-backend-api`;
+  assert.equal(backend.AppDomainName, selected.host);
+  assert.equal(backend.DynamoDbUsersTable, tableName);
+  assert.equal(backend.ServerlessBackendFunctionName, functionName);
+  assert.equal(backend.ServerlessBackendAliasName, 'live');
+
+  const { arn, version, settings } = readAws(
+    'lambda',
+    'get-function-configuration',
+    '--function-name',
+    functionName,
+    '--qualifier',
+    'live',
+    '--query',
+    '{arn:FunctionArn,version:Version,settings:Environment.Variables.{enabled:HOUSEHOLD_SWITCH_ENABLED,pool:COGNITO_USER_POOL_ID,client:COGNITO_CLIENT_ID,table:DYNAMODB_USERS_TABLE,checkout:STRIPE_BILLING_CHECKOUT_ENABLED,publicCheckout:STRIPE_BILLING_PUBLIC_CHECKOUT}}',
+  );
+  assert.equal(
+    arn,
+    `arn:aws:lambda:${REGION}:${ACCOUNT}:function:${functionName}:live`,
+    'Expected live Lambda alias',
+  );
+  assert.match(version, /^[1-9]\d*$/);
+  const poolId = auth.UserPoolId;
+  const clientId = liveCognitoClientId(
+    selected,
+    auth,
+    backend,
+    () => settings.client,
+  );
+  assert.match(poolId, /^us-east-1_[A-Za-z0-9]+$/);
+  assert.match(clientId, /^[a-z0-9]+$/);
+  assert.equal(settings.pool, poolId);
+  assert.equal(settings.client, clientId);
+  assert.equal(settings.table, tableName);
+  const table = readAws(
+    'dynamodb',
+    'describe-table',
+    '--table-name',
+    tableName,
+  ).Table;
+  assert.equal(
+    table.TableArn,
+    `arn:aws:dynamodb:${REGION}:${ACCOUNT}:table/${tableName}`,
+  );
+  assert.equal(table.TableStatus, 'ACTIVE');
+
+  let host = selected.host;
+  if (stage === 'prod') {
+    assert.ok(
+      settings.checkout === 'false' && settings.publicCheckout === 'false',
+      'Expected production Stripe Checkout closed',
+    );
+    const distributionId = backend.CloudFrontDistributionId;
+    assert.match(distributionId, /^E[A-Z0-9]+$/);
+    const distribution = readAws(
+      'cloudfront',
+      'get-distribution',
+      '--id',
+      distributionId,
+      '--query',
+      'Distribution.{arn:ARN,status:Status,enabled:DistributionConfig.Enabled,aliases:DistributionConfig.Aliases.Items}',
+    );
+    assert.equal(
+      distribution.arn,
+      `arn:aws:cloudfront::${ACCOUNT}:distribution/${distributionId}`,
+    );
+    assert.equal(distribution.status, 'Deployed');
+    assert.equal(distribution.enabled, true);
+    host = 'despensalista.com';
+    const aliases = distribution.aliases;
+    assert.ok(
+      Array.isArray(aliases) &&
+        aliases.some((alias) => alias === selected.host) &&
+        aliases.some((alias) => alias === host),
+      'Expected canonical domain on the production CloudFront distribution',
+    );
+  }
+
+  const pool = readAws(
+    'cognito-idp',
+    'describe-user-pool',
+    '--user-pool-id',
+    poolId,
+    '--query',
+    'UserPool.{id:Id,arn:Arn}',
+  );
+  assert.equal(pool.id, poolId);
+  assert.equal(
+    pool.arn,
+    `arn:aws:cognito-idp:${REGION}:${ACCOUNT}:userpool/${poolId}`,
+  );
+  const mfa = readAws(
+    'cognito-idp',
+    'get-user-pool-mfa-config',
+    '--user-pool-id',
+    poolId,
+    '--query',
+    '{mode:MfaConfiguration,totp:SoftwareTokenMfaConfiguration.Enabled}',
+  );
+  assert.deepEqual(mfa, { mode: 'ON', totp: true });
+  const client = readAws(
+    'cognito-idp',
+    'describe-user-pool-client',
+    '--user-pool-id',
+    poolId,
+    '--client-id',
+    clientId,
+    '--query',
+    'UserPoolClient.{pool:UserPoolId,client:ClientId,flows:ExplicitAuthFlows,hasSecret:ClientSecret!=`null`}',
+  );
+  assert.equal(client.pool, poolId);
+  assert.equal(client.client, clientId);
+  assert.equal(client.hasSecret, false);
+  assert.ok(client.flows.includes('ALLOW_USER_SRP_AUTH'));
+
+  return {
+    base: `https://${host}`,
+    poolId,
+    clientId,
+    tableName,
+    version,
+    householdSwitchEnabled: settings.enabled === 'true',
+  };
+}
+
+async function checkPreflight({ stage, mode }) {
+  assert.ok(
+    !Object.keys(process.env).some((key) =>
+      key.toUpperCase().startsWith('AWS_ENDPOINT_URL'),
+    ),
+    'Custom AWS endpoints are not allowed',
+  );
+  process.env.AWS_IGNORE_CONFIGURED_ENDPOINT_URLS = 'true';
+  const target = readTarget(stage);
+  const response = await fetch(`${target.base}/api/healthz`, {
+    redirect: 'error',
+    signal: AbortSignal.timeout(35_000),
+  });
+  await response.body?.cancel();
+  assert.equal(response.status, 200);
+  if (mode === 'fixtures') {
+    assert.ok(
+      target.householdSwitchEnabled,
+      'Household switching must be enabled on the live alias',
+    );
+  }
+  console.log(
+    JSON.stringify({
+      stage,
+      mode,
+      phase: 'preflight',
+      status: 'PASS',
+      version: target.version,
+      householdSwitchEnabled: target.householdSwitchEnabled,
+    }),
+  );
+  return target;
+}
+
+async function run(stage, target) {
   const srp = loadSrp();
   const sdk = require('@aws-sdk/client-cognito-identity-provider');
+  const { DescribeTableCommand } = require('@aws-sdk/client-dynamodb');
   const { ConfigService } = require('@nestjs/config');
   const {
     CognitoProfileSyncService,
@@ -37,55 +222,11 @@ async function run() {
   const {
     DynamoDbUserDao,
   } = require('../dist/src/infrastructure/database/dynamodb/dynamodb-user.dao');
-
-  const selected = resolveStage('dev');
-  assert.equal(awsJson('sts', 'get-caller-identity').Account, ACCOUNT);
-  const auth = stackOutputs(`${selected.prefix}-cognito`);
-  const backend = stackOutputs(`${selected.prefix}-serverless-backend`);
-  assert.equal(backend.AppDomainName, selected.host);
-  assert.equal(backend.DynamoDbUsersTable, 'despensalista-dev-users');
-  assert.equal(
-    backend.ServerlessBackendFunctionName,
-    'despensalista-dev-backend-api',
-  );
-  assert.equal(backend.ServerlessBackendAliasName, 'live');
-  const target = {
-    base: `https://${selected.host}`,
-    poolId: auth.UserPoolId,
-    clientId: liveCognitoClientId(selected, auth, backend),
-  };
-  assert.match(target.poolId, /^us-east-1_[A-Za-z0-9]+$/);
-  const settings = awsJson(
-    'lambda',
-    'get-function-configuration',
-    '--function-name',
-    backend.ServerlessBackendFunctionName,
-    '--qualifier',
-    'live',
-    '--query',
-    'Environment.Variables.{enabled:HOUSEHOLD_SWITCH_ENABLED,pool:COGNITO_USER_POOL_ID,client:COGNITO_CLIENT_ID,table:DYNAMODB_USERS_TABLE}',
-  );
-  assert.deepEqual(settings, {
-    enabled: 'true',
-    pool: target.poolId,
-    client: target.clientId,
-    table: backend.DynamoDbUsersTable,
-  });
-  const table = awsJson(
-    'dynamodb',
-    'describe-table',
-    '--table-name',
-    settings.table,
-  ).Table;
-  assert.equal(
-    table.TableArn,
-    `arn:aws:dynamodb:${REGION}:${ACCOUNT}:table/${settings.table}`,
-  );
-  assert.equal(table.TableStatus, 'ACTIVE');
+  const { UserId } = require('../dist/src/domain/value-objects/user-id.vo');
 
   const config = new ConfigService({
     DYNAMODB_REGION: REGION,
-    DYNAMODB_USERS_TABLE: settings.table,
+    DYNAMODB_USERS_TABLE: target.tableName,
     COGNITO_ISSUER: `https://cognito-idp.${REGION}.amazonaws.com/${target.poolId}`,
     COGNITO_CLIENT_ID: target.clientId,
     HOUSEHOLD_SWITCH_ENABLED: 'true',
@@ -99,13 +240,16 @@ async function run() {
     new HouseholdSwitchAccessService(config, households),
   );
   const verifier = new CognitoTokenVerifierService(config);
-  const cognito = new sdk.CognitoIdentityProviderClient({ region: REGION });
+  const cognito = new sdk.CognitoIdentityProviderClient({
+    region: REGION,
+    ignoreConfiguredEndpointUrls: true,
+  });
   const fixtures = [];
   let phase = 'preflight';
   let failed = false;
 
   const event = (status, extra = {}) =>
-    console.log(JSON.stringify({ stage: 'dev', phase, status, ...extra }));
+    console.log(JSON.stringify({ stage, phase, status, ...extra }));
   async function api(
     fixture,
     method,
@@ -143,15 +287,43 @@ async function run() {
     return content ? JSON.parse(content) : null;
   }
 
+  async function findCognitoUser(username) {
+    try {
+      return await cognito.send(
+        new sdk.AdminGetUserCommand({
+          UserPoolId: target.poolId,
+          Username: username,
+        }),
+      );
+    } catch (error) {
+      if (error.name === 'UserNotFoundException') return null;
+      throw error;
+    }
+  }
+
+  function fixtureSubject(attributes, account) {
+    const values = Object.fromEntries(
+      attributes.map(({ Name, Value }) => [Name, Value]),
+    );
+    assert.equal(values.email, account.email);
+    assert.equal(values.name, account.name);
+    assert.match(values.sub, /^[0-9a-f-]{36}$/);
+    if (account.sub !== undefined) assert.equal(values.sub, account.sub);
+    return values.sub;
+  }
+
   async function fixture(label) {
     const email = `qa-household-${label}-${randomUUID()}@example.invalid`;
     const account = {
       label,
       email,
+      name: email.split('@')[0],
       username: email,
       password: `Qa!7${randomBytes(32).toString('base64url')}`,
       xsrf: randomBytes(24).toString('hex'),
     };
+    assert.equal(await findCognitoUser(email), null);
+    assert.equal(await dao.findByEmail(email), null);
     fixtures.push(account);
     const created = await cognito.send(
       new sdk.AdminCreateUserCommand({
@@ -162,15 +334,12 @@ async function run() {
         UserAttributes: [
           { Name: 'email', Value: email },
           { Name: 'email_verified', Value: 'true' },
-          { Name: 'name', Value: email.split('@')[0] },
+          { Name: 'name', Value: account.name },
         ],
       }),
     );
+    account.sub = fixtureSubject(created.User.Attributes, account);
     account.username = created.User.Username;
-    account.sub = created.User.Attributes.find(
-      ({ Name }) => Name === 'sub',
-    )?.Value;
-    assert.match(account.sub, /^[0-9a-f-]{36}$/);
     await cognito.send(
       new sdk.AdminSetUserPasswordCommand({
         UserPoolId: target.poolId,
@@ -200,7 +369,14 @@ async function run() {
     return account;
   }
 
-  const home = (account) => api(account, 'GET', 'household', 200);
+  async function home(account) {
+    const workspace = await api(account, 'GET', 'household', 200);
+    if (workspace.currentMember.role === 'owner') {
+      assert.equal(workspace.household.ownerUserId, account.sub);
+      account.ownedHouseholdId = workspace.household.id;
+    }
+    return workspace;
+  }
   const invite = (from, to) =>
     api(from, 'POST', 'household/invites', 201, {
       email: to.email,
@@ -244,10 +420,17 @@ async function run() {
       closesOriginal,
     });
     assert.equal((await home(account)).household.id, before.household.id);
-    const switched = await accept(account, token, 201, before.household.id);
+    const confirm = () => accept(account, token, 201, before.household.id);
+    const attempts = await Promise.allSettled([confirm(), confirm()]);
+    for (const attempt of attempts) {
+      if (attempt.status === 'rejected') throw attempt.reason;
+    }
+    const [switched, concurrent] = attempts.map((attempt) => attempt.value);
     assert.equal(switched.household.id, after.household.id);
     assert.equal(switched.currentMember.role, 'editor');
-    const retry = await accept(account, token, 201, before.household.id);
+    assert.equal(concurrent.household.id, switched.household.id);
+    assert.deepEqual(concurrent.currentMember, switched.currentMember);
+    const retry = await confirm();
     assert.equal(retry.household.id, switched.household.id);
     assert.deepEqual(retry.currentMember, switched.currentMember);
   }
@@ -260,24 +443,13 @@ async function run() {
       pool.UserPool.Arn,
       `arn:aws:cognito-idp:${REGION}:${ACCOUNT}:userpool/${target.poolId}`,
     );
-    const mfa = await cognito.send(
-      new sdk.GetUserPoolMfaConfigCommand({ UserPoolId: target.poolId }),
+    const { Table } = await db.send(
+      new DescribeTableCommand({ TableName: target.tableName }),
     );
-    assert.equal(mfa.MfaConfiguration, 'ON');
-    assert.equal(mfa.SoftwareTokenMfaConfiguration.Enabled, true);
-    const client = await cognito.send(
-      new sdk.DescribeUserPoolClientCommand({
-        UserPoolId: target.poolId,
-        ClientId: target.clientId,
-      }),
+    assert.equal(
+      Table.TableArn,
+      `arn:aws:dynamodb:${REGION}:${ACCOUNT}:table/${target.tableName}`,
     );
-    assert.ok(
-      client.UserPoolClient.ExplicitAuthFlows.includes('ALLOW_USER_SRP_AUTH'),
-    );
-    assert.equal(client.UserPoolClient.ClientSecret, undefined);
-    await api(null, 'GET', 'healthz', 200);
-    event('PASS');
-
     phase = 'new-invitee-joins-before-household-provisioning';
     const a = await fixture('a');
     const b = await fixture('b');
@@ -384,16 +556,24 @@ async function run() {
     phase = 'cleanup';
     for (const account of fixtures.reverse()) {
       try {
-        if (account.sub && (await dao.findByAuthSubject(account.sub))) {
+        const identity = await findCognitoUser(account.username);
+        if (identity)
+          account.sub = fixtureSubject(identity.UserAttributes, account);
+        const profile = account.sub
+          ? await dao.findByAuthSubject(account.sub)
+          : null;
+        if (profile) {
+          assert.equal(profile.id.toString(), account.sub);
+          assert.equal(profile.email, account.email);
           await api(account, 'DELETE', 'profile/account', 200, {
             confirmationText: 'ELIMINAR CUENTA',
           });
-        } else {
+        } else if (identity) {
           await cognito
             .send(
               new sdk.AdminDeleteUserCommand({
                 UserPoolId: target.poolId,
-                Username: account.username,
+                Username: identity.Username,
               }),
             )
             .catch((error) => {
@@ -401,23 +581,30 @@ async function run() {
             });
         }
         await delay(300);
-        await assert.rejects(
-          cognito.send(
-            new sdk.AdminGetUserCommand({
-              UserPoolId: target.poolId,
-              Username: account.username,
-            }),
-          ),
-          { name: 'UserNotFoundException' },
-        );
+        assert.equal(await findCognitoUser(account.username), null);
+        assert.equal(await dao.findByEmail(account.email), null);
         if (account.sub) {
           assert.equal(await dao.findByAuthSubject(account.sub), null);
+          assert.equal(
+            await dao.findById(UserId.fromString(account.sub)),
+            null,
+          );
+          assert.equal(
+            await households.findMembershipByUserId(account.sub),
+            null,
+          );
           assert.deepEqual(
             await households.getHouseholdSwitchState(account.sub),
             {
               pristine: false,
               contextRequired: false,
             },
+          );
+        }
+        if (account.ownedHouseholdId) {
+          assert.equal(
+            await households.findHouseholdById(account.ownedHouseholdId),
+            null,
           );
         }
       } catch (error) {
@@ -429,6 +616,7 @@ async function run() {
         });
       }
     }
+    if (fixtures.length && !failed) event('PASS');
     cognito.destroy();
     db.client.destroy();
   }
@@ -437,29 +625,34 @@ async function run() {
   if (failed) process.exitCode = 1;
 }
 
-const args = process.argv.slice(2);
-if (!args.length || (args.length === 1 && args[0] === '--help')) {
-  console.log(
-    'Usage: node scripts/deployed-household-switch-smoke.cjs --stage dev --run\nRequires npm run build, AWS credentials and COGNITO_TEST_SRP_MODULE_PATH (see scripts/DEPLOYED_API_SMOKE.md).',
-  );
-} else if (
-  args.length === 3 &&
-  args[0] === '--stage' &&
-  args[1] === 'dev' &&
-  args[2] === '--run'
-) {
-  run().catch((error) => {
+async function main(args) {
+  let command;
+  try {
+    command = parseCommand(args);
+  } catch {
+    console.error(USAGE);
+    process.exitCode = 1;
+    return;
+  }
+  if (command.mode === 'help') {
+    console.log(USAGE);
+    return;
+  }
+  try {
+    const target = await checkPreflight(command);
+    if (command.mode === 'fixtures') await run(command.stage, target);
+  } catch (error) {
     console.error(
       JSON.stringify({
-        stage: 'dev',
+        stage: command.stage,
         phase: 'preflight',
         status: 'FAIL',
         error: error.name,
       }),
     );
     process.exitCode = 1;
-  });
-} else {
-  console.error('Only --stage dev --run is accepted.');
-  process.exitCode = 1;
+  }
 }
+
+if (require.main === module) void main(process.argv.slice(2));
+module.exports = { parseCommand, readTarget };

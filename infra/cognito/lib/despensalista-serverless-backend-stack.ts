@@ -42,7 +42,7 @@ interface DespensaListaTables {
   users: dynamodb.Table;
 }
 
-const BACKEND_DATA_CONTRACT_VERSION = '2';
+const BACKEND_DATA_CONTRACT_VERSION = '3';
 
 export class DespensaListaServerlessBackendStack extends cdk.Stack {
   constructor(
@@ -201,7 +201,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
         PERSISTENCE_PROVIDER: 'dynamodb',
         DYNAMODB_REGION: cdk.Aws.REGION,
         DYNAMODB_USERS_TABLE: tables.users.tableName,
-        HOUSEHOLD_SWITCH_ENABLED: String(stage === 'dev'),
+        HOUSEHOLD_SWITCH_ENABLED: 'true',
         DYNAMODB_PRODUCTS_TABLE: tables.products.tableName,
         DYNAMODB_PRODUCT_TYPES_TABLE: tables.productTypes.tableName,
         DYNAMODB_INVENTORY_LOTS_TABLE: tables.inventoryLots.tableName,

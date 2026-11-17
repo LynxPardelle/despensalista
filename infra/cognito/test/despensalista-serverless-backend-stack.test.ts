@@ -527,7 +527,7 @@ test('production Lambda does not trust X-Forwarded-For for rate-limit identity',
   );
   assert.equal(
     backend.Properties.Environment.Variables.BACKEND_DATA_CONTRACT_VERSION,
-    '2',
+    '3',
   );
 });
 
@@ -579,11 +579,11 @@ test('production infrastructure exposes idempotency and household headers with s
   }
 });
 
-test('household switching is enabled only in dev', () => {
+test('household switching is enabled in dev, tst and production', () => {
   for (const stage of ['dev', 'tst', 'prod'] as const) {
     synthesizeTemplate(stage).hasResourceProperties('AWS::Lambda::Function', {
       FunctionName: `despensalista-${stage}-backend-api`,
-      Environment: { Variables: { HOUSEHOLD_SWITCH_ENABLED: String(stage === 'dev') } },
+      Environment: { Variables: { HOUSEHOLD_SWITCH_ENABLED: 'true' } },
     });
   }
 });
@@ -638,7 +638,7 @@ test('production publishes an aliased Lambda with all-at-once rollback controls'
   );
   assert.equal(deploymentGroup.Properties.AlarmConfiguration.Alarms.length, 1);
   productionTemplate.hasOutput('PantryQuotaSchemaVersion', { Value: '2' });
-  productionTemplate.hasOutput('BackendDataContractVersion', { Value: '2' });
+  productionTemplate.hasOutput('BackendDataContractVersion', { Value: '3' });
   productionTemplate.hasOutput('DeploymentReleaseId', { Value: 'a'.repeat(12) });
 });
 

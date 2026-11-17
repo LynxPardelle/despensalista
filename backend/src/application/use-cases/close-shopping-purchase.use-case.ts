@@ -16,6 +16,7 @@ import { UserId } from '../../domain/value-objects/user-id.vo';
 import { mexicoCityDateLabel } from '../../domain/utils/civil-date';
 import { MAX_SHOPPING_CHECKOUT_ITEMS } from '../constants/query-limits';
 import {
+  CheckoutCapacityExceededError,
   HouseholdOriginMismatchError,
   IdempotencyPayloadConflictError,
   IdempotentMutationResult,
@@ -252,7 +253,11 @@ export class CloseShoppingPurchaseUseCase {
 }
 
 function mapMutationError(error: unknown): Error {
-  if (error instanceof HouseholdOriginMismatchError) return error;
+  if (
+    error instanceof HouseholdOriginMismatchError ||
+    error instanceof CheckoutCapacityExceededError
+  )
+    return error;
   if (
     error instanceof IdempotencyPayloadConflictError ||
     error instanceof PantryMutationConflictError ||

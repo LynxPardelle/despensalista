@@ -10,6 +10,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { getRequestId } from '../request-id';
 import { GoogleMfaRequiredException } from '../auth/google-mfa.constants';
 import {
+  CheckoutCapacityExceededError,
   HouseholdOriginMismatchError,
   IdempotencyPayloadConflictError,
   PantryMutationConflictError,
@@ -105,7 +106,11 @@ function getStatusCode(exception: unknown): number {
 }
 
 function getErrorCode(exception: unknown): string | undefined {
-  if (exception instanceof HouseholdOriginMismatchError) return exception.code;
+  if (
+    exception instanceof HouseholdOriginMismatchError ||
+    exception instanceof CheckoutCapacityExceededError
+  )
+    return exception.code;
   if (exception instanceof GoogleMfaRequiredException) return exception.code;
   if (exception instanceof PlusRequiredException) return exception.code;
   if (exception instanceof HouseholdAlreadyMemberException)

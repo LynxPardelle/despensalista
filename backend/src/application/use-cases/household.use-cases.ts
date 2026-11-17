@@ -8,6 +8,7 @@ import {
   Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   Household,
   HouseholdActivity,
@@ -16,7 +17,10 @@ import {
   HouseholdMembership,
   HouseholdRole,
 } from '../../domain/entities/household.entity';
-import { HouseholdRepository } from '../../domain/repositories/household.repository';
+import {
+  HouseholdRepository,
+  HouseholdSwitchConflictError,
+} from '../../domain/repositories/household.repository';
 import { User } from '../../domain/entities/user.entity';
 import { UserId } from '../../domain/value-objects/user-id.vo';
 import { UserDao } from '../ports/daos';
@@ -197,22 +201,17 @@ export class AcceptHouseholdInviteUseCase {
       await this.householdRepository.findMembershipByUserId(user.id.toString());
     const switchEnabled =
       this.config?.get<string>('HOUSEHOLD_SWITCH_ENABLED') === 'true';
+    const confirmedSource = switchEnabled
+      ? command.switchFromHouseholdId
+      : undefined;
     if (!invite.isActive()) {
-      const receipt = invite.toPrimitives();
-      if (
-        switchEnabled &&
-        command.switchFromHouseholdId &&
-        receipt.acceptedAt &&
-        receipt.acceptedByUserId === user.id.toString() &&
-        receipt.acceptedFromHouseholdId === command.switchFromHouseholdId &&
-        currentMembership?.householdId === invite.householdId
-      ) {
-        return buildWorkspace(
-          this.householdRepository,
-          currentMembership,
-          this.plans.getPlan(invite.householdId),
-        );
-      }
+      const replay = this.replayCompletedSwitch(
+        invite,
+        currentMembership,
+        user,
+        confirmedSource,
+      );
+      if (replay) return replay;
       throw new NotFoundException('Household invite not found');
     }
 
@@ -224,7 +223,13 @@ export class AcceptHouseholdInviteUseCase {
       const offer = switchEnabled
         ? await this.getSwitchOffer(currentMembership, invite)
         : undefined;
-      if (!offer || offer.fromHouseholdId !== command.switchFromHouseholdId) {
+      if (!offer || offer.fromHouseholdId !== confirmedSource) {
+        const replay = await this.findCompletedSwitch(
+          invite.id,
+          user,
+          confirmedSource,
+        );
+        if (replay) return replay;
         throw new HouseholdAlreadyMemberException(
           currentMembership.role,
           offer,
@@ -232,6 +237,12 @@ export class AcceptHouseholdInviteUseCase {
       }
       previous = currentMembership;
     } else if (command.switchFromHouseholdId) {
+      const replay = await this.findCompletedSwitch(
+        invite.id,
+        user,
+        confirmedSource,
+      );
+      if (replay) return replay;
       throw new ConflictException('Household membership changed');
     }
 
@@ -254,18 +265,32 @@ export class AcceptHouseholdInviteUseCase {
       invite.accept(now);
     }
     const plan = await this.plans.getPlan(invite.householdId);
-    const savedMembership = await (previous
-      ? this.householdRepository.acceptInvite(
-          invite,
-          membership,
-          plan.memberLimit,
-          previous,
-        )
-      : this.householdRepository.acceptInvite(
-          invite,
-          membership,
-          plan.memberLimit,
-        ));
+    let savedMembership: HouseholdMembership;
+    try {
+      savedMembership = await (previous
+        ? this.householdRepository.acceptInvite(
+            invite,
+            membership,
+            plan.memberLimit,
+            previous,
+          )
+        : this.householdRepository.acceptInvite(
+            invite,
+            membership,
+            plan.memberLimit,
+          ));
+    } catch (error) {
+      if (previous && error instanceof HouseholdSwitchConflictError) {
+        const replay = await this.findCompletedSwitch(
+          invite.id,
+          user,
+          previous.householdId,
+          true,
+        );
+        if (replay) return replay;
+      }
+      throw error;
+    }
     await recordHouseholdActivity(this.householdRepository, {
       householdId: invite.householdId,
       type: 'invite_accepted',
@@ -280,6 +305,64 @@ export class AcceptHouseholdInviteUseCase {
       this.householdRepository,
       savedMembership,
       Promise.resolve(plan),
+    );
+  }
+
+  private async findCompletedSwitch(
+    inviteId: string,
+    user: User,
+    fromHouseholdId: string | undefined,
+    waitForCommit = false,
+  ): Promise<HouseholdWorkspace | undefined> {
+    if (!fromHouseholdId) return undefined;
+
+    // A competing transaction can be in flight when DynamoDB returns a conflict.
+    for (const backoff of waitForCommit ? [0, 50, 100, 200] : [0]) {
+      if (backoff) await delay(backoff);
+      const invite = await this.householdRepository.findInviteById(inviteId);
+      if (!invite) return undefined;
+      const membership = await this.householdRepository.findMembershipByUserId(
+        user.id.toString(),
+      );
+      const replay = this.replayCompletedSwitch(
+        invite,
+        membership,
+        user,
+        fromHouseholdId,
+      );
+      if (replay) return replay;
+      if (
+        !invite.isActive() ||
+        (membership?.householdId !== fromHouseholdId &&
+          membership?.householdId !== invite.householdId)
+      ) {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  private replayCompletedSwitch(
+    invite: HouseholdInvite,
+    membership: HouseholdMembership | null,
+    user: User,
+    fromHouseholdId: string | undefined,
+  ): Promise<HouseholdWorkspace> | undefined {
+    const receipt = invite.toPrimitives();
+    if (
+      !fromHouseholdId ||
+      !receipt.acceptedAt ||
+      receipt.acceptedByUserId !== user.id.toString() ||
+      receipt.acceptedFromHouseholdId !== fromHouseholdId ||
+      normalizeEmail(receipt.invitedEmail) !== normalizeEmail(user.email) ||
+      membership?.householdId !== receipt.householdId
+    ) {
+      return undefined;
+    }
+    return buildWorkspace(
+      this.householdRepository,
+      membership,
+      this.plans.getPlan(receipt.householdId),
     );
   }
 

@@ -150,6 +150,7 @@ interface PendingShoppingCheckout {
   items: CloseShoppingPurchaseItemRequest[];
   queuedOffline?: boolean;
   firstPurchase?: boolean;
+  requiresSplit?: boolean;
 }
 
 type ScopedShoppingCheckout = PendingShoppingCheckout & { originHouseholdId: string };
@@ -340,6 +341,9 @@ const SHOPPING_LOCATION_ORDER = [
 ];
 const ARCHIVED_PAGE_SIZE = 50;
 const SHOPPING_CHECKOUT_MAX_ITEMS = 49;
+const SHOPPING_CHECKOUT_MAX_DISTINCT_TYPES = 48;
+const SHOPPING_CHECKOUT_SPLIT_MESSAGE =
+  `El cierre admite hasta ${SHOPPING_CHECKOUT_MAX_DISTINCT_TYPES} tipos de producto distintos. Divide la compra y registra cada parte por separado.`;
 const IDEMPOTENCY_RECEIPT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Component({
@@ -633,6 +637,7 @@ export class PantryPageComponent implements OnInit {
   voiceCaptureStatus: string | null = null;
   pendingShoppingCheckoutCount = 0;
   checkoutReviewCount = 0;
+  protected checkoutSplitReviewCount = 0;
   protected hasShoppingDraftsForReview = false;
   firstPurchasePending = false;
   firstPurchaseDraft: FirstPurchaseDraft | null = null;
@@ -2605,6 +2610,14 @@ export class PantryPageComponent implements OnInit {
         `El cierre atómico admite como máximo ${SHOPPING_CHECKOUT_MAX_ITEMS} productos por compra.`;
       return;
     }
+    if (
+      new Set(requestItems.map(item => item.productTypeId)).size > SHOPPING_CHECKOUT_MAX_DISTINCT_TYPES &&
+      !this.checkoutsForCurrentHousehold(this.loadPendingShoppingCheckouts()).some(checkout => !checkout.queuedOffline)
+    ) {
+      this.shoppingCheckoutStatus = SHOPPING_CHECKOUT_SPLIT_MESSAGE;
+      this.persistShoppingTripDraft();
+      return;
+    }
 
     const pendingCheckout = this.enqueuePendingShoppingCheckout(requestItems, firstPurchase);
 
@@ -2661,6 +2674,10 @@ export class PantryPageComponent implements OnInit {
         error: (error) => {
           if (isPantryHouseholdMismatch(error)) {
             this.pantryScope.markChanged();
+            return;
+          }
+          if (this.isCheckoutCapacityConflict(error)) {
+            this.holdCheckoutForSplit(pendingCheckout.id);
             return;
           }
           if (this.isMutationConflict(error)) {
@@ -3730,7 +3747,11 @@ export class PantryPageComponent implements OnInit {
 
     const setOnline = () => {
       this.isOffline = false;
-      this.flushPendingShoppingCheckouts();
+      if (this.localStateHouseholdId) {
+        this.flushPendingShoppingCheckouts();
+      } else {
+        this.loadOverview();
+      }
       this.changeDetector.markForCheck();
     };
     const setOffline = () => {
@@ -4001,6 +4022,10 @@ export class PantryPageComponent implements OnInit {
             this.changeDetector.markForCheck();
             return;
           }
+          if (this.isCheckoutCapacityConflict(error)) {
+            this.holdCheckoutForSplit(nextCheckout.id);
+            return;
+          }
           if (this.isMutationConflict(error)) {
             this.removePendingShoppingCheckout(nextCheckout.id);
             this.shoppingCheckoutStatus =
@@ -4071,19 +4096,30 @@ export class PantryPageComponent implements OnInit {
   private checkoutsForCurrentHousehold(checkouts: PendingShoppingCheckout[]): ScopedShoppingCheckout[] {
     const householdId = this.localStateHouseholdId;
     return checkouts.filter((checkout): checkout is ScopedShoppingCheckout =>
-      householdId !== null && checkout.originHouseholdId === householdId);
+      householdId !== null && checkout.originHouseholdId === householdId && !checkout.requiresSplit);
   }
 
   private updateCheckoutCounts(checkouts: PendingShoppingCheckout[]): void {
     const local = this.checkoutsForCurrentHousehold(checkouts);
     this.pendingShoppingCheckoutCount = local.length;
     this.firstPurchasePending = local.some((checkout) => checkout.firstPurchase);
-    this.checkoutReviewCount = checkouts.length - local.length;
+    this.checkoutSplitReviewCount = checkouts.filter(checkout =>
+      checkout.originHouseholdId === this.localStateHouseholdId && checkout.requiresSplit).length;
+    this.checkoutReviewCount = checkouts.length - local.length - this.checkoutSplitReviewCount;
+  }
+
+  private holdCheckoutForSplit(id: string): void {
+    this.persistPendingShoppingCheckouts(
+      this.loadPendingShoppingCheckouts().map(checkout =>
+        checkout.id === id ? { ...checkout, requiresSplit: true } : checkout),
+    );
+    this.shoppingCheckoutStatus = SHOPPING_CHECKOUT_SPLIT_MESSAGE;
+    this.changeDetector.markForCheck();
   }
 
   protected downloadPurchasesForReview(): void {
     const pendingPurchases = this.loadPendingShoppingCheckouts().filter(checkout =>
-      !checkout.originHouseholdId || checkout.originHouseholdId !== this.localStateHouseholdId);
+      checkout.requiresSplit || !checkout.originHouseholdId || checkout.originHouseholdId !== this.localStateHouseholdId);
     this.downloadTextFile(JSON.stringify({ pendingPurchases, drafts: this.shoppingDraftsForReview() }, null, 2),
       'despensalista-compras-para-revisar.json', 'application/json');
   }
@@ -4279,7 +4315,8 @@ export class PantryPageComponent implements OnInit {
   discardExpiredPendingCheckouts(): void {
     this.persistPendingShoppingCheckouts(
       this.loadPendingShoppingCheckouts().filter(checkout =>
-        checkout.originHouseholdId !== this.localStateHouseholdId || !this.isExpiredMutation(checkout.createdAt)),
+        checkout.requiresSplit || checkout.originHouseholdId !== this.localStateHouseholdId ||
+        !this.isExpiredMutation(checkout.createdAt)),
     );
     this.shoppingCheckoutStatus = 'Cierres vencidos descartados. Registra solo los productos que falten en tu despensa.';
     this.loadOverview();
@@ -4630,6 +4667,12 @@ export class PantryPageComponent implements OnInit {
 
   private isMutationConflict(error: unknown): boolean {
     return error instanceof HttpErrorResponse && error.status === 409;
+  }
+
+  private isCheckoutCapacityConflict(error: unknown): boolean {
+    return error instanceof HttpErrorResponse &&
+      error.status === 409 &&
+      error.error?.code === 'CHECKOUT_CAPACITY_EXCEEDED';
   }
 
   private isNonRetryableClientError(error: unknown): boolean {
