@@ -18,6 +18,26 @@ import { DynamoDbHouseholdRepository } from './dynamodb-household.repository';
 import { HouseholdMemberLimitError } from '../../../domain/repositories/household.repository';
 
 describe('DynamoDbHouseholdRepository', () => {
+  it('skips further writes once a household is marked as used', async () => {
+    const send = jest.fn().mockResolvedValue({
+      Item: { pristine: false, contextRequired: true },
+    });
+    const repository = new DynamoDbHouseholdRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      makeConfigService(),
+    );
+
+    await repository.markHouseholdUsed('user-1');
+
+    expect(send).toHaveBeenCalledTimes(1);
+    const command = send.mock.calls[0][0] as GetCommand;
+    expect(command).toBeInstanceOf(GetCommand);
+    expect(command.input).toMatchObject({
+      Key: { pk: 'HOUSEHOLD_SWITCH_STATE#user-1' },
+      ConsistentRead: true,
+    });
+  });
+
   it('claims one household per user and creates the owner atomically', async () => {
     const send = jest.fn().mockResolvedValue({});
     const repository = new DynamoDbHouseholdRepository(
@@ -119,6 +139,153 @@ describe('DynamoDbHouseholdRepository', () => {
             }),
           }),
         }),
+      ]),
+    );
+  });
+
+  it('releases the old seat, claims the new seat and consumes a switch invite atomically', async () => {
+    const send = jest.fn().mockResolvedValue({
+      Item: { memberUserIds: new Set(['owner', 'user-1']) },
+    });
+    const repository = new DynamoDbHouseholdRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      makeConfigService(),
+    );
+    const now = new Date();
+    const membership = testMember();
+    const previous = HouseholdMembership.fromPrimitives({
+      ...membership.toPrimitives(),
+      householdId: 'source',
+      role: 'viewer',
+    });
+    const invite = HouseholdInvite.create({
+      householdId: membership.householdId,
+      invitedEmail: 'user@example.com',
+      invitedByUserId: 'owner',
+      role: 'editor',
+      tokenHash: 'b'.repeat(64),
+      createdAt: now,
+      expiresAt: new Date(now.getTime() + 60_000),
+    });
+    invite.accept(now);
+
+    await repository.acceptInvite(invite, membership, 2, previous);
+
+    const transaction = send.mock.calls
+      .map(([command]) => command as unknown)
+      .find((command) => command instanceof TransactWriteCommand);
+    expect(transaction?.input.TransactItems).toEqual(
+      expect.arrayContaining([
+        {
+          Update: expect.objectContaining({
+            Key: { pk: 'HOUSEHOLD#source' },
+            UpdateExpression: 'DELETE memberUserIds :leavingUsers',
+            ConditionExpression: expect.stringContaining(
+              'attribute_not_exists(deleting)',
+            ),
+          }),
+        },
+        {
+          Put: expect.objectContaining({
+            Item: expect.objectContaining({
+              pk: 'HOUSEHOLD_MEMBER_BY_USER#user-1',
+              householdId: membership.householdId,
+            }),
+            ConditionExpression: expect.stringContaining(
+              'joinedAt = :previousJoinedAt',
+            ),
+            ExpressionAttributeValues: expect.objectContaining({
+              ':previousHousehold': 'source',
+              ':previousRole': 'viewer',
+            }),
+          }),
+        },
+      ]),
+    );
+  });
+
+  it('only retires a singleton automatic home while the unused marker is current', async () => {
+    const send = jest
+      .fn()
+      .mockResolvedValueOnce({ Item: { memberUserIds: new Set(['owner']) } })
+      .mockResolvedValueOnce({
+        Item: {
+          ownerUserId: 'user-1',
+          memberUserIds: new Set(['user-1']),
+          creationActivityId: 'created',
+        },
+      })
+      .mockResolvedValueOnce({});
+    const repository = new DynamoDbHouseholdRepository(
+      { send } as unknown as DynamoDbDocumentClientService,
+      makeConfigService(),
+    );
+    const now = new Date();
+    const membership = testMember();
+    const previous = HouseholdMembership.fromPrimitives({
+      ...membership.toPrimitives(),
+      householdId: 'source',
+      role: 'owner',
+      contextVersion: 'source-version',
+    });
+    const invite = HouseholdInvite.create({
+      householdId: membership.householdId,
+      invitedEmail: 'user@example.com',
+      invitedByUserId: 'owner',
+      role: 'editor',
+      tokenHash: 'b'.repeat(64),
+      createdAt: now,
+      expiresAt: new Date(now.getTime() + 60_000),
+    });
+    invite.accept(now);
+
+    await repository.acceptInvite(invite, membership, 2, previous);
+
+    const transaction = send.mock.calls[2][0] as TransactWriteCommand;
+    expect(transaction.input.TransactItems).toEqual(
+      expect.arrayContaining([
+        {
+          Delete: expect.objectContaining({
+            Key: { pk: 'HOUSEHOLD#source' },
+            ConditionExpression: expect.stringContaining(
+              'size(memberUserIds) = :singleMember',
+            ),
+          }),
+        },
+        {
+          Delete: expect.objectContaining({
+            Key: { pk: 'HOUSEHOLD_ACTIVITY#created' },
+          }),
+        },
+        {
+          Update: expect.objectContaining({
+            Key: { pk: 'HOUSEHOLD_SWITCH_STATE#user-1' },
+            ConditionExpression: 'pristine = :pristine',
+            ExpressionAttributeValues: expect.objectContaining({
+              ':pristine': true,
+              ':required': true,
+              ':used': false,
+            }),
+          }),
+        },
+        {
+          Put: expect.objectContaining({
+            Item: expect.objectContaining({
+              pk: 'HOUSEHOLD_MEMBER_BY_USER#user-1',
+            }),
+            ConditionExpression: expect.stringContaining(
+              'contextVersion = :previousVersion',
+            ),
+          }),
+        },
+        {
+          Put: expect.objectContaining({
+            Item: expect.objectContaining({
+              acceptedByUserId: 'user-1',
+              acceptedFromHouseholdId: 'source',
+            }),
+          }),
+        },
       ]),
     );
   });
@@ -734,7 +901,7 @@ describe('DynamoDbHouseholdRepository', () => {
       ),
     ).toEqual([
       'actorUserId = :user OR targetUserId = :user',
-      'invitedByUserId = :user OR invitedEmail = :email',
+      'invitedByUserId = :user OR invitedEmail = :email OR acceptedByUserId = :user',
     ]);
     expect(JSON.stringify(writes)).toContain('Usuario eliminado');
     expect(JSON.stringify(writes)).toContain('deleted@example.invalid');

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 import { MongooseModule } from '@nestjs/mongoose';
 import * as Joi from 'joi';
 import { AppController } from './app.controller';
@@ -31,6 +32,8 @@ import {
 } from './application/tokens';
 import { CognitoAuthTransactionService } from './application/services/cognito-auth-transaction.service';
 import { CognitoProfileSyncService } from './application/services/cognito-profile-sync.service';
+import { HouseholdSwitchAccessService } from './application/services/household-switch-access.service';
+import { HouseholdWriteOriginInterceptor } from './infrastructure/http/auth/household-write-origin.interceptor';
 import { ArchiveInventoryLotUseCase } from './application/use-cases/archive-inventory-lot.use-case';
 import { ArchiveProductTypeUseCase } from './application/use-cases/archive-product-type.use-case';
 import { CloseShoppingPurchaseUseCase } from './application/use-cases/close-shopping-purchase.use-case';
@@ -348,6 +351,9 @@ const wasteEventRepositoryProvider = useDynamoDb
           otherwise: Joi.string().optional(),
         }),
         API_PREFIX: Joi.string().default('api'),
+        HOUSEHOLD_SWITCH_ENABLED: Joi.string()
+          .valid('true', 'false')
+          .default('false'),
         ORIGIN_VERIFY_HEADER_NAME: Joi.string()
           .pattern(/^[a-z0-9-]+$/)
           .optional(),
@@ -552,6 +558,8 @@ const wasteEventRepositoryProvider = useDynamoDb
     GetPlusHouseholdSummaryUseCase,
     CognitoAuthTransactionService,
     CognitoProfileSyncService,
+    HouseholdSwitchAccessService,
+    { provide: APP_INTERCEPTOR, useClass: HouseholdWriteOriginInterceptor },
     CognitoAuthUrlBuilderService,
     CognitoTokenClientService,
     CognitoTokenVerifierService,

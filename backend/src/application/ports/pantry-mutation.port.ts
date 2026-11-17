@@ -8,6 +8,7 @@ import { ShoppingList } from '../../domain/entities/shopping-list.entity';
 import { Product } from '../../domain/entities/product.entity';
 import { ShoppingShare } from '../../domain/entities/shopping-share.entity';
 import { MonthlyPurchaseSpend } from './monthly-purchase-spend-reader';
+import type { HouseholdRole } from '../../domain/entities/household.entity';
 
 export type PantryOperation =
   | 'consume_inventory_lot'
@@ -29,6 +30,7 @@ export interface PantryOperationContext {
   requestHash: string;
   createdAt: Date;
   expiresAt: Date;
+  checkoutHouseholdId?: string;
 }
 
 export type PantryOperationLookup = PantryOperationContext;
@@ -69,6 +71,15 @@ export interface CloseShoppingPurchaseMutation {
   lots: InventoryLot[];
   productTypes: ProductTypeTransactionChange[];
   purchaseSpend?: MonthlyPurchaseSpend;
+  membershipFence?: PurchaseMembershipFence;
+}
+
+export interface PurchaseMembershipFence {
+  userId: string;
+  householdId: string;
+  role: HouseholdRole;
+  joinedAt: Date;
+  contextVersion?: string;
 }
 
 export interface PantryDeletionRequest {
@@ -150,6 +161,28 @@ export class PantryMutationConflictError extends Error {
   constructor(message = 'Pantry changed while the operation was running') {
     super(message);
     this.name = 'PantryMutationConflictError';
+  }
+}
+
+export class HouseholdOriginMismatchError extends PantryMutationConflictError {
+  readonly code = 'HOUSEHOLD_ORIGIN_MISMATCH';
+
+  constructor(
+    message = 'La compra pertenece a otro hogar o no tiene un hogar de origen confirmado. Revisa la compra antes de continuar.',
+  ) {
+    super(message);
+    this.name = 'HouseholdOriginMismatchError';
+  }
+}
+
+export class CheckoutCapacityExceededError extends PantryMutationConflictError {
+  readonly code = 'CHECKOUT_CAPACITY_EXCEEDED';
+
+  constructor() {
+    super(
+      'El cierre admite hasta 48 tipos de producto distintos. Divide la compra y registra cada parte por separado.',
+    );
+    this.name = 'CheckoutCapacityExceededError';
   }
 }
 

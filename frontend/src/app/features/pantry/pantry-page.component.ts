@@ -13,22 +13,20 @@ import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { HttpErrorResponse } from '@angular/common/http';
 import { FormBuilder, Validators } from '@angular/forms';
 import { Store } from '@ngrx/store';
-import { BehaviorSubject, Observable, TimeoutError, of, throwError } from 'rxjs';
+import { BehaviorSubject, Observable, TimeoutError, combineLatest, of, throwError } from 'rxjs';
 import {
   catchError,
   debounceTime,
   distinctUntilChanged,
-  filter,
   finalize,
   map,
   startWith,
   switchMap,
-  take,
   timeout,
 } from 'rxjs/operators';
 import { AuthFacade } from '../../core/services/auth.facade';
+import { isPantryHouseholdMismatch, PantryHouseholdScope } from '../../core/services/pantry-household-scope';
 import { PantryService } from '../../core/services/pantry.service';
-import { AuthUser } from '../../shared/models/auth.model';
 import {
   ArchivedPantryItems,
   CloseShoppingPurchaseItemRequest,
@@ -147,11 +145,15 @@ interface PendingShoppingCheckout {
   id: string;
   idempotencyKey: string;
   ownerUserId: string;
+  originHouseholdId?: string;
   createdAt: Date;
   items: CloseShoppingPurchaseItemRequest[];
   queuedOffline?: boolean;
   firstPurchase?: boolean;
+  requiresSplit?: boolean;
 }
+
+type ScopedShoppingCheckout = PendingShoppingCheckout & { originHouseholdId: string };
 
 interface FirstPurchaseDraft {
   name: string;
@@ -339,6 +341,9 @@ const SHOPPING_LOCATION_ORDER = [
 ];
 const ARCHIVED_PAGE_SIZE = 50;
 const SHOPPING_CHECKOUT_MAX_ITEMS = 49;
+const SHOPPING_CHECKOUT_MAX_DISTINCT_TYPES = 48;
+const SHOPPING_CHECKOUT_SPLIT_MESSAGE =
+  `El cierre admite hasta ${SHOPPING_CHECKOUT_MAX_DISTINCT_TYPES} tipos de producto distintos. Divide la compra y registra cada parte por separado.`;
 const IDEMPOTENCY_RECEIPT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Component({
@@ -352,6 +357,7 @@ export class PantryPageComponent implements OnInit {
   private readonly formBuilder = inject(FormBuilder);
   private readonly authFacade = inject(AuthFacade);
   private readonly pantryService = inject(PantryService);
+  protected readonly pantryScope = inject(PantryHouseholdScope);
   private readonly store = inject(Store);
   private readonly destroyRef = inject(DestroyRef);
   private readonly platformId = inject(PLATFORM_ID);
@@ -369,6 +375,7 @@ export class PantryPageComponent implements OnInit {
   private readonly savedShoppingListsStorageKey =
     'despensalista.savedShoppingLists';
   private localStateOwnerUserId: string | null = null;
+  private localStateHouseholdId: string | null = null;
 
   readonly username$ = this.authFacade.currentUsername$;
   readonly loading$ = this.store.select(selectPantryLoading);
@@ -629,6 +636,9 @@ export class PantryPageComponent implements OnInit {
   voiceCaptureListening = false;
   voiceCaptureStatus: string | null = null;
   pendingShoppingCheckoutCount = 0;
+  checkoutReviewCount = 0;
+  protected checkoutSplitReviewCount = 0;
+  protected hasShoppingDraftsForReview = false;
   firstPurchasePending = false;
   firstPurchaseDraft: FirstPurchaseDraft | null = null;
   firstPurchaseResult: { name?: string } | null = null;
@@ -648,17 +658,22 @@ export class PantryPageComponent implements OnInit {
       this.loadOverview();
       this.loadWasteOverview();
       this.watchNetworkState();
-      this.authFacade.currentUser$
-        .pipe(
-          filter((user): user is AuthUser => user !== null),
-          take(1),
-          takeUntilDestroyed(this.destroyRef),
-        )
-        .subscribe((user) => {
+      combineLatest([this.authFacade.currentUser$, this.overview$, this.loading$])
+        .pipe(takeUntilDestroyed(this.destroyRef))
+        .subscribe(([user, overview, loading]) => {
+          if (this.localStateOwnerUserId && user?.id !== this.localStateOwnerUserId) {
+            this.pantryScope.markChanged();
+            return;
+          }
+          if (!user || !overview?.householdId || loading || !this.pantryScope.bind(overview.householdId)) return;
+          if (this.localStateHouseholdId) return;
+
           this.localStateOwnerUserId = user.id;
+          this.localStateHouseholdId = overview.householdId;
           this.restoreFirstPurchaseDraft();
           this.loadLocalShoppingSupport();
           this.loadSavedShoppingLists();
+          this.changeDetector.markForCheck();
         });
       this.setupVoiceCapture();
       this.setupBarcodeCapture();
@@ -2471,7 +2486,7 @@ export class PantryPageComponent implements OnInit {
   }
 
   submitFirstPurchase(): void {
-    if (this.firstPurchaseBusy || this.firstPurchasePending) return;
+    if (this.firstPurchaseBusy || this.firstPurchasePending || !this.ensureCheckoutScope()) return;
 
     const raw = this.firstPurchaseForm.getRawValue();
     const quantity = Number(raw.quantity);
@@ -2589,9 +2604,18 @@ export class PantryPageComponent implements OnInit {
     requestItems: CloseShoppingPurchaseItemRequest[],
     firstPurchase = false,
   ): void {
+    if (!this.ensureCheckoutScope()) return;
     if (requestItems.length > SHOPPING_CHECKOUT_MAX_ITEMS) {
       this.shoppingCheckoutStatus =
         `El cierre atómico admite como máximo ${SHOPPING_CHECKOUT_MAX_ITEMS} productos por compra.`;
+      return;
+    }
+    if (
+      new Set(requestItems.map(item => item.productTypeId)).size > SHOPPING_CHECKOUT_MAX_DISTINCT_TYPES &&
+      !this.checkoutsForCurrentHousehold(this.loadPendingShoppingCheckouts()).some(checkout => !checkout.queuedOffline)
+    ) {
+      this.shoppingCheckoutStatus = SHOPPING_CHECKOUT_SPLIT_MESSAGE;
+      this.persistShoppingTripDraft();
       return;
     }
 
@@ -2620,7 +2644,7 @@ export class PantryPageComponent implements OnInit {
 
     this.pantryService
       .closeShoppingPurchase(
-        { items: requestItems },
+        { items: pendingCheckout.items, originHouseholdId: pendingCheckout.originHouseholdId },
         pendingCheckout.idempotencyKey,
       )
       .pipe(
@@ -2648,6 +2672,14 @@ export class PantryPageComponent implements OnInit {
           this.loadOverview();
         },
         error: (error) => {
+          if (isPantryHouseholdMismatch(error)) {
+            this.pantryScope.markChanged();
+            return;
+          }
+          if (this.isCheckoutCapacityConflict(error)) {
+            this.holdCheckoutForSplit(pendingCheckout.id);
+            return;
+          }
           if (this.isMutationConflict(error)) {
             this.removePendingShoppingCheckout(pendingCheckout.id);
             this.shoppingCheckoutStatus =
@@ -2667,6 +2699,12 @@ export class PantryPageComponent implements OnInit {
           this.persistShoppingTripDraft();
         },
       });
+  }
+
+  private ensureCheckoutScope(): boolean {
+    if (this.localStateHouseholdId && this.pantryScope.householdId === this.localStateHouseholdId) return true;
+    this.shoppingCheckoutStatus = 'No pudimos confirmar el hogar de esta compra. Recarga la despensa e inténtalo de nuevo.';
+    return false;
   }
 
   clearShoppingTripDraft(items: ShoppingPlanItem[]): void {
@@ -3482,6 +3520,7 @@ export class PantryPageComponent implements OnInit {
   }
 
   private loadLocalShoppingSupport(): void {
+    this.hasShoppingDraftsForReview = this.shoppingDraftsForReview().length > 0;
     const storedBudget = this.getLocalValue(this.shoppingBudgetStorageKey);
 
     if (storedBudget) {
@@ -3566,8 +3605,7 @@ export class PantryPageComponent implements OnInit {
     }
 
     const pendingCheckouts = this.loadPendingShoppingCheckouts();
-    this.pendingShoppingCheckoutCount = pendingCheckouts.length;
-    this.firstPurchasePending = pendingCheckouts.some((checkout) => checkout.firstPurchase);
+    this.updateCheckoutCounts(pendingCheckouts);
 
     if (!this.isOffline) {
       this.flushPendingShoppingCheckouts();
@@ -3709,7 +3747,11 @@ export class PantryPageComponent implements OnInit {
 
     const setOnline = () => {
       this.isOffline = false;
-      this.flushPendingShoppingCheckouts();
+      if (this.localStateHouseholdId) {
+        this.flushPendingShoppingCheckouts();
+      } else {
+        this.loadOverview();
+      }
       this.changeDetector.markForCheck();
     };
     const setOffline = () => {
@@ -3883,13 +3925,13 @@ export class PantryPageComponent implements OnInit {
   private enqueuePendingShoppingCheckout(
     items: CloseShoppingPurchaseItemRequest[],
     firstPurchase: boolean,
-  ): PendingShoppingCheckout | null {
-    if (!this.localStateOwnerUserId) {
+  ): ScopedShoppingCheckout | null {
+    if (!this.localStateOwnerUserId || !this.localStateHouseholdId) {
       return null;
     }
 
     const pending = this.loadPendingShoppingCheckouts();
-    const unresolved = pending.find(checkout => !checkout.queuedOffline);
+    const unresolved = this.checkoutsForCurrentHousehold(pending).find(checkout => !checkout.queuedOffline);
     if (unresolved) {
       return !this.isExpiredMutation(unresolved.createdAt) &&
         Boolean(unresolved.firstPurchase) === firstPurchase &&
@@ -3899,10 +3941,11 @@ export class PantryPageComponent implements OnInit {
     }
 
     const idempotencyKey = this.createIdempotencyKey();
-    const pendingCheckout: PendingShoppingCheckout = {
+    const pendingCheckout: ScopedShoppingCheckout = {
       id: idempotencyKey,
       idempotencyKey,
       ownerUserId: this.localStateOwnerUserId,
+      originHouseholdId: this.localStateHouseholdId,
       createdAt: new Date(),
       items,
       queuedOffline: this.isOffline,
@@ -3923,21 +3966,22 @@ export class PantryPageComponent implements OnInit {
       return null;
     }
 
-    this.pendingShoppingCheckoutCount = pendingCheckouts.length;
-    this.firstPurchasePending = pendingCheckouts.some((checkout) => checkout.firstPurchase);
+    this.updateCheckoutCounts(pendingCheckouts);
     return pendingCheckout;
   }
 
   private flushPendingShoppingCheckouts(): void {
-    if (this.isOffline || this.pendingShoppingCheckoutSyncing || this.shoppingCheckoutBusy) {
+    if (this.isOffline || this.pendingShoppingCheckoutSyncing || this.shoppingCheckoutBusy ||
+        !this.localStateHouseholdId || this.pantryScope.householdId !== this.localStateHouseholdId) {
       return;
     }
 
-    const pending = this.loadPendingShoppingCheckouts();
+    const checkouts = this.loadPendingShoppingCheckouts();
+    this.updateCheckoutCounts(checkouts);
+    const pending = this.checkoutsForCurrentHousehold(checkouts);
     const nextCheckout = pending.find(checkout => !this.isExpiredMutation(checkout.createdAt));
 
     if (!nextCheckout) {
-      this.pendingShoppingCheckoutCount = pending.length;
       if (pending.length) {
         this.shoppingCheckoutStatus =
           'Hay cierres pendientes de hace más de siete días. Revisa la despensa antes de descartarlos y registrar lo que falte.';
@@ -3948,7 +3992,7 @@ export class PantryPageComponent implements OnInit {
     this.pendingShoppingCheckoutSyncing = true;
     this.pantryService
       .closeShoppingPurchase(
-        { items: nextCheckout.items },
+        { items: nextCheckout.items, originHouseholdId: nextCheckout.originHouseholdId },
         nextCheckout.idempotencyKey,
       )
       .pipe(timeout(this.lotRegistrationTimeoutMs))
@@ -3956,7 +4000,7 @@ export class PantryPageComponent implements OnInit {
         next: (result) => {
           this.removePendingShoppingCheckout(nextCheckout.id);
           if (nextCheckout.firstPurchase) this.completeFirstPurchase();
-          const remainingCheckouts = this.loadPendingShoppingCheckouts();
+          const remainingCheckouts = this.checkoutsForCurrentHousehold(this.loadPendingShoppingCheckouts());
           if (!nextCheckout.firstPurchase && remainingCheckouts.length === 0) {
             this.shoppingTripDraft = {};
             this.removeLocalValue(this.shoppingTripStorageKey);
@@ -3973,6 +4017,15 @@ export class PantryPageComponent implements OnInit {
         },
         error: (error) => {
           this.pendingShoppingCheckoutSyncing = false;
+          if (isPantryHouseholdMismatch(error)) {
+            this.pantryScope.markChanged();
+            this.changeDetector.markForCheck();
+            return;
+          }
+          if (this.isCheckoutCapacityConflict(error)) {
+            this.holdCheckoutForSplit(nextCheckout.id);
+            return;
+          }
           if (this.isMutationConflict(error)) {
             this.removePendingShoppingCheckout(nextCheckout.id);
             this.shoppingCheckoutStatus =
@@ -4027,8 +4080,7 @@ export class PantryPageComponent implements OnInit {
   private persistPendingShoppingCheckouts(
     checkouts: PendingShoppingCheckout[]
   ): void {
-    this.pendingShoppingCheckoutCount = checkouts.length;
-    this.firstPurchasePending = checkouts.some((checkout) => checkout.firstPurchase);
+    this.updateCheckoutCounts(checkouts);
 
     if (checkouts.length === 0) {
       this.removeLocalValue(this.pendingShoppingCheckoutStorageKey);
@@ -4039,6 +4091,60 @@ export class PantryPageComponent implements OnInit {
       this.pendingShoppingCheckoutStorageKey,
       JSON.stringify(checkouts)
     );
+  }
+
+  private checkoutsForCurrentHousehold(checkouts: PendingShoppingCheckout[]): ScopedShoppingCheckout[] {
+    const householdId = this.localStateHouseholdId;
+    return checkouts.filter((checkout): checkout is ScopedShoppingCheckout =>
+      householdId !== null && checkout.originHouseholdId === householdId && !checkout.requiresSplit);
+  }
+
+  private updateCheckoutCounts(checkouts: PendingShoppingCheckout[]): void {
+    const local = this.checkoutsForCurrentHousehold(checkouts);
+    this.pendingShoppingCheckoutCount = local.length;
+    this.firstPurchasePending = local.some((checkout) => checkout.firstPurchase);
+    this.checkoutSplitReviewCount = checkouts.filter(checkout =>
+      checkout.originHouseholdId === this.localStateHouseholdId && checkout.requiresSplit).length;
+    this.checkoutReviewCount = checkouts.length - local.length - this.checkoutSplitReviewCount;
+  }
+
+  private holdCheckoutForSplit(id: string): void {
+    this.persistPendingShoppingCheckouts(
+      this.loadPendingShoppingCheckouts().map(checkout =>
+        checkout.id === id ? { ...checkout, requiresSplit: true } : checkout),
+    );
+    this.shoppingCheckoutStatus = SHOPPING_CHECKOUT_SPLIT_MESSAGE;
+    this.changeDetector.markForCheck();
+  }
+
+  protected downloadPurchasesForReview(): void {
+    const pendingPurchases = this.loadPendingShoppingCheckouts().filter(checkout =>
+      checkout.requiresSplit || !checkout.originHouseholdId || checkout.originHouseholdId !== this.localStateHouseholdId);
+    this.downloadTextFile(JSON.stringify({ pendingPurchases, drafts: this.shoppingDraftsForReview() }, null, 2),
+      'despensalista-compras-para-revisar.json', 'application/json');
+  }
+
+  private shoppingDraftsForReview(): Array<{ key: string; payload: string; originHouseholdId?: string }> {
+    if (!this.localStateOwnerUserId) return [];
+    const keys = [this.firstPurchaseStorageKey, this.shoppingTripStorageKey, this.quickCaptureStorageKey,
+      this.savedShoppingListsStorageKey, this.pendingInventoryMutationStorageKey];
+    const account = encodeURIComponent(this.localStateOwnerUserId);
+    try {
+      const storageKeys = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index));
+      return keys.flatMap((key) => {
+        const prefix = `${key}.v3.${account}.`;
+        const currentKey = this.getUserScopedStorageKey(key);
+        const previousHouseholds = storageKeys.flatMap(storedKey => {
+          if (!storedKey?.startsWith(prefix) || storedKey === currentKey) return [];
+          const payload = this.readOwnedLocalStateEnvelope(localStorage.getItem(storedKey) ?? '');
+          return payload ? [{ key, payload, originHouseholdId: decodeURIComponent(storedKey.slice(prefix.length)) }] : [];
+        });
+        const legacy = this.readOwnedLegacyLocalValue(key);
+        return [...previousHouseholds, ...(legacy ? [{ key, payload: legacy }] : [])];
+      });
+    } catch {
+      return [];
+    }
   }
 
   private async requestShoppingWakeLock(): Promise<void> {
@@ -4094,7 +4200,7 @@ export class PantryPageComponent implements OnInit {
         return this.readOwnedLocalStateEnvelope(storedValue);
       }
 
-      return this.migrateOwnedLegacyLocalValue(key);
+      return key === this.pendingShoppingCheckoutStorageKey ? this.readOwnedLegacyLocalValue(key) : null;
     } catch {
       return null;
     }
@@ -4202,12 +4308,15 @@ export class PantryPageComponent implements OnInit {
   }
 
   get hasExpiredPendingCheckouts(): boolean {
-    return this.loadPendingShoppingCheckouts().some(checkout => this.isExpiredMutation(checkout.createdAt));
+    return this.checkoutsForCurrentHousehold(this.loadPendingShoppingCheckouts())
+      .some(checkout => this.isExpiredMutation(checkout.createdAt));
   }
 
   discardExpiredPendingCheckouts(): void {
     this.persistPendingShoppingCheckouts(
-      this.loadPendingShoppingCheckouts().filter(checkout => !this.isExpiredMutation(checkout.createdAt)),
+      this.loadPendingShoppingCheckouts().filter(checkout =>
+        checkout.requiresSplit || checkout.originHouseholdId !== this.localStateHouseholdId ||
+        !this.isExpiredMutation(checkout.createdAt)),
     );
     this.shoppingCheckoutStatus = 'Cierres vencidos descartados. Registra solo los productos que falten en tu despensa.';
     this.loadOverview();
@@ -4279,8 +4388,11 @@ export class PantryPageComponent implements OnInit {
   }
 
   private getUserScopedStorageKey(key: string): string | null {
-    return this.localStateOwnerUserId
-      ? `${key}.v2.${encodeURIComponent(this.localStateOwnerUserId)}`
+    if (!this.localStateOwnerUserId) return null;
+    const owner = encodeURIComponent(this.localStateOwnerUserId);
+    if (key === this.pendingShoppingCheckoutStorageKey) return `${key}.v2.${owner}`;
+    return this.localStateHouseholdId
+      ? `${key}.v3.${owner}.${encodeURIComponent(this.localStateHouseholdId)}`
       : null;
   }
 
@@ -4300,14 +4412,13 @@ export class PantryPageComponent implements OnInit {
     }
   }
 
-  private migrateOwnedLegacyLocalValue(key: string): string | null {
-    const legacyValue = localStorage.getItem(key);
-
-    if (legacyValue === null) {
-      return null;
-    }
-
+  private readOwnedLegacyLocalValue(key: string): string | null {
+    if (!this.localStateOwnerUserId) return null;
     try {
+      const previous = localStorage.getItem(`${key}.v2.${encodeURIComponent(this.localStateOwnerUserId)}`);
+      if (previous !== null) return this.readOwnedLocalStateEnvelope(previous);
+      const legacyValue = localStorage.getItem(key);
+      if (legacyValue === null) return null;
       const parsedValue: unknown = JSON.parse(legacyValue);
 
       if (this.isUserScopedLocalStateEnvelope(parsedValue)) {
@@ -4315,7 +4426,6 @@ export class PantryPageComponent implements OnInit {
           return null;
         }
 
-        this.setLocalValue(key, parsedValue.payload);
         return parsedValue.payload;
       }
 
@@ -4333,9 +4443,7 @@ export class PantryPageComponent implements OnInit {
         );
 
         if (ownedEntries.length > 0) {
-          const ownedPayload = JSON.stringify(ownedEntries);
-          this.setLocalValue(key, ownedPayload);
-          return ownedPayload;
+          return JSON.stringify(ownedEntries);
         }
       }
     } catch {
@@ -4559,6 +4667,12 @@ export class PantryPageComponent implements OnInit {
 
   private isMutationConflict(error: unknown): boolean {
     return error instanceof HttpErrorResponse && error.status === 409;
+  }
+
+  private isCheckoutCapacityConflict(error: unknown): boolean {
+    return error instanceof HttpErrorResponse &&
+      error.status === 409 &&
+      error.error?.code === 'CHECKOUT_CAPACITY_EXCEEDED';
   }
 
   private isNonRetryableClientError(error: unknown): boolean {

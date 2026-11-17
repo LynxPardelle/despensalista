@@ -23,6 +23,8 @@ import {
   HouseholdDeletionLock,
   HouseholdMemberLimitError,
   HouseholdRepository,
+  HouseholdSwitchConflictError,
+  HouseholdSwitchState,
 } from '../../../domain/repositories/household.repository';
 import { DynamoDbDocumentClientService } from './dynamodb-document-client.service';
 
@@ -41,6 +43,7 @@ interface MemberManifest {
   ownerUserId: string;
   deleting?: string;
   memberUserIds?: Set<string>;
+  creationActivityId?: string;
 }
 
 type HouseholdItem = Omit<HouseholdPrimitives, 'createdAt' | 'updatedAt'> & {
@@ -108,6 +111,11 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
     household: Household,
     membership: HouseholdMembership,
   ): Promise<HouseholdMembership> {
+    const activity = HouseholdActivity.create({
+      householdId: household.id,
+      actorUserId: membership.userId,
+      type: 'household_created',
+    });
     try {
       await this.dynamoDb.send(
         new TransactWriteCommand({
@@ -119,6 +127,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
                 Item: {
                   ...this.toHouseholdItem(household),
                   memberUserIds: new Set([membership.userId]),
+                  creationActivityId: activity.id,
                 },
                 ConditionExpression: 'attribute_not_exists(pk)',
               },
@@ -133,13 +142,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
             {
               Put: {
                 TableName: this.tableName,
-                Item: this.toActivityItem(
-                  HouseholdActivity.create({
-                    householdId: household.id,
-                    actorUserId: membership.userId,
-                    type: 'household_created',
-                  }),
-                ),
+                Item: this.toActivityItem(activity),
               },
             },
           ],
@@ -162,9 +165,25 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
     invite: HouseholdInvite,
     membership: HouseholdMembership,
     memberLimit: number,
+    previous?: HouseholdMembership,
   ): Promise<HouseholdMembership> {
     const item = this.toInviteItem(invite);
+    if (previous) {
+      if (
+        previous.userId !== membership.userId ||
+        previous.householdId === membership.householdId ||
+        membership.householdId !== invite.householdId ||
+        membership.role !== invite.role ||
+        membership.role === 'owner' ||
+        membership.toPrimitives().email !== invite.invitedEmail
+      ) {
+        throw new HouseholdSwitchConflictError();
+      }
+      item.acceptedByUserId = membership.userId;
+      item.acceptedFromHouseholdId = previous.householdId;
+    }
     await this.requireMemberManifest(invite.householdId);
+    const origin = previous ? await this.switchOriginWrites(previous) : [];
     const activeUserChecks = this.activeUserChecks([
       membership.userId,
       item.invitedByUserId,
@@ -191,13 +210,17 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
               Put: {
                 TableName: this.tableName,
                 Item: this.toMembershipItem(membership),
-                ConditionExpression:
-                  'attribute_not_exists(pk) OR (householdId = :household AND #role = :role)',
-                ExpressionAttributeNames: { '#role': 'role' },
-                ExpressionAttributeValues: {
-                  ':household': membership.householdId,
-                  ':role': membership.role,
-                },
+                ...(previous
+                  ? switchMembershipCondition(previous)
+                  : {
+                      ConditionExpression:
+                        'attribute_not_exists(pk) OR (householdId = :household AND #role = :role)',
+                      ExpressionAttributeNames: { '#role': 'role' },
+                      ExpressionAttributeValues: {
+                        ':household': membership.householdId,
+                        ':role': membership.role,
+                      },
+                    }),
               },
             },
             {
@@ -205,13 +228,27 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
                 TableName: this.tableName,
                 Item: item,
                 ConditionExpression:
-                  'tokenHash = :hash AND expiresAt > :now AND attribute_not_exists(acceptedAt) AND attribute_not_exists(revokedAt)',
+                  'tokenHash = :hash AND invitedEmail = :email AND invitedByUserId = :inviter AND householdId = :destination AND #role = :inviteRole AND expiresAt > :now AND attribute_not_exists(acceptedAt) AND attribute_not_exists(revokedAt)',
+                ExpressionAttributeNames: { '#role': 'role' },
                 ExpressionAttributeValues: {
                   ':hash': item.tokenHash,
+                  ':email': item.invitedEmail,
+                  ':inviter': item.invitedByUserId,
+                  ':destination': item.householdId,
+                  ':inviteRole': item.role,
                   ':now': new Date().toISOString(),
                 },
               },
             },
+            ...origin,
+            ...(previous
+              ? [
+                  this.switchStateUpdate(
+                    previous.userId,
+                    previous.role === 'owner',
+                  ),
+                ]
+              : []),
           ],
         }),
       );
@@ -229,10 +266,161 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
           membership.userId,
         );
       }
+      if (previous) throw new HouseholdSwitchConflictError();
       throw new ConflictException(
         'Invitation or household membership changed; refresh and retry',
       );
     }
+  }
+
+  async registerHouseholdSwitchCandidate(userId: string): Promise<void> {
+    try {
+      await this.dynamoDb.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            ...this.activeUserChecks([userId]),
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: {
+                  pk: switchStateKey(userId),
+                  entityType: 'HOUSEHOLD_SWITCH_STATE',
+                  userId,
+                  pristine: true,
+                },
+                ConditionExpression: 'attribute_not_exists(pk)',
+              },
+            },
+          ],
+        }),
+      );
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        error.name !== 'TransactionCanceledException'
+      )
+        throw error;
+      const existing = await this.readSwitchState(userId);
+      if (!existing) throw error;
+    }
+  }
+
+  async markHouseholdUsed(userId: string): Promise<void> {
+    const state = await this.readSwitchState(userId);
+    if (state?.pristine === false) return;
+
+    await this.dynamoDb.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          ...this.activeUserChecks([userId]),
+          this.switchStateUpdate(userId, false, false),
+        ],
+      }),
+    );
+  }
+
+  async getHouseholdSwitchState(userId: string): Promise<HouseholdSwitchState> {
+    const state = await this.readSwitchState(userId);
+    return {
+      pristine: state?.pristine === true,
+      contextRequired: state?.contextRequired === true,
+    };
+  }
+
+  private async readSwitchState(userId: string) {
+    const result = await this.dynamoDb.send(
+      new GetCommand({
+        TableName: this.tableName,
+        Key: { pk: switchStateKey(userId) },
+        ConsistentRead: true,
+      }),
+    );
+    return result.Item;
+  }
+
+  async canSwitchFrom(previous: HouseholdMembership): Promise<boolean> {
+    if (previous.role !== 'owner') return true;
+    const state = await this.getHouseholdSwitchState(previous.userId);
+    if (!state.pristine) return false;
+    const origin = await this.readMemberManifest(previous.householdId);
+    return isUnusedOwnerHousehold(origin, previous.userId);
+  }
+
+  private async switchOriginWrites(
+    previous: HouseholdMembership,
+  ): Promise<TransactItem[]> {
+    const origin = await this.ensureMemberManifest(previous.householdId);
+    const key = { pk: householdKey(previous.householdId) };
+    if (previous.role !== 'owner') {
+      if (!origin?.memberUserIds || origin.deleting)
+        throw new HouseholdSwitchConflictError();
+      return [
+        {
+          Update: {
+            TableName: this.tableName,
+            Key: key,
+            UpdateExpression: 'DELETE memberUserIds :leavingUsers',
+            ConditionExpression: `${OPEN_HOUSEHOLD} AND contains(memberUserIds, :leavingUser) AND ownerUserId <> :leavingUser`,
+            ExpressionAttributeValues: {
+              ':leavingUsers': new Set([previous.userId]),
+              ':leavingUser': previous.userId,
+            },
+          },
+        },
+      ];
+    }
+    if (!isUnusedOwnerHousehold(origin, previous.userId))
+      throw new HouseholdSwitchConflictError();
+    return [
+      {
+        Delete: {
+          TableName: this.tableName,
+          Key: key,
+          ConditionExpression: `${OPEN_HOUSEHOLD} AND ownerUserId = :owner AND contains(memberUserIds, :owner) AND size(memberUserIds) = :singleMember AND creationActivityId = :activity`,
+          ExpressionAttributeValues: {
+            ':owner': previous.userId,
+            ':singleMember': 1,
+            ':activity': origin.creationActivityId,
+          },
+        },
+      },
+      {
+        Delete: {
+          TableName: this.tableName,
+          Key: { pk: activityKey(origin.creationActivityId) },
+          ConditionExpression:
+            'householdId = :household AND actorUserId = :owner AND #type = :created',
+          ExpressionAttributeNames: { '#type': 'type' },
+          ExpressionAttributeValues: {
+            ':household': previous.householdId,
+            ':owner': previous.userId,
+            ':created': 'household_created',
+          },
+        },
+      },
+    ];
+  }
+
+  private switchStateUpdate(
+    userId: string,
+    requirePristine: boolean,
+    setContextRequired = true,
+  ): TransactItem {
+    return {
+      Update: {
+        TableName: this.tableName,
+        Key: { pk: switchStateKey(userId) },
+        UpdateExpression: `SET entityType = :entity, userId = :user, pristine = :used${setContextRequired ? ', contextRequired = :required' : ''}`,
+        ...(requirePristine && { ConditionExpression: 'pristine = :pristine' }),
+        ExpressionAttributeValues: {
+          ':entity': 'HOUSEHOLD_SWITCH_STATE',
+          ':user': userId,
+          ':used': false,
+          ...(setContextRequired && { ':required': true }),
+          ...(requirePristine && { ':pristine': true }),
+        },
+      },
+    };
   }
 
   async saveHousehold(household: Household): Promise<Household> {
@@ -577,6 +765,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       new GetCommand({
         TableName: this.tableName,
         Key: { pk: inviteKey(id) },
+        ConsistentRead: true,
       }),
     );
 
@@ -595,7 +784,8 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       Limit: 1,
     });
 
-    return item ? this.toInvite(item) : null;
+    const invite = item ? await this.findInviteById(item.id) : null;
+    return invite?.toPrimitives().tokenHash === tokenHash ? invite : null;
   }
 
   async findActivitiesByHouseholdId(
@@ -632,11 +822,12 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
           TableName: this.tableName,
           ConsistentRead: true,
           FilterExpression:
-            '(entityType = :activity AND (actorUserId = :user OR targetUserId = :user)) OR (entityType = :invite AND (invitedByUserId = :user OR invitedEmail = :email)) OR (entityType = :membership AND userId = :user)',
+            '(entityType = :activity AND (actorUserId = :user OR targetUserId = :user)) OR (entityType = :invite AND (invitedByUserId = :user OR invitedEmail = :email OR acceptedByUserId = :user)) OR ((entityType = :membership OR entityType = :switchState) AND userId = :user)',
           ExpressionAttributeValues: {
             ':activity': 'HOUSEHOLD_ACTIVITY',
             ':invite': 'HOUSEHOLD_INVITE',
             ':membership': 'HOUSEHOLD_MEMBERSHIP',
+            ':switchState': 'HOUSEHOLD_SWITCH_STATE',
             ':user': userId,
             ':email': normalizedEmail,
           },
@@ -952,9 +1143,9 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
         Update: {
           TableName: this.tableName,
           Key: { pk: item.pk },
-          UpdateExpression: `SET invitedEmail = :anonymousEmail, revokedAt = :now, updatedAt = :now, privacyRedacted = :redacted${inviterMatches ? ', invitedByUserId = :anonymousUser' : ''}`,
+          UpdateExpression: `SET invitedEmail = :anonymousEmail, revokedAt = :now, updatedAt = :now, privacyRedacted = :redacted${inviterMatches ? ', invitedByUserId = :anonymousUser' : ''} REMOVE acceptedByUserId, acceptedFromHouseholdId`,
           ConditionExpression:
-            'invitedByUserId = :user OR invitedEmail = :email',
+            'invitedByUserId = :user OR invitedEmail = :email OR acceptedByUserId = :user',
           ExpressionAttributeValues: {
             ':user': userId,
             ':email': email,
@@ -963,6 +1154,16 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
             ':redacted': true,
             ...(inviterMatches ? { ':anonymousUser': ANONYMIZED_USER_ID } : {}),
           },
+        },
+      };
+    }
+    if (item.entityType === 'HOUSEHOLD_SWITCH_STATE') {
+      return {
+        Delete: {
+          TableName: this.tableName,
+          Key: { pk: item.pk },
+          ConditionExpression: 'attribute_not_exists(pk) OR userId = :user',
+          ExpressionAttributeValues: { ':user': userId },
         },
       };
     }
@@ -1035,7 +1236,8 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
         TableName: this.tableName,
         Key: { pk: householdKey(householdId) },
         ConsistentRead: true,
-        ProjectionExpression: 'ownerUserId, deleting, memberUserIds',
+        ProjectionExpression:
+          'ownerUserId, deleting, memberUserIds, creationActivityId',
       }),
     );
     return result.Item as MemberManifest | undefined;
@@ -1172,6 +1374,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       joinedAt: primitives.joinedAt.toISOString(),
       createdAt: primitives.joinedAt.toISOString(),
       updatedAt: primitives.updatedAt.toISOString(),
+      contextVersion: primitives.contextVersion,
     };
   }
 
@@ -1194,6 +1397,8 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       createdAt: primitives.createdAt.toISOString(),
       expiresAt: primitives.expiresAt.toISOString(),
       acceptedAt: primitives.acceptedAt?.toISOString(),
+      acceptedByUserId: primitives.acceptedByUserId,
+      acceptedFromHouseholdId: primitives.acceptedFromHouseholdId,
       revokedAt: primitives.revokedAt?.toISOString(),
       updatedAt: primitives.updatedAt.toISOString(),
       expiresAtEpochSeconds: Math.floor(primitives.expiresAt.getTime() / 1000),
@@ -1238,6 +1443,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       role: item.role,
       joinedAt: new Date(item.joinedAt),
       updatedAt: new Date(item.updatedAt),
+      contextVersion: item.contextVersion,
     });
   }
 
@@ -1252,6 +1458,8 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       createdAt: new Date(item.createdAt),
       expiresAt: new Date(item.expiresAt),
       acceptedAt: item.acceptedAt ? new Date(item.acceptedAt) : undefined,
+      acceptedByUserId: item.acceptedByUserId,
+      acceptedFromHouseholdId: item.acceptedFromHouseholdId,
       revokedAt: item.revokedAt ? new Date(item.revokedAt) : undefined,
       updatedAt: new Date(item.updatedAt),
     });
@@ -1269,6 +1477,38 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       createdAt: new Date(item.createdAt),
     });
   }
+}
+
+function isUnusedOwnerHousehold(
+  origin: MemberManifest | undefined,
+  userId: string,
+): origin is MemberManifest & { creationActivityId: string } {
+  return Boolean(
+    origin &&
+    !origin.deleting &&
+    origin.ownerUserId === userId &&
+    origin.creationActivityId &&
+    origin.memberUserIds?.size === 1 &&
+    origin.memberUserIds.has(userId),
+  );
+}
+
+function switchMembershipCondition(previous: HouseholdMembership) {
+  const { joinedAt, updatedAt, contextVersion } = previous.toPrimitives();
+  const versionCondition = contextVersion
+    ? 'contextVersion = :previousVersion'
+    : 'attribute_not_exists(contextVersion)';
+  return {
+    ConditionExpression: `householdId = :previousHousehold AND #role = :previousRole AND joinedAt = :previousJoinedAt AND updatedAt = :previousUpdatedAt AND ${versionCondition}`,
+    ExpressionAttributeNames: { '#role': 'role' },
+    ExpressionAttributeValues: {
+      ':previousHousehold': previous.householdId,
+      ':previousRole': previous.role,
+      ':previousJoinedAt': joinedAt.toISOString(),
+      ':previousUpdatedAt': updatedAt.toISOString(),
+      ...(contextVersion && { ':previousVersion': contextVersion }),
+    },
+  };
 }
 
 function wasConditionalCheckFailure(error: Error, index: number): boolean {
@@ -1308,6 +1548,10 @@ function householdRecordsKey(householdId: string): string {
 
 function membershipByUserKey(userId: string): string {
   return `HOUSEHOLD_MEMBER_BY_USER#${userId}`;
+}
+
+function switchStateKey(userId: string): string {
+  return `HOUSEHOLD_SWITCH_STATE#${userId}`;
 }
 
 function inviteByTokenKey(tokenHash: string): string {

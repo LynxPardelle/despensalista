@@ -113,11 +113,11 @@ export class ProfileService {
       );
   }
 
-  acceptHouseholdInvite(token: string): Observable<HouseholdWorkspace> {
+  acceptHouseholdInvite(token: string, switchFromHouseholdId?: string): Observable<HouseholdWorkspace> {
     return this.http
       .post<ApiHouseholdWorkspace>(
         `${this.householdUrl}/invites/accept`,
-        { token },
+        { token, ...(switchFromHouseholdId && { switchFromHouseholdId }) },
         { withCredentials: true },
       )
       .pipe(map((workspace) => this.normalizeHouseholdWorkspace(workspace)));

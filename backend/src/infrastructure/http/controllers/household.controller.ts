@@ -109,6 +109,7 @@ export class HouseholdController {
     const workspace = await this.acceptHouseholdInviteUseCase.execute({
       userId: currentUser.userId,
       token: dto.token,
+      switchFromHouseholdId: dto.switchFromHouseholdId,
     });
     this.logger.log(
       `household_invite_accept_completed requestId=${requestId} userId=${currentUser.userId} householdId=${workspace.household.id}`,

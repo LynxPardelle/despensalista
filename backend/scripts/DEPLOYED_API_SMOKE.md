@@ -99,3 +99,28 @@ fixture username/sub needed for recovery. Raw API responses, JWTs, passwords, TO
 secrets and AWS errors are deliberately not logged. Final exit code is nonzero for
 test failure or cleanup failure. Each run uses normal low-volume Cognito/API/DynamoDB
 usage; it provisions no services or recurring charges, but is not claimed to be free.
+
+## Household switching release smoke
+
+The household-specific smoke starts in read-only mode when given only a stage. It
+checks the exact account, stack, active Lambda alias, Cognito client, users table
+and public health endpoint. Production also requires both Stripe Checkout flags to
+be closed and `despensalista.com` to be an alias on the production CloudFront
+distribution. The read-only result reports whether household switching is enabled.
+
+```powershell
+node scripts/deployed-household-switch-smoke.cjs --stage prod
+node scripts/deployed-household-switch-smoke.cjs --stage dev --run
+node scripts/deployed-household-switch-smoke.cjs --stage tst --run
+node scripts/deployed-household-switch-smoke.cjs --stage prod --run-production-fixtures
+```
+
+The fixture run requires the build and SRP setup above, the live household switch
+flag, and production CloudFront read access for the production preflight. It creates
+four verified test identities under `example.invalid` with Cognito messages
+suppressed. It checks confirmation and simultaneous replays of a switch, including
+closing a pristine household, blocking stale pantry writes, and submitting a valid
+checkout only once. It uses the application account deletion endpoint and verifies
+that test identities, memberships and switch state disappear. It never calls Stripe
+or loads Stripe secrets. Output includes the generated Cognito username only if
+cleanup needs follow-up. Resolve a failed cleanup by inspecting only that identity.

@@ -520,6 +520,7 @@ export class PantryService {
   private normalizePantryOverview(overview: ApiPantryOverview): PantryOverview {
     return {
       userId: overview.userId,
+      householdId: overview.householdId,
       generatedAt: new Date(overview.generatedAt),
       preferences: overview.preferences,
       items: overview.items.map((item) => this.normalizePantryOverviewItem(item)),

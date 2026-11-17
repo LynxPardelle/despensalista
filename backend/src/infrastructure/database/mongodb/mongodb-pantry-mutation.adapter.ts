@@ -15,6 +15,7 @@ import {
 import {
   CloseShoppingPurchaseMutation,
   ConsumeInventoryLotMutation,
+  HouseholdOriginMismatchError,
   IdempotencyPayloadConflictError,
   IdempotentMutationResult,
   PantryDeletionReceipt,
@@ -51,6 +52,7 @@ interface MongoPantryOperationDocument {
   ownerUserId: string;
   operation: PantryOperationReceipt['operation'];
   requestHash: string;
+  checkoutHouseholdId?: string;
   response:
     | InventoryLotPrimitives
     | InventoryLotPrimitives[]
@@ -238,6 +240,31 @@ export class MongoPantryMutationAdapter
       mutation.receipt,
       quotaEpoch,
       async (session) => {
+        const membership = mutation.membershipFence;
+        if (membership) {
+          // Write the same membership document as a switch so a stale snapshot
+          // cannot commit the purchase after losing write access.
+          const result = await this.connection
+            .collection('households')
+            .updateOne(
+              {
+                entityType: 'HOUSEHOLD_MEMBERSHIP',
+                userId: membership.userId,
+                householdId: membership.householdId,
+                role: membership.role,
+                ...(membership.contextVersion
+                  ? { contextVersion: membership.contextVersion }
+                  : {
+                      contextVersion: { $exists: false },
+                      joinedAt: membership.joinedAt,
+                    }),
+              },
+              { $set: { pantryCheckoutFence: randomUUID() } },
+              { session },
+            );
+          if (result.matchedCount !== 1)
+            throw new HouseholdOriginMismatchError();
+        }
         for (const change of mutation.productTypes) {
           const expected = change.expected.toPrimitives();
           const filter = {
@@ -1354,6 +1381,7 @@ export class MongoPantryMutationAdapter
             ownerUserId: receipt.ownerUserId,
             operation: receipt.operation,
             requestHash: receipt.requestHash,
+            checkoutHouseholdId: receipt.checkoutHouseholdId,
             response: value,
             createdAt: receipt.createdAt,
             expiresAt: receipt.expiresAt,
@@ -1394,6 +1422,12 @@ export class MongoPantryMutationAdapter
     lookup: PantryOperationLookup,
   ): PantryOperationReceipt {
     if (
+      item.checkoutHouseholdId !== undefined &&
+      item.checkoutHouseholdId !== lookup.checkoutHouseholdId
+    ) {
+      throw new HouseholdOriginMismatchError();
+    }
+    if (
       item.ownerUserId !== lookup.ownerUserId ||
       item.operation !== lookup.operation ||
       item.requestHash !== lookup.requestHash
@@ -1410,6 +1444,9 @@ export class MongoPantryMutationAdapter
       ownerUserId: item.ownerUserId,
       operation: item.operation,
       requestHash: item.requestHash,
+      ...(item.checkoutHouseholdId
+        ? { checkoutHouseholdId: item.checkoutHouseholdId }
+        : {}),
       response: item.response,
       createdAt: new Date(item.createdAt),
       expiresAt: new Date(item.expiresAt),

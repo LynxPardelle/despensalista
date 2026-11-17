@@ -17,8 +17,10 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { FastifyReply, FastifyRequest } from 'fastify';
+import { HouseholdOriginMismatchError } from '../../../application/ports/pantry-mutation.port';
 import { CloseShoppingPurchaseUseCase } from '../../../application/use-cases/close-shopping-purchase.use-case';
 import { GetArchivedPantryItemsUseCase } from '../../../application/use-cases/get-archived-pantry-items.use-case';
 import { GetPantryOverviewUseCase } from '../../../application/use-cases/get-pantry-overview.use-case';
@@ -104,6 +106,7 @@ export class PantryController {
     private readonly resolveHouseholdPantryAccessUseCase: ResolveHouseholdPantryAccessUseCase,
     private readonly recordHouseholdActivityUseCase: RecordHouseholdActivityUseCase,
     private readonly authCookieService: AuthCookieService,
+    private readonly configService: ConfigService,
   ) {}
 
   @Get('overview')
@@ -122,7 +125,10 @@ export class PantryController {
     const overview = await this.getPantryOverviewUseCase.execute(
       access.pantryOwnerUserId,
     );
-    const response = PantryOverviewMapper.toResponse(overview);
+    const response = PantryOverviewMapper.toResponse(
+      overview,
+      access.householdId,
+    );
     this.logger.log(
       `pantry_overview_completed requestId=${requestId} userId=${currentUser.userId} pantryOwnerUserId=${access.pantryOwnerUserId} householdId=${access.householdId} itemCount=${response.items.length}`,
     );
@@ -185,7 +191,7 @@ export class PantryController {
       formatVersion: 1,
       exportedAt: new Date(),
       profile: ProfileMapper.toProfileResponse(profile),
-      overview: PantryOverviewMapper.toResponse(overview),
+      overview: PantryOverviewMapper.toResponse(overview, access.householdId),
       archived: this.toArchivedResponse(archivedItems),
       shoppingLists: shoppingLists.map((list) =>
         this.toShoppingListResponse(list),
@@ -212,12 +218,39 @@ export class PantryController {
     this.logger.log(
       `pantry_checkout_requested requestId=${requestId} userId=${currentUser.userId} itemCount=${dto.items.length}`,
     );
-    const access = await this.resolveHouseholdPantryAccessUseCase.executeWrite(
+    const access = await this.resolveHouseholdPantryAccessUseCase.executeRead(
       currentUser.userId,
     );
+    const { originHouseholdId } = dto;
+    if (
+      (originHouseholdId !== undefined || access.requiresPurchaseOrigin) &&
+      originHouseholdId !== access.householdId
+    ) {
+      throw new HouseholdOriginMismatchError();
+    }
+    if (access.role === 'viewer') {
+      throw new ForbiddenException(
+        'Household viewers cannot change pantry data',
+      );
+    }
+    const needsMembershipFence =
+      originHouseholdId !== undefined ||
+      this.configService.get<string>('HOUSEHOLD_SWITCH_ENABLED') === 'true';
 
     const result = await this.closeShoppingPurchaseUseCase.execute({
       userId: access.pantryOwnerUserId,
+      householdId: access.householdId,
+      ...(needsMembershipFence
+        ? {
+            membershipFence: {
+              userId: access.requesterUserId,
+              householdId: access.householdId,
+              role: access.role,
+              joinedAt: access.joinedAt,
+              contextVersion: access.contextVersion,
+            },
+          }
+        : {}),
       idempotencyKey,
       items: dto.items.map((item) => ({
         productTypeId: item.productTypeId,

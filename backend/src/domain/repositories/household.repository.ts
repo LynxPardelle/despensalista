@@ -10,6 +10,18 @@ export interface HouseholdDeletionLock {
   token?: string;
 }
 
+export interface HouseholdSwitchState {
+  pristine: boolean;
+  contextRequired: boolean;
+}
+
+export class HouseholdSwitchConflictError extends Error {
+  constructor() {
+    super('Household changed; refresh and retry');
+    this.name = 'HouseholdSwitchConflictError';
+  }
+}
+
 export class HouseholdMemberLimitError extends Error {
   constructor() {
     super('El hogar alcanzó el límite de integrantes de su plan.');
@@ -26,7 +38,12 @@ export interface HouseholdRepository {
     invite: HouseholdInvite,
     membership: HouseholdMembership,
     memberLimit: number,
+    previous?: HouseholdMembership,
   ): Promise<HouseholdMembership>;
+  registerHouseholdSwitchCandidate(userId: string): Promise<void>;
+  markHouseholdUsed(userId: string): Promise<void>;
+  getHouseholdSwitchState(userId: string): Promise<HouseholdSwitchState>;
+  canSwitchFrom(previous: HouseholdMembership): Promise<boolean>;
   saveHousehold(household: Household): Promise<Household>;
   saveMembership(membership: HouseholdMembership): Promise<HouseholdMembership>;
   saveInvite(

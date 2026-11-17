@@ -1,6 +1,6 @@
 import { NgModule } from '@angular/core';
 import { BrowserModule, provideClientHydration, withEventReplay } from '@angular/platform-browser';
-import { provideHttpClient, withFetch, withXsrfConfiguration } from '@angular/common/http';
+import { provideHttpClient, withFetch, withInterceptors, withXsrfConfiguration } from '@angular/common/http';
 import { ReactiveFormsModule } from '@angular/forms';
 import { StoreModule } from '@ngrx/store';
 import { EffectsModule } from '@ngrx/effects';
@@ -16,6 +16,7 @@ import { ProductEffects } from './store/product/product.effects';
 import { pantryReducer } from './store/pantry/pantry.reducer';
 import { PantryEffects } from './store/pantry/pantry.effects';
 import { environment } from '../environments/environment';
+import { pantryHouseholdInterceptor } from './core/services/pantry-household-scope';
 
 @NgModule({
   declarations: [
@@ -42,6 +43,7 @@ import { environment } from '../environments/environment';
   providers: [
     provideHttpClient(
       withFetch(),
+      withInterceptors([pantryHouseholdInterceptor]),
       withXsrfConfiguration({
         cookieName: 'XSRF-TOKEN',
         headerName: 'x-xsrf-token',

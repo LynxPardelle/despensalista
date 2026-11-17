@@ -3,6 +3,7 @@ import {
   ExecutionContext,
   Inject,
   Injectable,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { FastifyRequest } from 'fastify';
@@ -14,6 +15,7 @@ import { AuthCookieService } from './auth-cookie.service';
 import { UserId } from '../../../domain/value-objects/user-id.vo';
 import { UserAccountStatus } from '../../../domain/enums';
 import { GoogleMfaService } from './google-mfa.service';
+import { HouseholdSwitchAccessService } from '../../../application/services/household-switch-access.service';
 
 @Injectable()
 export class AccessTokenGuard implements CanActivate {
@@ -24,6 +26,8 @@ export class AccessTokenGuard implements CanActivate {
     private readonly userDao: UserDao,
     private readonly authCookieService: AuthCookieService,
     private readonly googleMfa: GoogleMfaService,
+    @Optional()
+    private readonly householdSwitch?: HouseholdSwitchAccessService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -34,6 +38,11 @@ export class AccessTokenGuard implements CanActivate {
     >();
     const { claims, authUser } = await this.authenticatePending(request);
     await this.googleMfa.assertVerified(claims, request);
+    await this.householdSwitch?.prepareAuthenticatedWrite(
+      authUser.userId,
+      request.method,
+      request.url,
+    );
     request.authUser = authUser;
 
     return true;
