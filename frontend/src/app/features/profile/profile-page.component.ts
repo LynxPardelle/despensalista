@@ -29,6 +29,7 @@ import {
 import { PantryService } from '../../core/services/pantry.service';
 import { ProfileService } from '../../core/services/profile.service';
 import { FeedbackService } from '../../core/services/feedback.service';
+import { readHouseholdInviteCode } from './household-invite-link';
 import { InvoiceRequestComponent } from './invoice-request.component';
 import {
   HouseholdActivity,
@@ -712,9 +713,13 @@ export class ProfilePageComponent implements OnInit {
 
   acceptHouseholdInvite(): void {
     if (this.householdAccepting) return;
-    if (this.householdAcceptForm.invalid) {
+    const code = readHouseholdInviteCode(
+      this.householdAcceptForm.controls.token.value,
+      this.document.defaultView?.location.origin,
+    );
+    if (!code) {
       this.householdAcceptForm.markAllAsTouched();
-      this.householdError = 'Pega un token de invitacion valido.';
+      this.householdError = 'Pega un enlace o código de invitación de DespensaLista.';
       this.householdMessage = null;
       return;
     }
@@ -724,7 +729,7 @@ export class ProfilePageComponent implements OnInit {
     this.householdMessage = null;
 
     this.profileService
-      .acceptHouseholdInvite(this.householdAcceptForm.controls.token.value)
+      .acceptHouseholdInvite(code)
       .pipe(
         finalize(() => {
           this.householdAccepting = false;
@@ -757,9 +762,19 @@ export class ProfilePageComponent implements OnInit {
   }
 
   private getHouseholdErrorMessage(error: unknown): string {
-    return error instanceof HttpErrorResponse && error.error?.code === 'HOUSEHOLD_MEMBER_LIMIT'
-      ? this.householdLimitMessage()
-      : this.getErrorMessage(error);
+    if (error instanceof HttpErrorResponse && error.error?.code === 'HOUSEHOLD_MEMBER_LIMIT') {
+      return this.householdLimitMessage();
+    }
+    if (error instanceof HttpErrorResponse && error.error?.code === 'HOUSEHOLD_ALREADY_MEMBER') {
+      if (error.error.role === 'owner') {
+        return 'Ya eres titular de otro hogar. Tu cuenta admite un solo hogar y conserva la despensa que ya tienes.';
+      }
+      if (error.error.role === 'editor' || error.error.role === 'viewer') {
+        return 'Ya perteneces a otro hogar. Pide a su titular que te quite antes de volver a intentar.';
+      }
+      return 'Para aceptar esta invitación, tu cuenta debe dejar de pertenecer a otro hogar.';
+    }
+    return this.getErrorMessage(error);
   }
 
   private householdLimitMessage(): string {

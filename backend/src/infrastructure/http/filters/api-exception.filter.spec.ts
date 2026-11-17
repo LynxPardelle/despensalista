@@ -2,6 +2,7 @@ import { ArgumentsHost, BadRequestException, Logger } from '@nestjs/common';
 import { ApiExceptionFilter } from './api-exception.filter';
 import { SavedShoppingListLimitError } from '../../../application/ports/pantry-mutation.port';
 import { HouseholdMemberLimitError } from '../../../domain/repositories/household.repository';
+import { HouseholdAlreadyMemberException } from '../../../application/use-cases/household.use-cases';
 
 describe('ApiExceptionFilter', () => {
   afterEach(() => jest.restoreAllMocks());
@@ -96,6 +97,23 @@ describe('ApiExceptionFilter', () => {
         code,
         statusCode: 409,
         message: error.message,
+      }),
+    );
+  });
+
+  it('returns the invitee role for a household membership conflict', () => {
+    const reply = makeReply();
+
+    new ApiExceptionFilter().catch(
+      new HouseholdAlreadyMemberException('owner'),
+      makeHost(reply),
+    );
+
+    expect(reply.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'HOUSEHOLD_ALREADY_MEMBER',
+        role: 'owner',
+        statusCode: 400,
       }),
     );
   });

@@ -554,8 +554,9 @@
 
           <form class="preferences-form" [formGroup]="householdAcceptForm" (ngSubmit)="acceptHouseholdInvite()">
             <label class="field">
-              <span>Aceptar invitaci&oacute;n</span>
-              <input type="text" formControlName="token" placeholder="Token de invitaci&oacute;n" />
+              <span>Enlace o c&oacute;digo de invitaci&oacute;n</span>
+              <input type="text" formControlName="token" placeholder="Pega el enlace o c&oacute;digo"
+                autocomplete="off" autocapitalize="off" spellcheck="false" />
             </label>
             <button
               class="secondary-button"
