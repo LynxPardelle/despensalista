@@ -17,6 +17,8 @@ import {
 } from '../../../application/ports/pantry-mutation.port';
 import { HouseholdMemberLimitError } from '../../../domain/repositories/household.repository';
 import { PlusRequiredException } from '../../../application/use-cases/get-plus-household-summary.use-case';
+import { HouseholdAlreadyMemberException } from '../../../application/use-cases/household.use-cases';
+import type { HouseholdRole } from '../../../domain/entities/household.entity';
 
 interface ApiErrorBody {
   statusCode: number;
@@ -25,6 +27,7 @@ interface ApiErrorBody {
   requestId?: string;
   timestamp: string;
   code?: string;
+  role?: HouseholdRole;
 }
 
 @Catch()
@@ -50,6 +53,9 @@ export class ApiExceptionFilter implements ExceptionFilter {
       requestId,
       timestamp: new Date().toISOString(),
       ...(code ? { code } : {}),
+      ...(exception instanceof HouseholdAlreadyMemberException
+        ? { role: exception.role }
+        : {}),
     };
 
     if (statusCode >= 500) {
@@ -88,6 +94,8 @@ function getStatusCode(exception: unknown): number {
 function getErrorCode(exception: unknown): string | undefined {
   if (exception instanceof GoogleMfaRequiredException) return exception.code;
   if (exception instanceof PlusRequiredException) return exception.code;
+  if (exception instanceof HouseholdAlreadyMemberException)
+    return exception.code;
   if (exception instanceof HouseholdMemberLimitError)
     return 'HOUSEHOLD_MEMBER_LIMIT';
   if (exception instanceof SavedShoppingListLimitError)
