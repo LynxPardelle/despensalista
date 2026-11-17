@@ -531,7 +531,7 @@ test('production Lambda does not trust X-Forwarded-For for rate-limit identity',
   );
 });
 
-test('production infrastructure exposes idempotency headers and scoped data IAM', () => {
+test('production infrastructure exposes idempotency and household headers with scoped data IAM', () => {
   productionTemplate.hasResourceProperties('AWS::ApiGatewayV2::Api', {
     CorsConfiguration: {
       AllowHeaders: [
@@ -539,6 +539,7 @@ test('production infrastructure exposes idempotency headers and scoped data IAM'
         'content-type',
         'idempotency-key',
         'x-xsrf-token',
+        'x-despensa-household',
         'x-metrics-token',
       ],
       ExposeHeaders: ['idempotency-key', 'idempotency-replayed'],
@@ -575,6 +576,15 @@ test('production infrastructure exposes idempotency headers and scoped data IAM'
     'despensalista-prod-inventory-lots',
   ]) {
     assert.match(JSON.stringify(productionTemplate.toJSON()), new RegExp(tableName));
+  }
+});
+
+test('household switching is enabled only in dev', () => {
+  for (const stage of ['dev', 'tst', 'prod'] as const) {
+    synthesizeTemplate(stage).hasResourceProperties('AWS::Lambda::Function', {
+      FunctionName: `despensalista-${stage}-backend-api`,
+      Environment: { Variables: { HOUSEHOLD_SWITCH_ENABLED: String(stage === 'dev') } },
+    });
   }
 });
 

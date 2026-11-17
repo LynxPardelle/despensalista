@@ -9,7 +9,10 @@ import {
 } from '../../../domain/entities/household.entity';
 import { User } from '../../../domain/entities/user.entity';
 import { UserAccountStatus } from '../../../domain/enums';
-import { HouseholdMemberLimitError } from '../../../domain/repositories/household.repository';
+import {
+  HouseholdMemberLimitError,
+  HouseholdSwitchConflictError,
+} from '../../../domain/repositories/household.repository';
 import { MongoHouseholdRepository } from './mongodb-household.repository';
 import { HouseholdDocument, HouseholdSchema } from './schemas/household.schema';
 
@@ -112,6 +115,175 @@ describe('Mongo household atomic membership', () => {
     await repository.deleteMembership(household.id, winner.value.userId);
     await expect(repository.saveInvite(next, 2)).resolves.toBe(next);
   });
+
+  it('only one concurrent switch consumes its invite and leaves the other destination untouched', async () => {
+    const invitee = user('invited');
+    const now = new Date();
+    const prepare = async (ownerId: string, hashCharacter: string) => {
+      const owner = user(ownerId);
+      const household = Household.create(owner);
+      await repository.createHouseholdWithOwner(
+        household,
+        household.createOwnerMembership(owner),
+      );
+      const invite = HouseholdInvite.create({
+        householdId: household.id,
+        invitedEmail: invitee.email,
+        invitedByUserId: ownerId,
+        role: 'viewer',
+        tokenHash: hashCharacter.repeat(64),
+        createdAt: now,
+        expiresAt: new Date(now.getTime() + 60_000),
+      });
+      await repository.saveInvite(invite, 2);
+      invite.accept(now);
+      const membership = HouseholdMembership.create({
+        householdId: household.id,
+        user: invitee,
+        role: 'viewer',
+        now,
+      });
+      return { household, invite, membership };
+    };
+    const source = await prepare('owner', 'c');
+    await repository.acceptInvite(source.invite, source.membership, 2);
+    const destinations = [
+      await prepare('owner-a', 'd'),
+      await prepare('owner-b', 'e'),
+    ];
+
+    const results = await Promise.allSettled(
+      destinations.map(({ invite, membership }) =>
+        repository.acceptInvite(invite, membership, 2, source.membership),
+      ),
+    );
+
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    const current = await repository.findMembershipByUserId('invited');
+    expect(current?.householdId).not.toBe(source.household.id);
+    expect(
+      await repository.findMembersByHouseholdId(source.household.id),
+    ).toHaveLength(1);
+    for (const { household, invite } of destinations) {
+      const joined = current?.householdId === household.id;
+      expect(
+        await repository.findMembersByHouseholdId(household.id),
+      ).toHaveLength(joined ? 2 : 1);
+      expect((await repository.findInviteById(invite.id))?.isActive()).toBe(
+        !joined,
+      );
+    }
+  });
+
+  it.each([
+    ['a verified automatic household', true, false, false, true],
+    ['a legacy household', false, false, false, false],
+    ['a previously used household', true, true, false, false],
+    ['a household with another member', true, false, true, false],
+  ])(
+    'switches ownership only from an unused singleton (%s)',
+    async (_title, registered, used, withMember, eligible) => {
+      const owner = user('invited');
+      const origin = Household.create(owner);
+      const previous = origin.createOwnerMembership(owner);
+      if (registered)
+        await repository.registerHouseholdSwitchCandidate(owner.id.toString());
+      await repository.createHouseholdWithOwner(origin, previous);
+      if (used) {
+        await repository.markHouseholdUsed(owner.id.toString());
+        await repository.registerHouseholdSwitchCandidate(owner.id.toString());
+      }
+      if (withMember) {
+        const collaborator = user('other-user');
+        const now = new Date();
+        const oldInvite = HouseholdInvite.create({
+          householdId: origin.id,
+          invitedEmail: collaborator.email,
+          invitedByUserId: owner.id.toString(),
+          role: 'editor',
+          tokenHash: 'a'.repeat(64),
+          createdAt: now,
+          expiresAt: new Date(now.getTime() + 60_000),
+        });
+        await repository.saveInvite(oldInvite, 2);
+        oldInvite.accept(now);
+        await repository.acceptInvite(
+          oldInvite,
+          HouseholdMembership.create({
+            householdId: origin.id,
+            user: collaborator,
+            role: 'editor',
+            now,
+          }),
+          2,
+        );
+      }
+      const destinationOwner = user('owner');
+      const destination = Household.create(destinationOwner);
+      await repository.createHouseholdWithOwner(
+        destination,
+        destination.createOwnerMembership(destinationOwner),
+      );
+      const now = new Date();
+      const invite = HouseholdInvite.create({
+        householdId: destination.id,
+        invitedEmail: owner.email,
+        invitedByUserId: destinationOwner.id.toString(),
+        role: 'editor',
+        tokenHash: 'f'.repeat(64),
+        createdAt: now,
+        expiresAt: new Date(now.getTime() + 60_000),
+      });
+      await repository.saveInvite(invite, 2);
+      invite.accept(now);
+      const membership = HouseholdMembership.create({
+        householdId: destination.id,
+        user: owner,
+        role: 'editor',
+        now,
+      });
+      expect(await repository.canSwitchFrom(previous)).toBe(eligible);
+
+      if (!eligible) {
+        await expect(
+          repository.acceptInvite(invite, membership, 2, previous),
+        ).rejects.toBeInstanceOf(HouseholdSwitchConflictError);
+        expect(await repository.findHouseholdById(origin.id)).not.toBeNull();
+        expect((await repository.findInviteById(invite.id))?.isActive()).toBe(
+          true,
+        );
+        expect(
+          (await repository.findMembershipByUserId(owner.id.toString()))
+            ?.contextVersion,
+        ).toBe(previous.contextVersion);
+        return;
+      }
+
+      await repository.acceptInvite(invite, membership, 2, previous);
+      expect(await repository.findHouseholdById(origin.id)).toBeNull();
+      expect(
+        await repository.findActivitiesByHouseholdId(origin.id, 10),
+      ).toHaveLength(0);
+      expect(
+        (await repository.findMembershipByUserId(owner.id.toString()))
+          ?.contextVersion,
+      ).toBe(membership.contextVersion);
+      const receipt = await repository.findInviteByTokenHash(
+        invite.toPrimitives().tokenHash,
+      );
+      expect(receipt?.toPrimitives()).toMatchObject({
+        acceptedByUserId: owner.id.toString(),
+        acceptedFromHouseholdId: origin.id,
+      });
+      await repository.deleteMembership(destination.id, owner.id.toString());
+      await repository.markHouseholdUsed(owner.id.toString());
+      expect(
+        await repository.getHouseholdSwitchState(owner.id.toString()),
+      ).toEqual({ pristine: false, contextRequired: true });
+    },
+  );
 
   it('simultaneous first requests return one household without orphans', async () => {
     const owner = user('owner');

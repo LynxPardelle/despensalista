@@ -198,6 +198,69 @@ describe('MongoPantryMutationAdapter', () => {
     ).toMatchObject({ activeInventoryLots: 1 });
   });
 
+  it('rejects a checkout whose membership changed, and binds successful receipts to the original home', async () => {
+    const type = makeProductType();
+    await adapter.createProductType(type);
+    const lot = InventoryLot.create(
+      UserId.fromString('user-1'),
+      type.id,
+      undefined,
+      1,
+      QuantityUnit.PIECE,
+    );
+    const membershipFence = {
+      userId: 'editor-1',
+      householdId: 'home-1',
+      role: 'editor' as const,
+      joinedAt: new Date('2026-11-16T20:00:00.000Z'),
+      contextVersion: 'generation-before-switch',
+    };
+    const memberships = connection.collection('households');
+    await memberships.insertOne({
+      entityType: 'HOUSEHOLD_MEMBERSHIP',
+      ...membershipFence,
+      contextVersion: 'generation-after-rejoining',
+    });
+    const mutation = {
+      receipt: {
+        ...receipt('close_shopping_purchase'),
+        checkoutHouseholdId: 'home-1',
+      },
+      lots: [lot],
+      productTypes: [{ expected: type, updated: type, changed: false }],
+      membershipFence,
+    };
+
+    await expect(adapter.checkout(mutation)).rejects.toMatchObject({
+      code: 'HOUSEHOLD_ORIGIN_MISMATCH',
+    });
+    expect(await lotModel.countDocuments()).toBe(0);
+    expect(
+      await connection.collection('pantry_operations').countDocuments(),
+    ).toBe(0);
+
+    const current = {
+      ...mutation,
+      membershipFence: {
+        ...membershipFence,
+        contextVersion: 'generation-after-rejoining',
+      },
+    };
+    await expect(adapter.checkout(current)).resolves.toMatchObject({
+      replayed: false,
+    });
+    await expect(adapter.checkout(current)).resolves.toMatchObject({
+      replayed: true,
+    });
+    await expect(
+      adapter.findReceipt({
+        ...mutation.receipt,
+        checkoutHouseholdId: 'home-2',
+      }),
+    ).rejects.toMatchObject({ code: 'HOUSEHOLD_ORIGIN_MISMATCH' });
+    expect(await lotModel.countDocuments()).toBe(1);
+  });
+
   it('rejects a checkout key whose receipt expired instead of leaking a duplicate-key error', async () => {
     const type = makeProductType();
     await adapter.createProductType(type);

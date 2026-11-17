@@ -19,6 +19,7 @@ import { HttpErrorResponse } from '@angular/common/http';
 import { DATE_PIPE_DEFAULT_OPTIONS } from '@angular/common';
 import { Store } from '@ngrx/store';
 import { AuthFacade } from '../../core/services/auth.facade';
+import { PantryHouseholdScope } from '../../core/services/pantry-household-scope';
 import { PantryPageComponent, toDateInputValue } from './pantry-page.component';
 import { PlusHouseholdSummaryComponent } from './plus-household-summary.component';
 import { PantryService } from '../../core/services/pantry.service';
@@ -64,6 +65,7 @@ describe('PantryPageComponent', () => {
   let pantryService: jasmine.SpyObj<PantryService>;
   let authFacade: AuthFacadeStub;
   let store: { select: jasmine.Spy; dispatch: jasmine.Spy };
+  let overview: BehaviorSubject<ReturnType<typeof scopedTestOverview>>;
 
   beforeEach(async () => {
     clearPantryLocalState();
@@ -200,8 +202,10 @@ describe('PantryPageComponent', () => {
       }),
     );
     authFacade = new AuthFacadeStub();
+    overview = new BehaviorSubject(scopedTestOverview('home-original'));
     store = {
-      select: jasmine.createSpy('select').and.returnValue(of(null)),
+      select: jasmine.createSpy('select').and.callFake((selector) =>
+        selector === selectPantryOverview ? overview.asObservable() : of(null)),
       dispatch: jasmine.createSpy('dispatch'),
     };
 
@@ -407,7 +411,7 @@ describe('PantryPageComponent', () => {
 
   it('registers a first purchase through the same atomic close as a shopping trip', () => {
     store.select.and.callFake((selector) => selector === selectPantryOverview
-      ? of({ items: [], shoppingPlanItems: [], preferences: { showGuidanceTips: true } })
+      ? of({ householdId: 'home-original', items: [], shoppingPlanItems: [], preferences: { showGuidanceTips: true } })
       : of(null));
     pantryService.createProductType.and.returnValue(of(makeProductType({
       id: 'first-product', baseName: 'Arroz', defaultUnit: 'piezas', archivedAt: null,
@@ -436,6 +440,7 @@ describe('PantryPageComponent', () => {
       baseName: 'Arroz', category: 'food', defaultUnit: 'piezas',
     });
     expect(pantryService.closeShoppingPurchase).toHaveBeenCalledOnceWith({
+      originHouseholdId: 'home-original',
       items: [{ productTypeId: 'first-product', quantity: 2, unit: 'piezas' }],
     }, jasmine.any(String));
     expect(page.querySelector('#first-purchase-form')).toBeNull();
@@ -444,7 +449,7 @@ describe('PantryPageComponent', () => {
 
   it('keeps the first purchase entry out of an existing pantry', () => {
     store.select.and.callFake((selector) => selector === selectPantryOverview
-      ? of({ items: [makePantryGroup()], shoppingPlanItems: [], preferences: { showGuidanceTips: true } })
+      ? of({ householdId: 'home-original', items: [makePantryGroup()], shoppingPlanItems: [], preferences: { showGuidanceTips: true } })
       : of(null));
     fixture = TestBed.createComponent(PantryPageComponent);
     fixture.detectChanges();
@@ -479,6 +484,7 @@ describe('PantryPageComponent', () => {
 
     expect(pantryService.createProductType.calls.count()).toBe(1);
     expect(pantryService.closeShoppingPurchase).toHaveBeenCalledOnceWith({
+      originHouseholdId: 'home-original',
       items: [{ productTypeId: 'coffee', quantity: 2, unit: 'piezas' }],
     }, jasmine.any(String));
   });
@@ -953,6 +959,7 @@ describe('PantryPageComponent', () => {
 
     expect(pantryService.closeShoppingPurchase).toHaveBeenCalledWith(
       {
+        originHouseholdId: 'home-original',
         items: [
           jasmine.objectContaining({
             productTypeId: 'type-rice',
@@ -1132,7 +1139,7 @@ describe('PantryPageComponent', () => {
     expect(pantryService.closeShoppingPurchase).not.toHaveBeenCalled();
   });
 
-  it('migrates only legacy saved lists that identify the current owner', () => {
+  it('lets the owner review legacy lists without assigning them to the current household', () => {
     fixture.destroy();
     localStorage.setItem(
       'despensalista.savedShoppingLists',
@@ -1147,19 +1154,15 @@ describe('PantryPageComponent', () => {
     component = fixture.componentInstance;
     fixture.detectChanges();
 
-    expect(component.savedShoppingLists.map((list) => list.title)).toEqual([
-      'Propia',
-    ]);
-
-    fixture.destroy();
-    localStorage.removeItem('despensalista.savedShoppingLists');
-    fixture = TestBed.createComponent(PantryPageComponent);
-    component = fixture.componentInstance;
-    fixture.detectChanges();
-
-    expect(component.savedShoppingLists.map((list) => list.title)).toEqual([
-      'Propia',
-    ]);
+    expect(component.savedShoppingLists).toEqual([]);
+    const download = spyOn(component as any, 'downloadTextFile');
+    const page = fixture.nativeElement as HTMLElement;
+    Array.from(page.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Descargar datos para revisar')?.click();
+    const content = download.calls.mostRecent().args[0] as string;
+    expect(content).toContain('Propia');
+    expect(content).not.toContain('Ajena');
+    expect(content).not.toContain('Sin propietario');
+    expect(pantryService.createSavedShoppingList).not.toHaveBeenCalled();
   });
 
   it('parses quick capture lines for offline purchase drafts', () => {
@@ -1977,7 +1980,8 @@ describe('PantryPageComponent', () => {
     (component as any).flushPendingShoppingCheckouts();
 
     expect(pantryService.closeShoppingPurchase).toHaveBeenCalledWith(
-      {
+      jasmine.objectContaining({
+        originHouseholdId: 'home-original',
         items: [
           jasmine.objectContaining({
             productTypeId: 'type-detergent',
@@ -1985,10 +1989,79 @@ describe('PantryPageComponent', () => {
             unit: 'lt',
           }),
         ],
-      },
+      }),
       jasmine.any(String),
     );
     expect(component.pendingShoppingCheckoutCount).toBe(0);
+  });
+
+  it('retains a checkout from the previous household without replaying it in the new household', () => {
+    component.isOffline = true;
+    const item = makeShoppingPlanItem();
+    component.updateShoppingTripChecked(item, { target: { checked: true } } as unknown as Event);
+    component.closeShoppingTrip([item]);
+    expect(component.pendingShoppingCheckoutCount).toBe(1);
+    fixture.destroy();
+    overview.next(scopedTestOverview('home-other'));
+
+    fixture = TestBed.createComponent(PantryPageComponent);
+    // A new browser document starts with its own immutable write scope.
+    (fixture.componentInstance as any).pantryScope = new PantryHouseholdScope();
+    fixture.detectChanges();
+
+    expect(pantryService.closeShoppingPurchase).not.toHaveBeenCalled();
+    expect(fixture.nativeElement.textContent).toContain('Cierres de compra que requieren revisión');
+    expect((fixture.componentInstance as any).loadPendingShoppingCheckouts()).toEqual([
+      jasmine.objectContaining({ originHouseholdId: 'home-original' }),
+    ]);
+  });
+
+  it('stops the existing pantry page instead of assigning its open shopping trip to another household', () => {
+    const item = makeShoppingPlanItem();
+    component.updateShoppingTripChecked(item, { target: { checked: true } } as unknown as Event);
+    overview.next(scopedTestOverview('home-other'));
+
+    component.closeShoppingTrip([item]);
+
+    expect(pantryService.closeShoppingPurchase).not.toHaveBeenCalled();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('Tu hogar activo cambió');
+  });
+
+  it('keeps a legacy checkout and first-purchase draft without applying them to the current household', () => {
+    fixture.destroy();
+    const queueKey = 'despensalista.pendingShoppingCheckouts.v2.tester';
+    const draftKey = 'despensalista.firstPurchaseDraft.v2.tester';
+    const legacyCheckoutId = '01234567-0123-4123-8123-0123456789ab';
+    const legacyCheckout = { id: legacyCheckoutId, idempotencyKey: legacyCheckoutId,
+      createdAt: new Date(), ownerUserId: 'tester', firstPurchase: true,
+      items: [{ productTypeId: 'old-product', quantity: 2, unit: 'kg' }] };
+    const envelope = (payload: unknown) => JSON.stringify({ version: 1, ownerUserId: 'tester', payload: JSON.stringify(payload) });
+    localStorage.setItem(queueKey, envelope([legacyCheckout]));
+    localStorage.setItem(draftKey, envelope({ name: 'Avena', quantity: 2, unit: 'kg', expiresAt: '' }));
+    fixture = TestBed.createComponent(PantryPageComponent);
+    fixture.detectChanges();
+
+    expect(pantryService.closeShoppingPurchase).not.toHaveBeenCalled();
+    expect(fixture.componentInstance.firstPurchasePending).toBeFalse();
+    expect(fixture.componentInstance.firstPurchaseDraft).toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('Cierres de compra que requieren revisión');
+    expect(localStorage.getItem(queueKey)).toContain(legacyCheckoutId);
+    expect(localStorage.getItem(draftKey)).toContain('Avena');
+  });
+
+  it('retains an attempted close for review when the server detects that the household changed', () => {
+    pantryService.closeShoppingPurchase.and.returnValue(throwError(() => new HttpErrorResponse({
+      status: 409, error: { code: 'HOUSEHOLD_ORIGIN_MISMATCH' },
+    })));
+    const item = makeShoppingPlanItem();
+    component.updateShoppingTripChecked(item, { target: { checked: true } } as unknown as Event);
+    component.closeShoppingTrip([item]);
+    fixture.detectChanges();
+
+    expect(pantryService.closeShoppingPurchase).toHaveBeenCalledTimes(1);
+    expect(component.pendingShoppingCheckoutCount).toBe(1);
+    expect(fixture.nativeElement.textContent).toContain('Tu hogar activo cambió');
   });
 
   it('reuses the persisted checkout idempotency key after a failed sync', () => {
@@ -2123,6 +2196,10 @@ describe('PantryPageComponent', () => {
     expect(component.pendingShoppingCheckoutCount).toBe(0);
   });
 });
+
+function scopedTestOverview(householdId: string) {
+  return { householdId, items: [] as PantryOverviewItem[], shoppingPlanItems: [], preferences: { showGuidanceTips: false } };
+}
 
 function makeConsumeResult(
   value: InventoryLot | null = null,

@@ -16,12 +16,14 @@ import { UserId } from '../../domain/value-objects/user-id.vo';
 import { mexicoCityDateLabel } from '../../domain/utils/civil-date';
 import { MAX_SHOPPING_CHECKOUT_ITEMS } from '../constants/query-limits';
 import {
+  HouseholdOriginMismatchError,
   IdempotencyPayloadConflictError,
   IdempotentMutationResult,
   PantryMutationConflictError,
   PantryMutationPort,
   PantryQuotaExceededError,
   ProductTypeTransactionChange,
+  PurchaseMembershipFence,
 } from '../ports/pantry-mutation.port';
 import { PANTRY_MUTATION_PORT, PRODUCT_TYPE_REPOSITORY } from '../tokens';
 import { parseQuantityUnit } from '../utils/enum-parsers';
@@ -42,6 +44,8 @@ export interface CloseShoppingPurchaseItemCommand {
 
 export interface CloseShoppingPurchaseCommand {
   userId: string;
+  householdId?: string;
+  membershipFence?: PurchaseMembershipFence;
   idempotencyKey?: string;
   items: CloseShoppingPurchaseItemCommand[];
 }
@@ -86,6 +90,7 @@ export class CloseShoppingPurchaseUseCase {
           expiresAt: item.expiresAt?.toISOString(),
         })),
       });
+      receipt.checkoutHouseholdId = command.householdId;
     } catch (error) {
       throw new BadRequestException((error as Error).message);
     }
@@ -174,6 +179,7 @@ export class CloseShoppingPurchaseUseCase {
         lots,
         productTypes: productTypeChanges,
         purchaseSpend,
+        membershipFence: command.membershipFence,
       });
 
       return {
@@ -246,6 +252,7 @@ export class CloseShoppingPurchaseUseCase {
 }
 
 function mapMutationError(error: unknown): Error {
+  if (error instanceof HouseholdOriginMismatchError) return error;
   if (
     error instanceof IdempotencyPayloadConflictError ||
     error instanceof PantryMutationConflictError ||

@@ -18,6 +18,7 @@ import { Subscription, of } from 'rxjs';
 import { catchError, finalize } from 'rxjs/operators';
 import { AuthFacade } from '../../core/services/auth.facade';
 import { AuthApiService } from '../../core/services/auth-api.service';
+import { isPantryHouseholdMismatch, PantryHouseholdScope } from '../../core/services/pantry-household-scope';
 import {
   AvailableBillingStatus,
   BillingAction,
@@ -31,10 +32,14 @@ import { ProfileService } from '../../core/services/profile.service';
 import { FeedbackService } from '../../core/services/feedback.service';
 import { readHouseholdInviteCode } from './household-invite-link';
 import { InvoiceRequestComponent } from './invoice-request.component';
+import { Store } from '@ngrx/store';
+import * as PantryActions from '../../store/pantry/pantry.actions';
+import * as ProductActions from '../../store/product/product.actions';
 import {
   HouseholdActivity,
   HouseholdInvite,
   HouseholdRole,
+  HouseholdSwitchOffer,
   HouseholdWorkspace,
   UserProfile,
 } from '../../shared/models/profile.model';
@@ -60,6 +65,7 @@ interface MonetizationDiscoveryEvent {
 
 interface PendingPantryDeletionIdempotencyKey {
   ownerUserId: string;
+  originHouseholdId: string;
   key: string;
   createdAt: string;
 }
@@ -93,6 +99,8 @@ const SUBSCRIPTION_STATUS_LABELS: Record<SubscriptionStatus, string> = {
   standalone: true,
 })
 export class ProfilePageComponent implements OnInit {
+  private readonly pantryScope = inject(PantryHouseholdScope);
+  private readonly store = inject(Store);
   private readonly formBuilder = inject(FormBuilder);
   private readonly profileService = inject(ProfileService);
   private readonly pantryService = inject(PantryService);
@@ -117,6 +125,7 @@ export class ProfilePageComponent implements OnInit {
   protected readonly recurringTermsAccepted = signal(false);
   protected readonly currentPlusHogarTermsVersion = plusHogarTermsVersion;
   private billingStatusRequest?: Subscription;
+  private householdWorkspaceRequest?: Subscription;
 
   profile: UserProfile | null = null;
   loading = false;
@@ -135,6 +144,8 @@ export class ProfilePageComponent implements OnInit {
   signingOutAllSessions = false;
   signOutAllSessionsError: string | null = null;
   householdWorkspace: HouseholdWorkspace | null = null;
+  protected householdSwitch: { code: string; offer: HouseholdSwitchOffer } | null = null;
+  protected switchedHouseholdName: string | null = null;
   householdLoading = false;
   householdError: string | null = null;
   householdMessage: string | null = null;
@@ -231,9 +242,15 @@ export class ProfilePageComponent implements OnInit {
     return (
       !this.loading &&
       !this.deletingPantryData &&
+      !!this.currentPantryHouseholdId &&
       this.deletePantryDataForm.controls.confirmationText.value.trim() ===
         'ELIMINAR'
     );
+  }
+
+  private get currentPantryHouseholdId(): string | null {
+    const householdId = this.householdWorkspace?.household.id;
+    return householdId && this.pantryScope.householdId === householdId ? householdId : null;
   }
 
   get canManageHousehold(): boolean {
@@ -346,7 +363,7 @@ export class ProfilePageComponent implements OnInit {
         next: (status) => {
           this.billing.set(status.available ? status : null);
           const displayedPlan = this.householdWorkspace?.plan?.tier;
-          if (status.available && displayedPlan && !this.householdLoading &&
+          if (status.available && displayedPlan && !this.householdLoading && !this.householdAccepting &&
             displayedPlan !== (status.hasPlus ? 'plus' : 'free')) {
             this.loadHouseholdWorkspace();
           }
@@ -508,6 +525,12 @@ export class ProfilePageComponent implements OnInit {
       return;
     }
 
+    if (!this.currentPantryHouseholdId) {
+      this.deleteError = 'Recarga el perfil para confirmar el hogar antes de borrar datos.';
+      this.deleteMessage = null;
+      return;
+    }
+
     let idempotencyKey: string;
     try {
       idempotencyKey = this.getOrCreatePantryDeletionIdempotencyKey();
@@ -537,7 +560,9 @@ export class ProfilePageComponent implements OnInit {
           this.changeDetector.markForCheck();
         },
         error: (error) => {
-          this.deleteError = this.getErrorMessage(error);
+          this.deleteError = isPantryHouseholdMismatch(error)
+            ? 'El hogar activo cambió. Recarga el perfil antes de borrar datos.'
+            : this.getErrorMessage(error);
           this.changeDetector.markForCheck();
         },
       });
@@ -634,12 +659,14 @@ export class ProfilePageComponent implements OnInit {
   }
 
   loadHouseholdWorkspace(): void {
+    this.householdWorkspaceRequest?.unsubscribe();
     this.householdLoading = true;
     this.householdError = null;
 
-    this.profileService
+    this.householdWorkspaceRequest = this.profileService
       .getHouseholdWorkspace()
       .pipe(
+        takeUntilDestroyed(this.destroyRef),
         finalize(() => {
           this.householdLoading = false;
           this.changeDetector.markForCheck();
@@ -648,6 +675,7 @@ export class ProfilePageComponent implements OnInit {
       .subscribe({
         next: (workspace) => {
           this.householdWorkspace = workspace;
+          this.pantryScope.bind(workspace.household.id);
           this.changeDetector.markForCheck();
         },
         error: (error) => {
@@ -724,13 +752,34 @@ export class ProfilePageComponent implements OnInit {
       return;
     }
 
+    this.submitHouseholdInvite(code);
+  }
+
+  protected confirmHouseholdSwitch(): void {
+    if (!this.householdSwitch || this.householdAccepting) return;
+    const { code, offer } = this.householdSwitch;
+    this.submitHouseholdInvite(code, offer.fromHouseholdId);
+  }
+
+  protected cancelHouseholdSwitch(): void {
+    this.householdSwitch = null;
+  }
+
+  private submitHouseholdInvite(code: string, switchFromHouseholdId?: string): void {
+    const confirmedSwitch = switchFromHouseholdId ? this.householdSwitch : null;
+    this.householdWorkspaceRequest?.unsubscribe();
     this.householdAccepting = true;
+    this.householdSwitch = null;
     this.householdError = null;
     this.householdMessage = null;
+    this.switchedHouseholdName = null;
 
-    this.profileService
-      .acceptHouseholdInvite(code)
+    const acceptance = switchFromHouseholdId
+      ? this.profileService.acceptHouseholdInvite(code, switchFromHouseholdId)
+      : this.profileService.acceptHouseholdInvite(code);
+    acceptance
       .pipe(
+        takeUntilDestroyed(this.destroyRef),
         finalize(() => {
           this.householdAccepting = false;
           this.changeDetector.markForCheck();
@@ -740,7 +789,17 @@ export class ProfilePageComponent implements OnInit {
         next: (workspace) => {
           this.householdWorkspace = workspace;
           this.householdAcceptForm.reset({ token: '' });
-          this.householdMessage = 'Invitacion aceptada.';
+          if (switchFromHouseholdId) {
+            this.pantryScope.markChanged();
+            this.deletePantryDataForm.reset({ confirmationText: '' });
+            this.store.dispatch(PantryActions.resetPantry());
+            this.store.dispatch(ProductActions.resetProducts());
+            this.switchedHouseholdName = workspace.household.name;
+            this.householdMessage = `Ahora perteneces a ${workspace.household.name}.`;
+          } else {
+            this.pantryScope.bind(workspace.household.id);
+            this.householdMessage = 'Invitacion aceptada.';
+          }
           this.billing.set(null);
           this.billingActionError.set(null);
           this.refreshBillingStatus();
@@ -755,10 +814,27 @@ export class ProfilePageComponent implements OnInit {
           this.changeDetector.markForCheck();
         },
         error: (error) => {
-          this.householdError = this.getHouseholdErrorMessage(error);
+          const offer = this.readHouseholdSwitchOffer(error);
+          if (offer) {
+            this.householdSwitch = { code, offer };
+          } else {
+            if (confirmedSwitch && error instanceof HttpErrorResponse && (error.status === 0 || error.status >= 500)) {
+              this.householdSwitch = confirmedSwitch;
+            }
+            this.householdError = this.getHouseholdErrorMessage(error);
+          }
           this.changeDetector.markForCheck();
         },
       });
+  }
+
+  private readHouseholdSwitchOffer(error: unknown): HouseholdSwitchOffer | null {
+    if (!(error instanceof HttpErrorResponse) || error.error?.code !== 'HOUSEHOLD_ALREADY_MEMBER') return null;
+    const offer = error.error.householdSwitch as Partial<HouseholdSwitchOffer> | undefined;
+    if (!offer || typeof offer.fromHouseholdId !== 'string' || !offer.fromHouseholdId ||
+        typeof offer.fromName !== 'string' || typeof offer.toName !== 'string' ||
+        (offer.role !== 'editor' && offer.role !== 'viewer') || typeof offer.closesOriginal !== 'boolean') return null;
+    return offer as HouseholdSwitchOffer;
   }
 
   private getHouseholdErrorMessage(error: unknown): string {
@@ -951,13 +1027,15 @@ export class ProfilePageComponent implements OnInit {
 
   private getOrCreatePantryDeletionIdempotencyKey(): string {
     const ownerUserId = this.profile?.id;
-    if (!ownerUserId) {
+    const originHouseholdId = this.currentPantryHouseholdId;
+    if (!ownerUserId || !originHouseholdId) {
       throw new Error(
         'No se pudo identificar la cuenta que solicita el borrado.',
       );
     }
     if (
       this.pendingPantryDeletionIdempotencyKey?.ownerUserId === ownerUserId &&
+      this.pendingPantryDeletionIdempotencyKey.originHouseholdId === originHouseholdId &&
       this.isCurrentPantryDeletionIdempotencyKey(
         this.pendingPantryDeletionIdempotencyKey,
       )
@@ -977,6 +1055,7 @@ export class ProfilePageComponent implements OnInit {
     );
     if (
       persisted?.ownerUserId === ownerUserId &&
+      persisted.originHouseholdId === originHouseholdId &&
       this.isCurrentPantryDeletionIdempotencyKey(persisted)
     ) {
       this.pendingPantryDeletionIdempotencyKey = persisted;
@@ -985,6 +1064,7 @@ export class ProfilePageComponent implements OnInit {
 
     const pending = {
       ownerUserId,
+      originHouseholdId,
       key: this.createIdempotencyKey(),
       createdAt: new Date().toISOString(),
     };
@@ -1022,6 +1102,7 @@ export class ProfilePageComponent implements OnInit {
       }
       const pending = value as Partial<PendingPantryDeletionIdempotencyKey>;
       return typeof pending.ownerUserId === 'string' &&
+        typeof pending.originHouseholdId === 'string' &&
         typeof pending.key === 'string' &&
         this.isUuid(pending.key) &&
         typeof pending.createdAt === 'string'

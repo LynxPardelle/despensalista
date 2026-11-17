@@ -11,6 +11,7 @@ export type HouseholdEntityType =
   | 'HOUSEHOLD'
   | 'HOUSEHOLD_MEMBERSHIP'
   | 'HOUSEHOLD_INVITE'
+  | 'HOUSEHOLD_SWITCH_STATE'
   | 'HOUSEHOLD_ACTIVITY';
 
 @Schema({
@@ -39,6 +40,18 @@ export class HouseholdDocument {
 
   @Prop({ required: false })
   mutationVersion?: number;
+
+  @Prop({ required: false })
+  creationActivityId?: string;
+
+  @Prop({ required: false })
+  contextVersion?: string;
+
+  @Prop({ required: false })
+  pristine?: boolean;
+
+  @Prop({ required: false })
+  contextRequired?: boolean;
 
   @Prop({ required: false, index: true })
   householdId?: string;
@@ -87,6 +100,12 @@ export class HouseholdDocument {
 
   @Prop({ required: false })
   acceptedAt?: Date;
+
+  @Prop({ required: false })
+  acceptedByUserId?: string;
+
+  @Prop({ required: false })
+  acceptedFromHouseholdId?: string;
 
   @Prop({ required: false })
   revokedAt?: Date;

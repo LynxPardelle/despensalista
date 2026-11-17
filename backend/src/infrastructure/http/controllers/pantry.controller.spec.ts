@@ -1,4 +1,5 @@
 import { FastifyReply, FastifyRequest } from 'fastify';
+import { ConfigService } from '@nestjs/config';
 import { AuthCookieService } from '../auth/auth-cookie.service';
 import { AuthenticatedUser } from '../auth/authenticated-user.interface';
 import { CloseShoppingPurchaseUseCase } from '../../../application/use-cases/close-shopping-purchase.use-case';
@@ -44,6 +45,7 @@ describe('PantryController', () => {
   let resolveHouseholdPantryAccessUseCase: jest.Mocked<ResolveHouseholdPantryAccessUseCase>;
   let recordHouseholdActivityUseCase: jest.Mocked<RecordHouseholdActivityUseCase>;
   let authCookieService: jest.Mocked<AuthCookieService>;
+  let configService: ConfigService;
 
   beforeEach(() => {
     getPantryOverviewUseCase = {
@@ -114,6 +116,7 @@ describe('PantryController', () => {
     authCookieService = {
       ensureXsrfForRequest: jest.fn(),
     } as unknown as jest.Mocked<AuthCookieService>;
+    configService = new ConfigService({ HOUSEHOLD_SWITCH_ENABLED: 'false' });
 
     controller = new PantryController(
       getPantryOverviewUseCase,
@@ -131,6 +134,7 @@ describe('PantryController', () => {
       resolveHouseholdPantryAccessUseCase,
       recordHouseholdActivityUseCase,
       authCookieService,
+      configService,
     );
   });
 
@@ -307,6 +311,7 @@ describe('PantryController', () => {
     );
     expect(closeShoppingPurchaseUseCase.execute).toHaveBeenCalledWith({
       userId: 'user-1',
+      householdId: 'household-1',
       idempotencyKey: '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
       items: [
         {
@@ -323,6 +328,97 @@ describe('PantryController', () => {
     expect(response[0].productTypeId).toBe('type-1');
     expect(logSpy).toHaveBeenCalledWith(
       expect.stringContaining('requestId=req-checkout-1'),
+    );
+  });
+
+  it('returns the household from the same access used to load the pantry', async () => {
+    const overview = await controller.overview(makeCurrentUser('user-1'), {
+      method: 'GET',
+      headers: {},
+    } as unknown as FastifyRequest);
+
+    expect(overview).toMatchObject({
+      userId: 'user-1',
+      householdId: 'household-1',
+    });
+  });
+
+  it.each([['household-old'], [undefined]])(
+    'rejects a purchase with untrusted origin %s before its receipt or inventory is touched',
+    async (originHouseholdId) => {
+      resolveHouseholdPantryAccessUseCase.executeRead.mockResolvedValueOnce(
+        makeHouseholdAccess({ requiresPurchaseOrigin: true, role: 'viewer' }),
+      );
+
+      await expect(
+        controller.checkout(
+          makeCurrentUser('user-1'),
+          { ...makeCheckout(), originHouseholdId },
+          { headers: {} } as FastifyRequest,
+          '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
+          makeReply(),
+        ),
+      ).rejects.toMatchObject({ code: 'HOUSEHOLD_ORIGIN_MISMATCH' });
+
+      expect(closeShoppingPurchaseUseCase.execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it('binds a scoped purchase to the editor membership rather than the pantry owner', async () => {
+    const access = makeHouseholdAccess({
+      requesterUserId: 'editor-1',
+      role: 'editor',
+      contextVersion: 'context-1',
+      requiresPurchaseOrigin: true,
+    });
+    resolveHouseholdPantryAccessUseCase.executeRead.mockResolvedValueOnce(
+      access,
+    );
+
+    await controller.checkout(
+      makeCurrentUser('editor-1'),
+      { ...makeCheckout(), originHouseholdId: access.householdId },
+      { headers: {} } as FastifyRequest,
+      '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
+      makeReply(),
+    );
+
+    expect(closeShoppingPurchaseUseCase.execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-1',
+        householdId: 'household-1',
+        membershipFence: {
+          userId: 'editor-1',
+          householdId: 'household-1',
+          role: 'editor',
+          contextVersion: 'context-1',
+          joinedAt: access.joinedAt,
+        },
+      }),
+    );
+  });
+
+  it('fences a legacy purchase before the first switch can commit', async () => {
+    jest.spyOn(configService, 'get').mockReturnValue('true');
+    const access = makeHouseholdAccess();
+
+    await controller.checkout(
+      makeCurrentUser('user-1'),
+      makeCheckout(),
+      { headers: {} } as FastifyRequest,
+      '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
+      makeReply(),
+    );
+
+    expect(closeShoppingPurchaseUseCase.execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        householdId: access.householdId,
+        membershipFence: expect.objectContaining({
+          userId: access.requesterUserId,
+          householdId: access.householdId,
+          joinedAt: access.joinedAt,
+        }),
+      }),
     );
   });
 
@@ -570,7 +666,7 @@ describe('PantryController', () => {
   });
 
   it('writes checkout data to the household owner scope for an editor', async () => {
-    resolveHouseholdPantryAccessUseCase.executeWrite.mockResolvedValueOnce(
+    resolveHouseholdPantryAccessUseCase.executeRead.mockResolvedValueOnce(
       makeHouseholdAccess({
         requesterUserId: 'member-user',
         pantryOwnerUserId: 'owner-user',
@@ -598,10 +694,11 @@ describe('PantryController', () => {
     );
 
     expect(
-      resolveHouseholdPantryAccessUseCase.executeWrite,
+      resolveHouseholdPantryAccessUseCase.executeRead,
     ).toHaveBeenCalledWith('member-user');
     expect(closeShoppingPurchaseUseCase.execute).toHaveBeenCalledWith({
       userId: 'owner-user',
+      householdId: 'household-1',
       idempotencyKey: '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
       items: [
         {
@@ -827,6 +924,9 @@ function makeHouseholdAccess(
     householdId: string;
     pantryOwnerUserId: string;
     role: 'owner' | 'editor' | 'viewer';
+    joinedAt: Date;
+    contextVersion: string;
+    requiresPurchaseOrigin: boolean;
   }> = {},
 ) {
   return {
@@ -834,6 +934,13 @@ function makeHouseholdAccess(
     householdId: 'household-1',
     pantryOwnerUserId: 'user-1',
     role: 'owner' as const,
+    joinedAt: new Date('2026-11-16T00:00:00.000Z'),
     ...overrides,
+  };
+}
+
+function makeCheckout() {
+  return {
+    items: [{ productTypeId: 'type-1', quantity: 1, unit: QuantityUnit.PIECE }],
   };
 }

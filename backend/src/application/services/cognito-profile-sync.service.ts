@@ -1,16 +1,24 @@
-import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Optional,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { UserDao } from '../ports/daos';
 import { CognitoVerifiedClaims } from '../ports/cognito-auth.port';
 import { USER_DAO } from '../tokens';
 import { User } from '../../domain/entities/user.entity';
 import { UserAccountStatus } from '../../domain/enums';
 import { UserId } from '../../domain/value-objects/user-id.vo';
+import { HouseholdSwitchAccessService } from './household-switch-access.service';
 
 @Injectable()
 export class CognitoProfileSyncService {
   constructor(
     @Inject(USER_DAO)
     private readonly userDao: UserDao,
+    @Optional()
+    private readonly householdSwitch?: HouseholdSwitchAccessService,
   ) {}
 
   async syncFromClaims(claims: CognitoVerifiedClaims): Promise<User> {
@@ -64,7 +72,11 @@ export class CognitoProfileSyncService {
 
     user.linkAuthSubject(authSubjectId, cognitoUsername);
 
-    return this.userDao.save(user);
+    const savedUser = await this.userDao.save(user);
+    if (!existingUser) {
+      await this.householdSwitch?.registerNewAccount(savedUser.id.toString());
+    }
+    return savedUser;
   }
 
   private resolveExistingUser(

@@ -216,6 +216,14 @@ export interface HouseholdWorkspace {
   activities: HouseholdActivity[];
 }
 
+export interface HouseholdSwitchOffer {
+  fromHouseholdId: string;
+  fromName: string;
+  toName: string;
+  role: 'editor' | 'viewer';
+  closesOriginal: boolean;
+}
+
 export interface CreateHouseholdInviteRequest {
   email: string;
   role: Exclude<HouseholdRole, 'owner'>;
