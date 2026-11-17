@@ -1,4 +1,11 @@
-import { IsEmail, IsIn, IsString, MinLength } from 'class-validator';
+import {
+  IsEmail,
+  IsIn,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MinLength,
+} from 'class-validator';
 import {
   HouseholdActivityType,
   HouseholdRole,
@@ -16,6 +23,10 @@ export class AcceptHouseholdInviteDto {
   @IsString()
   @MinLength(16)
   token: string;
+
+  @IsOptional()
+  @IsUUID('4')
+  switchFromHouseholdId?: string;
 }
 
 export interface HouseholdResponseDto {

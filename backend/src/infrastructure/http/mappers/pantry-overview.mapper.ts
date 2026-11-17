@@ -24,9 +24,13 @@ import {
 } from '../dtos/pantry-overview-response.dto';
 
 export class PantryOverviewMapper {
-  static toResponse(overview: PantryOverview): PantryOverviewResponseDto {
+  static toResponse(
+    overview: PantryOverview,
+    householdId: string,
+  ): PantryOverviewResponseDto {
     return {
       userId: overview.userId,
+      householdId,
       generatedAt: overview.generatedAt,
       preferences: overview.preferences,
       items: overview.items.map((item) => ({

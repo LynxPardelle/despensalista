@@ -1,4 +1,5 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import {
   AcceptHouseholdInviteUseCase,
   CreateHouseholdInviteUseCase,
@@ -69,6 +70,10 @@ describe('household use cases', () => {
       deleteHouseholdCascade: jest.fn(),
       beginHouseholdDeletion: jest.fn(),
       cancelHouseholdDeletion: jest.fn(),
+      canSwitchFrom: jest.fn(),
+      getHouseholdSwitchState: jest.fn(),
+      registerHouseholdSwitchCandidate: jest.fn(),
+      markHouseholdUsed: jest.fn(),
     };
     userDao = {
       save: jest.fn(),
@@ -265,6 +270,65 @@ describe('household use cases', () => {
     expect(repository.acceptInvite).not.toHaveBeenCalled();
   });
 
+  it.each(['viewer', 'owner'] as const)(
+    'offers and explicitly confirms a switch for an eligible %s',
+    async (role) => {
+      const previous = makeMembership({
+        householdId: 'old-home',
+        userId: 'invited-user',
+        role,
+      });
+      const config = new ConfigService({ HOUSEHOLD_SWITCH_ENABLED: 'true' });
+      userDao.findById.mockResolvedValue(invitedUser);
+      repository.findInviteByTokenHash.mockResolvedValue(makeInvite());
+      repository.findMembershipByUserId.mockResolvedValue(previous);
+      repository.canSwitchFrom.mockResolvedValue(true);
+      repository.findHouseholdById.mockImplementation(async (id) =>
+        Household.fromPrimitives({
+          id,
+          name: id === 'old-home' ? 'Origen' : 'Destino',
+          ownerUserId: 'owner-user',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        }),
+      );
+      repository.findMembersByHouseholdId.mockResolvedValue([]);
+      repository.findActiveInvitesByHouseholdId.mockResolvedValue([]);
+      repository.findActivitiesByHouseholdId.mockResolvedValue([]);
+      repository.saveActivity.mockImplementation(async (activity) => activity);
+      const useCase = new AcceptHouseholdInviteUseCase(
+        repository,
+        userDao,
+        plans,
+        config,
+      );
+      const command = { userId: 'invited-user', token: 'accept-token-safe' };
+
+      await expect(useCase.execute(command)).rejects.toMatchObject({
+        householdSwitch: {
+          fromHouseholdId: 'old-home',
+          fromName: 'Origen',
+          toName: 'Destino',
+          role: 'editor',
+          closesOriginal: role === 'owner',
+        },
+      });
+      expect(repository.acceptInvite).not.toHaveBeenCalled();
+
+      const workspace = await useCase.execute({
+        ...command,
+        switchFromHouseholdId: 'old-home',
+      });
+      expect(workspace.currentMember.householdId).toBe('household-1');
+      expect(repository.acceptInvite).toHaveBeenCalledWith(
+        expect.any(HouseholdInvite),
+        expect.objectContaining({ householdId: 'household-1' }),
+        2,
+        previous,
+      );
+    },
+  );
+
   it('revokes active invites from the household owner', async () => {
     const household = makeHousehold();
     const invite = makeInvite({ householdId: household.toPrimitives().id });
@@ -348,11 +412,12 @@ describe('household use cases', () => {
       userDao,
     ).executeWrite('invited-user');
 
-    expect(access).toEqual({
+    expect(access).toMatchObject({
       requesterUserId: 'invited-user',
       householdId: 'household-1',
       pantryOwnerUserId: 'owner-user',
       role: 'editor',
+      joinedAt: new Date('2026-06-01T00:00:00.000Z'),
     });
   });
 

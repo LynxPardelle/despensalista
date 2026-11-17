@@ -21,6 +21,7 @@ import {
 import {
   CloseShoppingPurchaseMutation,
   ConsumeInventoryLotMutation,
+  HouseholdOriginMismatchError,
   IdempotencyPayloadConflictError,
   IdempotentMutationResult,
   PantryDeletionReceipt,
@@ -31,6 +32,7 @@ import {
   PantryOperationLookup,
   PantryOperationReceipt,
   PantryQuotaExceededError,
+  PurchaseMembershipFence,
   SavedShoppingListLimitError,
 } from '../../../application/ports/pantry-mutation.port';
 import {
@@ -75,6 +77,7 @@ interface PantryOperationItem {
   ownerUserId: string;
   operation: PantryOperationReceipt['operation'];
   requestHash: string;
+  checkoutHouseholdId?: string;
   response: PersistedLot | PersistedLot[] | PantryDeletionResult | null;
   createdAt: string;
   expiresAt: string;
@@ -154,6 +157,12 @@ export class DynamoDbPantryMutationAdapter
     }
 
     const receipt = fromOperationItem(result.Item as PantryOperationItem);
+    if (
+      receipt.checkoutHouseholdId !== undefined &&
+      receipt.checkoutHouseholdId !== lookup.checkoutHouseholdId
+    ) {
+      throw new HouseholdOriginMismatchError();
+    }
     if (
       receipt.ownerUserId !== lookup.ownerUserId ||
       receipt.operation !== lookup.operation ||
@@ -276,10 +285,12 @@ export class DynamoDbPantryMutationAdapter
   async checkout(
     mutation: CloseShoppingPurchaseMutation,
   ): Promise<IdempotentMutationResult<InventoryLotPrimitives[]>> {
-    const quotaEpoch = await this.ensureQuota(mutation.receipt.ownerUserId);
     const response = mutation.lots.map((lot) => lot.toPrimitives());
     const transactionItems: TransactionItems = [
       receiptPut(this.usersTable, mutation.receipt, response),
+      ...(mutation.membershipFence
+        ? [checkPurchaseMembership(this.usersTable, mutation.membershipFence)]
+        : []),
       ...mutation.lots.map((lot) => ({
         Put: {
           TableName: this.inventoryLotsTable,
@@ -325,16 +336,18 @@ export class DynamoDbPantryMutationAdapter
 
     if (transactionItems.length > 100) {
       throw new PantryMutationConflictError(
-        'Checkout exceeds DynamoDB transaction capacity',
+        'La compra supera el límite de 48 tipos de producto distintos. Divídela y vuelve a intentarlo.',
       );
     }
 
+    const quotaEpoch = await this.ensureQuota(mutation.receipt.ownerUserId);
     return this.commit(
       mutation.receipt,
       response,
       transactionItems,
       transactionItems.length - 1,
       quotaEpoch,
+      mutation.membershipFence ? 1 : undefined,
     );
   }
 
@@ -1116,6 +1129,7 @@ export class DynamoDbPantryMutationAdapter
     transactionItems: TransactionItems,
     quotaActionIndex: number,
     quotaEpoch: number,
+    membershipActionIndex?: number,
   ): Promise<IdempotentMutationResult<T>> {
     bindQuotaFence(transactionItems[quotaActionIndex], quotaEpoch);
     try {
@@ -1131,6 +1145,13 @@ export class DynamoDbPantryMutationAdapter
         throw error;
       }
 
+      if (
+        membershipActionIndex !== undefined &&
+        error.CancellationReasons?.[membershipActionIndex]?.Code ===
+          'ConditionalCheckFailed'
+      ) {
+        throw new HouseholdOriginMismatchError();
+      }
       const replay = await this.findReceipt(receipt);
       if (replay) {
         return { value: replay.response as T, replayed: true };
@@ -1421,6 +1442,31 @@ function receiptPut(
   };
 }
 
+function checkPurchaseMembership(
+  tableName: string,
+  membership: PurchaseMembershipFence,
+): TransactionItems[number] {
+  const contextCondition = membership.contextVersion
+    ? 'contextVersion = :contextVersion'
+    : 'attribute_not_exists(contextVersion) AND joinedAt = :joinedAt';
+
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: { pk: `HOUSEHOLD_MEMBER_BY_USER#${membership.userId}` },
+      ConditionExpression: `householdId = :householdId AND #role = :role AND ${contextCondition}`,
+      ExpressionAttributeNames: { '#role': 'role' },
+      ExpressionAttributeValues: {
+        ':householdId': membership.householdId,
+        ':role': membership.role,
+        ...(membership.contextVersion
+          ? { ':contextVersion': membership.contextVersion }
+          : { ':joinedAt': membership.joinedAt.toISOString() }),
+      },
+    },
+  };
+}
+
 function toOperationItem(
   receipt: PantryOperationLookup,
   response: PantryOperationReceipt['response'],
@@ -1434,6 +1480,9 @@ function toOperationItem(
     ownerUserId: receipt.ownerUserId,
     operation: receipt.operation,
     requestHash: receipt.requestHash,
+    ...(receipt.checkoutHouseholdId
+      ? { checkoutHouseholdId: receipt.checkoutHouseholdId }
+      : {}),
     response:
       receipt.operation === 'delete_pantry_data'
         ? (response as PantryDeletionResult)
@@ -1454,6 +1503,9 @@ function fromOperationItem(item: PantryOperationItem): PantryOperationReceipt {
     ownerUserId: item.ownerUserId,
     operation: item.operation,
     requestHash: item.requestHash,
+    ...(item.checkoutHouseholdId
+      ? { checkoutHouseholdId: item.checkoutHouseholdId }
+      : {}),
     response:
       item.operation === 'delete_pantry_data'
         ? (item.response as PantryDeletionResult)

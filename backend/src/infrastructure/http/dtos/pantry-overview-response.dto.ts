@@ -443,6 +443,9 @@ export class PantryOverviewResponseDto {
   userId: string;
 
   @ApiProperty()
+  householdId: string;
+
+  @ApiProperty()
   generatedAt: Date;
 
   @ApiProperty()

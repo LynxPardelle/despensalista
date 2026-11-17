@@ -11,6 +11,25 @@ const validItem = {
 };
 
 describe('CheckoutPantryDto calendar dates', () => {
+  it('accepts an explicit household origin and rejects an empty or null origin', () => {
+    const dto = (originHouseholdId: unknown) =>
+      plainToInstance(CheckoutPantryDto, {
+        items: [validItem],
+        originHouseholdId,
+      });
+    expect(
+      validateSync(dto('home-1'), {
+        whitelist: true,
+        forbidNonWhitelisted: true,
+      }),
+    ).toEqual([]);
+    for (const invalidOrigin of [null, '', {}, 12]) {
+      expect(
+        validateSync(dto(invalidOrigin)).map((error) => error.property),
+      ).toContain('originHouseholdId');
+    }
+  });
+
   it('accepts a valid date-only expiration in a nested item', () => {
     const dto = plainToInstance(CheckoutPantryDto, { items: [validItem] });
     expect(validateSync(dto)).toEqual([]);

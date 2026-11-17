@@ -1,6 +1,6 @@
 import { ConflictException, Injectable, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { ClientSession, Model } from 'mongoose';
+import { AnyBulkWriteOperation, ClientSession, Model } from 'mongoose';
 import { randomUUID } from 'node:crypto';
 import {
   Household,
@@ -16,6 +16,8 @@ import {
   HouseholdDeletionLock,
   HouseholdMemberLimitError,
   HouseholdRepository,
+  HouseholdSwitchConflictError,
+  HouseholdSwitchState,
 } from '../../../domain/repositories/household.repository';
 import { HouseholdDocument } from './schemas/household.schema';
 
@@ -73,21 +75,23 @@ export class MongoHouseholdRepository
     household: Household,
     membership: HouseholdMembership,
   ): Promise<HouseholdMembership> {
+    const activity = HouseholdActivity.create({
+      householdId: household.id,
+      actorUserId: membership.userId,
+      type: 'household_created',
+    });
     const session = await this.householdModel.db.startSession();
     try {
       await session.withTransaction(async () => {
         await this.assertActiveUsers([membership.userId], session);
         await this.householdModel.create(
           [
-            this.toHouseholdRecord(household),
+            {
+              ...this.toHouseholdRecord(household),
+              creationActivityId: activity.id,
+            },
             this.toMembershipRecord(membership),
-            this.toActivityRecord(
-              HouseholdActivity.create({
-                householdId: household.id,
-                actorUserId: membership.userId,
-                type: 'household_created',
-              }),
-            ),
+            this.toActivityRecord(activity),
           ],
           { session, ordered: true },
         );
@@ -107,11 +111,26 @@ export class MongoHouseholdRepository
     invite: HouseholdInvite,
     membership: HouseholdMembership,
     memberLimit: number,
+    previous?: HouseholdMembership,
   ): Promise<HouseholdMembership> {
+    const inviteRecord = this.toInviteRecord(invite);
+    if (previous) {
+      if (
+        previous.userId !== membership.userId ||
+        previous.householdId === membership.householdId ||
+        membership.householdId !== invite.householdId ||
+        membership.role !== invite.role ||
+        membership.role === 'owner' ||
+        membership.toPrimitives().email !== invite.invitedEmail
+      ) {
+        throw new HouseholdSwitchConflictError();
+      }
+      inviteRecord.acceptedByUserId = membership.userId;
+      inviteRecord.acceptedFromHouseholdId = previous.householdId;
+    }
     const session = await this.householdModel.db.startSession();
     try {
       await session.withTransaction(async () => {
-        const inviteRecord = this.toInviteRecord(invite);
         await this.assertActiveUsers(
           [membership.userId, inviteRecord.invitedByUserId],
           session,
@@ -138,18 +157,26 @@ export class MongoHouseholdRepository
           .updateOne(
             {
               pk: inviteKey(invite.id),
-              tokenHash: invite.toPrimitives().tokenHash,
+              tokenHash: inviteRecord.tokenHash,
+              invitedEmail: inviteRecord.invitedEmail,
+              invitedByUserId: inviteRecord.invitedByUserId,
+              householdId: inviteRecord.householdId,
+              role: inviteRecord.role,
               acceptedAt: null,
               revokedAt: null,
               privacyRedacted: { $ne: true },
               expiresAt: { $gt: new Date() },
             },
-            this.toInviteRecord(invite),
+            inviteRecord,
             { session },
           )
           .exec();
         if (accepted.matchedCount !== 1)
           throw new ConflictException('Invitation changed; refresh and retry');
+        if (previous) {
+          await this.switchMembership(previous, membership, session);
+          return;
+        }
         await this.householdModel
           .updateOne(
             {
@@ -165,12 +192,195 @@ export class MongoHouseholdRepository
       });
       return membership;
     } catch (error) {
+      if (
+        previous &&
+        (error instanceof ConflictException ||
+          (error as { code?: number }).code === 11000)
+      ) {
+        throw new HouseholdSwitchConflictError();
+      }
       if ((error as { code?: number }).code === 11000)
         throw new ConflictException('User already belongs to a household');
       throw error;
     } finally {
       await session.endSession();
     }
+  }
+
+  async registerHouseholdSwitchCandidate(userId: string): Promise<void> {
+    const session = await this.householdModel.db.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await this.assertActiveUsers([userId], session);
+        const now = new Date();
+        await this.householdModel
+          .updateOne(
+            { pk: switchStateKey(userId) },
+            {
+              $setOnInsert: {
+                entityType: 'HOUSEHOLD_SWITCH_STATE',
+                userId,
+                pristine: true,
+                createdAt: now,
+                updatedAt: now,
+              },
+            },
+            { upsert: true, session },
+          )
+          .exec();
+      });
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  async markHouseholdUsed(userId: string): Promise<void> {
+    const session = await this.householdModel.db.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await this.assertActiveUsers([userId], session);
+        await this.updateSwitchState(userId, session, false, false);
+      });
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  async getHouseholdSwitchState(userId: string): Promise<HouseholdSwitchState> {
+    const record = await this.householdModel
+      .findOne({ pk: switchStateKey(userId) })
+      .lean()
+      .exec();
+    return {
+      pristine: record?.pristine === true,
+      contextRequired: record?.contextRequired === true,
+    };
+  }
+
+  async canSwitchFrom(previous: HouseholdMembership): Promise<boolean> {
+    if (previous.role !== 'owner') return true;
+    if (!(await this.getHouseholdSwitchState(previous.userId)).pristine)
+      return false;
+    const parent = await this.householdModel
+      .findOne({
+        pk: householdKey(previous.householdId),
+        ownerUserId: previous.userId,
+        deleting: { $exists: false },
+        creationActivityId: { $exists: true },
+      })
+      .lean()
+      .exec();
+    if (!parent) return false;
+    return !(await this.householdModel
+      .exists({
+        entityType: 'HOUSEHOLD_MEMBERSHIP',
+        householdId: previous.householdId,
+        userId: { $ne: previous.userId },
+      })
+      .exec());
+  }
+
+  private async switchMembership(
+    previous: HouseholdMembership,
+    membership: HouseholdMembership,
+    session: ClientSession,
+  ): Promise<void> {
+    const isOwner = previous.role === 'owner';
+    const { joinedAt, updatedAt, contextVersion } = previous.toPrimitives();
+    const parent = await this.householdModel
+      .findOneAndUpdate(
+        {
+          pk: householdKey(previous.householdId),
+          deleting: { $exists: false },
+          ...(isOwner
+            ? {
+                ownerUserId: previous.userId,
+                creationActivityId: { $exists: true },
+              }
+            : { ownerUserId: { $ne: previous.userId } }),
+        },
+        { $inc: { mutationVersion: 1 } },
+        { session },
+      )
+      .lean()
+      .exec();
+    if (!parent) throw new HouseholdSwitchConflictError();
+
+    if (isOwner) {
+      const otherMember = await this.householdModel
+        .exists({
+          entityType: 'HOUSEHOLD_MEMBERSHIP',
+          householdId: previous.householdId,
+          userId: { $ne: previous.userId },
+        })
+        .session(session)
+        .exec();
+      if (otherMember || !parent.creationActivityId)
+        throw new HouseholdSwitchConflictError();
+      const activity = await this.householdModel
+        .deleteOne(
+          {
+            pk: activityKey(parent.creationActivityId),
+            householdId: previous.householdId,
+            actorUserId: previous.userId,
+            type: 'household_created',
+          },
+          { session },
+        )
+        .exec();
+      if (activity.deletedCount !== 1) throw new HouseholdSwitchConflictError();
+      await this.householdModel
+        .deleteOne({ pk: parent.pk }, { session })
+        .exec();
+    }
+
+    const moved = await this.householdModel
+      .updateOne(
+        {
+          pk: membershipKey(previous.householdId, previous.userId),
+          role: previous.role,
+          joinedAt,
+          updatedAt,
+          contextVersion: contextVersion ?? { $exists: false },
+        },
+        { $set: this.toMembershipRecord(membership) },
+        { session },
+      )
+      .exec();
+    if (moved.matchedCount !== 1) throw new HouseholdSwitchConflictError();
+    await this.updateSwitchState(previous.userId, session, isOwner, true);
+  }
+
+  private async updateSwitchState(
+    userId: string,
+    session: ClientSession,
+    requirePristine: boolean,
+    setContextRequired: boolean,
+  ): Promise<void> {
+    const now = new Date();
+    const changed = await this.householdModel
+      .updateOne(
+        {
+          pk: switchStateKey(userId),
+          ...(requirePristine && { pristine: true }),
+        },
+        {
+          $set: {
+            updatedAt: now,
+            pristine: false,
+            ...(setContextRequired && { contextRequired: true }),
+          },
+          $setOnInsert: {
+            entityType: 'HOUSEHOLD_SWITCH_STATE',
+            userId,
+            createdAt: now,
+          },
+        },
+        { upsert: !requirePristine, session },
+      )
+      .exec();
+    if (requirePristine && changed.matchedCount !== 1)
+      throw new HouseholdSwitchConflictError();
   }
 
   async saveHousehold(household: Household): Promise<Household> {
@@ -420,9 +630,11 @@ export class MongoHouseholdRepository
               $or: [
                 { invitedByUserId: userId },
                 { invitedEmail: normalizedEmail },
+                { acceptedByUserId: userId },
               ],
             },
             { entityType: 'HOUSEHOLD_MEMBERSHIP', userId },
+            { entityType: 'HOUSEHOLD_SWITCH_STATE', userId },
           ],
         })
         .sort({ pk: 1 })
@@ -656,10 +868,13 @@ export class MongoHouseholdRepository
     record: Record<string, unknown>,
     userId: string,
     email: string,
-  ) {
+  ): AnyBulkWriteOperation<HouseholdDocument> {
     if (typeof record.pk !== 'string')
       throw new Error('Invalid household record key');
-    if (record.entityType === 'HOUSEHOLD_MEMBERSHIP') {
+    if (
+      record.entityType === 'HOUSEHOLD_MEMBERSHIP' ||
+      record.entityType === 'HOUSEHOLD_SWITCH_STATE'
+    ) {
       return {
         deleteOne: {
           filter: { pk: record.pk, userId },
@@ -695,7 +910,11 @@ export class MongoHouseholdRepository
         updateOne: {
           filter: {
             pk: record.pk,
-            $or: [{ invitedByUserId: userId }, { invitedEmail: email }],
+            $or: [
+              { invitedByUserId: userId },
+              { invitedEmail: email },
+              { acceptedByUserId: userId },
+            ],
           },
           update: {
             $set: {
@@ -707,6 +926,7 @@ export class MongoHouseholdRepository
                 ? { invitedByUserId: ANONYMIZED_USER_ID }
                 : {}),
             },
+            $unset: { acceptedByUserId: '', acceptedFromHouseholdId: '' },
           },
         },
       };
@@ -777,6 +997,7 @@ export class MongoHouseholdRepository
       role: record.role,
       joinedAt: new Date(record.joinedAt),
       updatedAt: new Date(record.updatedAt),
+      contextVersion: record.contextVersion,
     });
   }
 
@@ -791,6 +1012,8 @@ export class MongoHouseholdRepository
       createdAt: new Date(record.createdAt),
       expiresAt: new Date(record.expiresAt),
       acceptedAt: record.acceptedAt ? new Date(record.acceptedAt) : undefined,
+      acceptedByUserId: record.acceptedByUserId,
+      acceptedFromHouseholdId: record.acceptedFromHouseholdId,
       revokedAt: record.revokedAt ? new Date(record.revokedAt) : undefined,
       updatedAt: new Date(record.updatedAt),
     });
@@ -816,6 +1039,10 @@ function householdKey(id: string): string {
 
 function membershipKey(householdId: string, userId: string): string {
   return `HOUSEHOLD#${householdId}#MEMBER#${userId}`;
+}
+
+function switchStateKey(userId: string): string {
+  return `HOUSEHOLD_SWITCH_STATE#${userId}`;
 }
 
 function inviteKey(id: string): string {

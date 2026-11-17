@@ -33,6 +33,7 @@ export interface HouseholdMembershipPrimitives {
   role: HouseholdRole;
   joinedAt: Date;
   updatedAt: Date;
+  contextVersion?: string;
 }
 
 export interface HouseholdInvitePrimitives {
@@ -45,6 +46,8 @@ export interface HouseholdInvitePrimitives {
   createdAt: Date;
   expiresAt: Date;
   acceptedAt?: Date;
+  acceptedByUserId?: string;
+  acceptedFromHouseholdId?: string;
   revokedAt?: Date;
   updatedAt: Date;
 }
@@ -130,6 +133,7 @@ export class HouseholdMembership {
     private readonly _role: HouseholdRole,
     private readonly _joinedAt: Date,
     private readonly _updatedAt: Date,
+    readonly contextVersion?: string,
   ) {}
 
   static create(params: {
@@ -146,6 +150,7 @@ export class HouseholdMembership {
       normalizeRole(params.role),
       params.now,
       params.now,
+      randomUUID(),
     );
   }
 
@@ -160,6 +165,7 @@ export class HouseholdMembership {
       normalizeRole(primitives.role),
       new Date(primitives.joinedAt),
       new Date(primitives.updatedAt),
+      primitives.contextVersion,
     );
   }
 
@@ -184,6 +190,7 @@ export class HouseholdMembership {
       role: this._role,
       joinedAt: new Date(this._joinedAt),
       updatedAt: new Date(this._updatedAt),
+      contextVersion: this.contextVersion,
     };
   }
 }
@@ -201,6 +208,8 @@ export class HouseholdInvite {
     private _acceptedAt: Date | undefined,
     private _revokedAt: Date | undefined,
     private _updatedAt: Date,
+    private _acceptedByUserId?: string,
+    private _acceptedFromHouseholdId?: string,
   ) {}
 
   static create(params: {
@@ -242,6 +251,8 @@ export class HouseholdInvite {
       primitives.acceptedAt ? new Date(primitives.acceptedAt) : undefined,
       primitives.revokedAt ? new Date(primitives.revokedAt) : undefined,
       new Date(primitives.updatedAt),
+      primitives.acceptedByUserId,
+      primitives.acceptedFromHouseholdId,
     );
   }
 
@@ -269,12 +280,17 @@ export class HouseholdInvite {
     );
   }
 
-  accept(now = new Date()): void {
+  accept(
+    now = new Date(),
+    context?: { userId: string; fromHouseholdId?: string },
+  ): void {
     if (!this.isActive(now)) {
       throw new Error('Household invite must be active before accepting');
     }
 
     this._acceptedAt = now;
+    this._acceptedByUserId = context?.userId;
+    this._acceptedFromHouseholdId = context?.fromHouseholdId;
     this._updatedAt = now;
   }
 
@@ -298,6 +314,8 @@ export class HouseholdInvite {
       createdAt: new Date(this._createdAt),
       expiresAt: new Date(this._expiresAt),
       acceptedAt: this._acceptedAt ? new Date(this._acceptedAt) : undefined,
+      acceptedByUserId: this._acceptedByUserId,
+      acceptedFromHouseholdId: this._acceptedFromHouseholdId,
       revokedAt: this._revokedAt ? new Date(this._revokedAt) : undefined,
       updatedAt: new Date(this._updatedAt),
     };

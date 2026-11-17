@@ -10,14 +10,21 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { getRequestId } from '../request-id';
 import { GoogleMfaRequiredException } from '../auth/google-mfa.constants';
 import {
+  HouseholdOriginMismatchError,
   IdempotencyPayloadConflictError,
   PantryMutationConflictError,
   PantryQuotaExceededError,
   SavedShoppingListLimitError,
 } from '../../../application/ports/pantry-mutation.port';
-import { HouseholdMemberLimitError } from '../../../domain/repositories/household.repository';
+import {
+  HouseholdMemberLimitError,
+  HouseholdSwitchConflictError,
+} from '../../../domain/repositories/household.repository';
 import { PlusRequiredException } from '../../../application/use-cases/get-plus-household-summary.use-case';
-import { HouseholdAlreadyMemberException } from '../../../application/use-cases/household.use-cases';
+import {
+  HouseholdAlreadyMemberException,
+  type HouseholdSwitchOffer,
+} from '../../../application/use-cases/household.use-cases';
 import type { HouseholdRole } from '../../../domain/entities/household.entity';
 
 interface ApiErrorBody {
@@ -28,6 +35,7 @@ interface ApiErrorBody {
   timestamp: string;
   code?: string;
   role?: HouseholdRole;
+  householdSwitch?: HouseholdSwitchOffer;
 }
 
 @Catch()
@@ -54,7 +62,12 @@ export class ApiExceptionFilter implements ExceptionFilter {
       timestamp: new Date().toISOString(),
       ...(code ? { code } : {}),
       ...(exception instanceof HouseholdAlreadyMemberException
-        ? { role: exception.role }
+        ? {
+            role: exception.role,
+            ...(exception.householdSwitch
+              ? { householdSwitch: exception.householdSwitch }
+              : {}),
+          }
         : {}),
     };
 
@@ -92,10 +105,13 @@ function getStatusCode(exception: unknown): number {
 }
 
 function getErrorCode(exception: unknown): string | undefined {
+  if (exception instanceof HouseholdOriginMismatchError) return exception.code;
   if (exception instanceof GoogleMfaRequiredException) return exception.code;
   if (exception instanceof PlusRequiredException) return exception.code;
   if (exception instanceof HouseholdAlreadyMemberException)
     return exception.code;
+  if (exception instanceof HouseholdSwitchConflictError)
+    return 'HOUSEHOLD_SWITCH_CONFLICT';
   if (exception instanceof HouseholdMemberLimitError)
     return 'HOUSEHOLD_MEMBER_LIMIT';
   if (exception instanceof SavedShoppingListLimitError)
@@ -144,6 +160,7 @@ function isClientConflict(error: unknown): error is Error {
     error instanceof IdempotencyPayloadConflictError ||
     error instanceof PantryMutationConflictError ||
     error instanceof PantryQuotaExceededError ||
+    error instanceof HouseholdSwitchConflictError ||
     error instanceof HouseholdMemberLimitError
   );
 }

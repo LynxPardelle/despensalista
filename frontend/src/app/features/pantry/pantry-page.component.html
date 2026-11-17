@@ -1,4 +1,23 @@
 <main class="pantry-page" aria-labelledby="pantry-page-title">
+  @if (pantryScope.stale()) {
+    <section class="panel" role="status">
+      <h1 id="pantry-page-title">Tu hogar activo cambió</h1>
+      <p>Recarga la despensa para abrir el hogar actual. Los borradores guardados en este dispositivo conservan su hogar de origen.</p>
+      <a class="secondary-button" href="/pantry">Recargar despensa</a>
+    </section>
+  } @else {
+  @if (checkoutReviewCount > 0 || hasShoppingDraftsForReview) {
+    <section class="panel" aria-labelledby="purchases-for-review-title">
+      <h2 id="purchases-for-review-title">Cierres de compra que requieren revisión</h2>
+      @if (checkoutReviewCount > 0) {
+        <p>Conservamos {{ checkoutReviewCount }} cierres de otro hogar o sin hogar identificado en este dispositivo. Revisa la despensa donde hiciste esas compras antes de registrarlas otra vez.</p>
+      }
+      @if (hasShoppingDraftsForReview) {
+        <p>Hay borradores o intentos guardados de otro hogar o sin hogar identificado.</p>
+      }
+      <button type="button" class="secondary-button" (click)="downloadPurchasesForReview()">Descargar datos para revisar</button>
+    </section>
+  }
   @let offeringFirstPurchase = showFirstPurchase(overview$ | async);
   @if (firstPurchaseResult; as purchase) {
     <section id="first-purchase-result" class="panel first-purchase-panel" aria-labelledby="first-purchase-result-title">
@@ -2552,5 +2571,6 @@
       </article>
     </section>
   </section>
+  }
   }
 </main>
