@@ -242,6 +242,29 @@ describe('household use cases', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('explains an existing household without consuming the invitation', async () => {
+    userDao.findById.mockResolvedValue(invitedUser);
+    repository.findInviteByTokenHash.mockResolvedValue(makeInvite());
+    repository.findMembershipByUserId.mockResolvedValue(
+      makeMembership({
+        householdId: 'another-household',
+        userId: 'invited-user',
+        role: 'owner',
+      }),
+    );
+
+    await expect(
+      new AcceptHouseholdInviteUseCase(repository, userDao, plans).execute({
+        userId: 'invited-user',
+        token: 'accept-token-safe',
+      }),
+    ).rejects.toMatchObject({
+      code: 'HOUSEHOLD_ALREADY_MEMBER',
+      role: 'owner',
+    });
+    expect(repository.acceptInvite).not.toHaveBeenCalled();
+  });
+
   it('revokes active invites from the household owner', async () => {
     const household = makeHousehold();
     const invite = makeInvite({ householdId: household.toPrimitives().id });
