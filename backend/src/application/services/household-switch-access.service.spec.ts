@@ -47,7 +47,7 @@ describe('HouseholdSwitchAccessService', () => {
     expect(markHouseholdUsed).toHaveBeenCalledWith(userId);
   });
 
-  it('does not provision candidates when household switching is disabled', async () => {
+  it('records household use even when new switches are disabled', async () => {
     const service = makeService(false);
     await service.registerNewAccount(userId);
     await service.prepareAuthenticatedWrite(
@@ -56,6 +56,6 @@ describe('HouseholdSwitchAccessService', () => {
       '/api/pantry/checkout',
     );
     expect(registerHouseholdSwitchCandidate).not.toHaveBeenCalled();
-    expect(markHouseholdUsed).not.toHaveBeenCalled();
+    expect(markHouseholdUsed).toHaveBeenCalledWith(userId);
   });
 });

@@ -28,7 +28,7 @@ export class HouseholdSwitchAccessService {
     method: string,
     url: string,
   ): Promise<void> {
-    if (!this.enabled || /^(GET|HEAD|OPTIONS)$/.test(method)) return;
+    if (/^(GET|HEAD|OPTIONS)$/.test(method)) return;
     const path = url.split('?', 1)[0].replace(/\/$/, '');
     const prefix = `/${this.config.get<string>('API_PREFIX') ?? 'api'}`;
     const route = path.startsWith(`${prefix}/`)

@@ -19,6 +19,7 @@ import {
   type MonthlyPurchaseSpendReader,
 } from '../../../application/ports/monthly-purchase-spend-reader';
 import {
+  CheckoutCapacityExceededError,
   CloseShoppingPurchaseMutation,
   ConsumeInventoryLotMutation,
   HouseholdOriginMismatchError,
@@ -335,9 +336,7 @@ export class DynamoDbPantryMutationAdapter
     ];
 
     if (transactionItems.length > 100) {
-      throw new PantryMutationConflictError(
-        'La compra supera el límite de 48 tipos de producto distintos. Divídela y vuelve a intentarlo.',
-      );
+      throw new CheckoutCapacityExceededError();
     }
 
     const quotaEpoch = await this.ensureQuota(mutation.receipt.ownerUserId);

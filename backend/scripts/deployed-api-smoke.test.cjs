@@ -14,6 +14,139 @@ const {
   activeEntityIds,
   liveCognitoClientId,
 } = require('./deployed-api-smoke.cjs');
+const {
+  parseCommand: parseHouseholdCommand,
+  readTarget: readHouseholdTarget,
+} = require('./deployed-household-switch-smoke.cjs');
+
+test('household smoke defaults to read-only and requires an exact production fixture switch', () => {
+  assert.deepEqual(parseHouseholdCommand([]), { mode: 'help' });
+  for (const stage of ['dev', 'tst', 'prod']) {
+    assert.deepEqual(parseHouseholdCommand(['--stage', stage]), {
+      stage,
+      mode: 'check',
+    });
+  }
+  for (const stage of ['dev', 'tst']) {
+    assert.deepEqual(parseHouseholdCommand(['--stage', stage, '--run']), {
+      stage,
+      mode: 'fixtures',
+    });
+  }
+  assert.deepEqual(
+    parseHouseholdCommand(['--stage', 'prod', '--run-production-fixtures']),
+    {
+      stage: 'prod',
+      mode: 'fixtures',
+    },
+  );
+  for (const args of [
+    ['--stage', 'production'],
+    ['--stage', 'prod', '--run'],
+    ['--stage', 'tst', '--run-production-fixtures'],
+    ['--stage', 'prod', '--run-production-fixtures', '--force'],
+  ])
+    assert.throws(() => parseHouseholdCommand(args));
+});
+
+test('household production preflight requires the canonical domain, exact live alias and closed sales', () => {
+  const account = '765932874577';
+  const region = 'us-east-1';
+  const functionName = 'despensalista-prod-backend-api';
+  const table = 'despensalista-prod-users';
+  const pool = 'us-east-1_QaStub';
+  const client = 'qaclient';
+  const distribution = 'ECTEST00000000';
+  const readStack = (name) => {
+    if (name === 'despensalista-prod-cognito')
+      return { UserPoolId: pool, UserPoolClientId: client };
+    assert.equal(name, 'despensalista-prod-serverless-backend');
+    return {
+      AppDomainName: 'despensalista.lynxpardelle.com',
+      CloudFrontDistributionId: distribution,
+      DynamoDbUsersTable: table,
+      ServerlessBackendFunctionName: functionName,
+      ServerlessBackendAliasName: 'live',
+    };
+  };
+  const preflight = ({
+    publicAlias = 'despensalista.com',
+    checkout = 'false',
+    qualifier = 'live',
+  } = {}) => {
+    const readAws = (...args) => {
+      const [service, action, parameter, value] = args;
+      switch (`${service} ${action}`) {
+        case 'sts get-caller-identity':
+          return { Account: account };
+        case 'lambda get-function-configuration':
+          assert.deepEqual(args.slice(2, 6), [
+            '--function-name',
+            functionName,
+            '--qualifier',
+            'live',
+          ]);
+          return {
+            arn: `arn:aws:lambda:${region}:${account}:function:${functionName}:${qualifier}`,
+            version: '17',
+            settings: {
+              enabled: 'true',
+              pool,
+              client,
+              table,
+              checkout,
+              publicCheckout: 'false',
+            },
+          };
+        case 'dynamodb describe-table':
+          assert.equal(parameter, '--table-name');
+          assert.equal(value, table);
+          return {
+            Table: {
+              TableStatus: 'ACTIVE',
+              TableArn: `arn:aws:dynamodb:${region}:${account}:table/${table}`,
+            },
+          };
+        case 'cloudfront get-distribution':
+          assert.equal(parameter, '--id');
+          assert.equal(value, distribution);
+          return {
+            arn: `arn:aws:cloudfront::${account}:distribution/${distribution}`,
+            status: 'Deployed',
+            enabled: true,
+            aliases: ['despensalista.lynxpardelle.com', publicAlias],
+          };
+        case 'cognito-idp describe-user-pool':
+          assert.equal(value, pool);
+          return {
+            arn: `arn:aws:cognito-idp:${region}:${account}:userpool/${pool}`,
+            id: pool,
+          };
+        case 'cognito-idp get-user-pool-mfa-config':
+          return { mode: 'ON', totp: true };
+        case 'cognito-idp describe-user-pool-client':
+          assert.equal(value, pool);
+          assert.deepEqual(args.slice(4, 6), ['--client-id', client]);
+          return {
+            pool,
+            client,
+            flows: ['ALLOW_USER_SRP_AUTH'],
+            hasSecret: false,
+          };
+        default:
+          assert.fail(`Unexpected AWS operation ${service} ${action}`);
+      }
+    };
+    return readHouseholdTarget('prod', readAws, readStack);
+  };
+  assert.equal(preflight().base, 'https://despensalista.com');
+  assert.throws(
+    () => preflight({ publicAlias: 'incorrect.example' }),
+    /canonical domain/,
+  );
+  assert.throws(() => preflight({ checkout: 'true' }), /checkout closed/i);
+  assert.throws(() => preflight({ qualifier: 'canary' }), /live Lambda alias/);
+});
 
 test('JSON content type is sent only when the request has a body', () => {
   assert.deepEqual(jsonHeaders(undefined), {});

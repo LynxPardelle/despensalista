@@ -37,6 +37,7 @@ import {
   ShoppingPlanItem,
   WasteEventSummary,
 } from '../../shared/models/pantry.model';
+import * as PantryActions from '../../store/pantry/pantry.actions';
 import {
   selectExpiredEntryAlert,
   selectPantryInitialLoading,
@@ -2016,6 +2017,32 @@ describe('PantryPageComponent', () => {
     ]);
   });
 
+  it('reloads the overview on reconnect before restoring an offline checkout', () => {
+    const item = makeShoppingPlanItem();
+    component.isOffline = true;
+    component.setShoppingTripItemsChecked([item], true);
+    component.closeShoppingTrip([item]);
+    fixture.destroy();
+
+    overview.next(scopedTestOverview(''));
+    spyOnProperty(window.navigator, 'onLine', 'get').and.returnValue(false);
+    fixture = TestBed.createComponent(PantryPageComponent);
+    component = fixture.componentInstance;
+    (component as any).pantryScope = new PantryHouseholdScope();
+    fixture.detectChanges();
+    store.dispatch.calls.reset();
+
+    window.dispatchEvent(new Event('online'));
+
+    expect(store.dispatch).toHaveBeenCalledWith(PantryActions.loadPantryOverview());
+    expect(pantryService.closeShoppingPurchase).not.toHaveBeenCalled();
+    overview.next(scopedTestOverview('home-original'));
+    expect(pantryService.closeShoppingPurchase).toHaveBeenCalledOnceWith(
+      jasmine.objectContaining({ originHouseholdId: 'home-original' }),
+      jasmine.any(String),
+    );
+  });
+
   it('stops the existing pantry page instead of assigning its open shopping trip to another household', () => {
     const item = makeShoppingPlanItem();
     component.updateShoppingTripChecked(item, { target: { checked: true } } as unknown as Event);
@@ -2062,6 +2089,43 @@ describe('PantryPageComponent', () => {
     expect(pantryService.closeShoppingPurchase).toHaveBeenCalledTimes(1);
     expect(component.pendingShoppingCheckoutCount).toBe(1);
     expect(fixture.nativeElement.textContent).toContain('Tu hogar activo cambió');
+  });
+
+  it('keeps 49 distinct selected products in the draft for separate purchases', () => {
+    const items = Array.from({ length: 49 }, (_, index) =>
+      makeShoppingPlanItem({ productTypeId: `split-product-${index}` }),
+    );
+    component.setShoppingTripItemsChecked(items, true);
+
+    component.closeShoppingTrip(items);
+
+    expect(pantryService.closeShoppingPurchase).not.toHaveBeenCalled();
+    expect(component.pendingShoppingCheckoutCount).toBe(0);
+    expect(component.shoppingCheckoutStatus).toContain('48 tipos de producto distintos');
+    expect(component.getShoppingTripSelectedCount(items)).toBe(49);
+  });
+
+  it('keeps a pending checkout rejected for size available for review without retrying it', () => {
+    const item = makeShoppingPlanItem();
+    component.isOffline = true;
+    component.setShoppingTripItemsChecked([item], true);
+    component.closeShoppingTrip([item]);
+    pantryService.closeShoppingPurchase.and.returnValue(throwError(() => new HttpErrorResponse({
+      status: 409,
+      error: { code: 'CHECKOUT_CAPACITY_EXCEEDED' },
+    })));
+    component.isOffline = false;
+
+    component.retryFirstPurchase();
+    component.retryFirstPurchase();
+    fixture.detectChanges();
+
+    expect(pantryService.closeShoppingPurchase).toHaveBeenCalledTimes(1);
+    expect(component.pendingShoppingCheckoutCount).toBe(0);
+    expect(component.shoppingCheckoutStatus).toContain('48 tipos de producto distintos');
+    expect(fixture.nativeElement.textContent).toContain('Hay cierres del hogar actual que debes dividir');
+    expect(localStorage.getItem('despensalista.pendingShoppingCheckouts.v2.tester'))
+      .toContain(item.productTypeId);
   });
 
   it('reuses the persisted checkout idempotency key after a failed sync', () => {

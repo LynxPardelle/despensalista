@@ -235,6 +235,11 @@ export class MongoHouseholdRepository
   }
 
   async markHouseholdUsed(userId: string): Promise<void> {
+    const alreadyUsed = await this.householdModel
+      .exists({ pk: switchStateKey(userId), pristine: false })
+      .exec();
+    if (alreadyUsed) return;
+
     const session = await this.householdModel.db.startSession();
     try {
       await session.withTransaction(async () => {

@@ -175,6 +175,17 @@ export class HouseholdOriginMismatchError extends PantryMutationConflictError {
   }
 }
 
+export class CheckoutCapacityExceededError extends PantryMutationConflictError {
+  readonly code = 'CHECKOUT_CAPACITY_EXCEEDED';
+
+  constructor() {
+    super(
+      'El cierre admite hasta 48 tipos de producto distintos. Divide la compra y registra cada parte por separado.',
+    );
+    this.name = 'CheckoutCapacityExceededError';
+  }
+}
+
 export class PantryQuotaExceededError extends Error {
   constructor(message: string) {
     super(message);

@@ -1,6 +1,9 @@
 import { ArgumentsHost, BadRequestException, Logger } from '@nestjs/common';
 import { ApiExceptionFilter } from './api-exception.filter';
-import { SavedShoppingListLimitError } from '../../../application/ports/pantry-mutation.port';
+import {
+  CheckoutCapacityExceededError,
+  SavedShoppingListLimitError,
+} from '../../../application/ports/pantry-mutation.port';
 import { HouseholdMemberLimitError } from '../../../domain/repositories/household.repository';
 import { HouseholdAlreadyMemberException } from '../../../application/use-cases/household.use-cases';
 
@@ -87,6 +90,7 @@ describe('ApiExceptionFilter', () => {
   it.each([
     ['HOUSEHOLD_MEMBER_LIMIT', new HouseholdMemberLimitError()],
     ['SAVED_LIST_LIMIT', new SavedShoppingListLimitError()],
+    ['CHECKOUT_CAPACITY_EXCEEDED', new CheckoutCapacityExceededError()],
   ])('returns a machine-readable 409 for %s', (code, error) => {
     const reply = makeReply();
 
