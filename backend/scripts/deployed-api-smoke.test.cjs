@@ -70,7 +70,7 @@ test('household production preflight requires the canonical domain, exact live a
     };
   };
   const preflight = ({
-    publicAlias = 'despensalista.com',
+    aliases = ['despensalista.lynxpardelle.com', 'despensalista.com'],
     checkout = 'false',
     qualifier = 'live',
   } = {}) => {
@@ -114,7 +114,7 @@ test('household production preflight requires the canonical domain, exact live a
             arn: `arn:aws:cloudfront::${account}:distribution/${distribution}`,
             status: 'Deployed',
             enabled: true,
-            aliases: ['despensalista.lynxpardelle.com', publicAlias],
+            aliases,
           };
         case 'cognito-idp describe-user-pool':
           assert.equal(value, pool);
@@ -141,7 +141,11 @@ test('household production preflight requires the canonical domain, exact live a
   };
   assert.equal(preflight().base, 'https://despensalista.com');
   assert.throws(
-    () => preflight({ publicAlias: 'incorrect.example' }),
+    () => preflight({ aliases: ['despensalista.lynxpardelle.com', 'incorrect.example'] }),
+    /canonical domain/,
+  );
+  assert.throws(
+    () => preflight({ aliases: 'despensalista.lynxpardelle.com,despensalista.com' }),
     /canonical domain/,
   );
   assert.throws(() => preflight({ checkout: 'true' }), /checkout closed/i);

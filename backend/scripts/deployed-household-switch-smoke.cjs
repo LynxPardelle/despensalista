@@ -109,9 +109,11 @@ function readTarget(stage, readAws = awsJson, readStack = stackOutputs) {
     assert.equal(distribution.status, 'Deployed');
     assert.equal(distribution.enabled, true);
     host = 'despensalista.com';
+    const aliases = distribution.aliases;
     assert.ok(
-      distribution.aliases?.includes(selected.host) &&
-        distribution.aliases?.includes(host),
+      Array.isArray(aliases) &&
+        aliases.some((alias) => alias === selected.host) &&
+        aliases.some((alias) => alias === host),
       'Expected canonical domain on the production CloudFront distribution',
     );
   }
