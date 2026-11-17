@@ -31,6 +31,14 @@ import { HouseholdWorkspace } from '../read-models/household-workspace.read-mode
 
 const HOUSEHOLD_INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+export class HouseholdAlreadyMemberException extends BadRequestException {
+  readonly code = 'HOUSEHOLD_ALREADY_MEMBER';
+
+  constructor(readonly role: HouseholdRole) {
+    super('User already belongs to a household');
+  }
+}
+
 @Injectable()
 export class GetHouseholdWorkspaceUseCase {
   constructor(
@@ -171,7 +179,7 @@ export class AcceptHouseholdInviteUseCase {
       currentMembership &&
       currentMembership.householdId !== invite.householdId
     ) {
-      throw new BadRequestException('User already belongs to a household');
+      throw new HouseholdAlreadyMemberException(currentMembership.role);
     }
 
     const now = new Date();

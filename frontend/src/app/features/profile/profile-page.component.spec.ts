@@ -13,6 +13,7 @@ import { AuthApiService } from '../../core/services/auth-api.service';
 import { AuthFacade } from '../../core/services/auth.facade';
 import { PantryService } from '../../core/services/pantry.service';
 import { ProfileService } from '../../core/services/profile.service';
+import { readHouseholdInviteCode } from './household-invite-link';
 import { ProfilePageComponent } from './profile-page.component';
 
 describe('ProfilePageComponent', () => {
@@ -699,6 +700,51 @@ describe('ProfilePageComponent', () => {
     expect(profileService.removeHouseholdMember).toHaveBeenCalledWith(
       'member-1',
     );
+  });
+
+  it('accepts the full shareable invitation pasted into the household form', () => {
+    component.householdInviteForm.patchValue({ email: 'familia@example.com', role: 'editor' });
+    component.createHouseholdInvite();
+    const input = (fixture.nativeElement as HTMLElement).querySelector<HTMLInputElement>('input[formControlName="token"]')!;
+    input.value = ` ${component.householdInviteLink} `;
+    input.dispatchEvent(new Event('input'));
+    input.form!.dispatchEvent(new Event('submit', { cancelable: true }));
+
+    expect(profileService.acceptHouseholdInvite).toHaveBeenCalledOnceWith('invite-token-safe-123');
+    expect(component.householdMessage).toBe('Invitacion aceptada.');
+  });
+
+  it('rejects external invitation links before requesting household access', () => {
+    component.householdAcceptForm.setValue({
+      token: 'https://external.example/profile?householdInvite=invite-token-safe-123',
+    });
+    component.acceptHouseholdInvite();
+
+    expect(profileService.acceptHouseholdInvite).not.toHaveBeenCalled();
+    expect(component.householdError).toContain('Pega un enlace o código de invitación de DespensaLista');
+  });
+
+  it('explains why a household owner cannot accept an invitation to another household', () => {
+    profileService.acceptHouseholdInvite.and.returnValue(throwError(() =>
+      new HttpErrorResponse({ status: 400, error: { code: 'HOUSEHOLD_ALREADY_MEMBER', role: 'owner' } }),
+    ));
+    component.householdAcceptForm.setValue({ token: 'invite-token-safe-123' });
+    component.acceptHouseholdInvite();
+    fixture.detectChanges();
+
+    const page = fixture.nativeElement as HTMLElement;
+    expect(page.textContent).toContain('Ya eres titular de otro hogar.');
+    expect(page.textContent).toContain('Tu cuenta admite un solo hogar y conserva la despensa que ya tienes.');
+  });
+
+  it('directs other members to the owner of their current household', () => {
+    profileService.acceptHouseholdInvite.and.returnValue(throwError(() =>
+      new HttpErrorResponse({ status: 400, error: { code: 'HOUSEHOLD_ALREADY_MEMBER', role: 'editor' } }),
+    ));
+    component.householdAcceptForm.setValue({ token: 'invite-token-safe-123' });
+    component.acceptHouseholdInvite();
+
+    expect(component.householdError).toBe('Ya perteneces a otro hogar. Pide a su titular que te quite antes de volver a intentar.');
   });
 
   it('shows an error when pantry export fails', () => {
