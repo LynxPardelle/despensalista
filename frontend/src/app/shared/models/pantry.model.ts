@@ -324,6 +324,7 @@ export interface PantryStapleCatalogGroup {
 
 export interface PantryOverview {
   userId: string;
+  householdId?: string;
   generatedAt: Date;
   preferences: UserPreferences;
   items: PantryOverviewItem[];
@@ -366,6 +367,7 @@ export interface CloseShoppingPurchaseItemRequest {
 }
 
 export interface CloseShoppingPurchaseRequest {
+  originHouseholdId: string;
   items: CloseShoppingPurchaseItemRequest[];
 }
 
@@ -690,6 +692,7 @@ export interface ApiPantryStapleCatalogGroup {
 
 export interface ApiPantryOverview {
   userId: string;
+  householdId?: string;
   generatedAt: string;
   preferences: UserPreferences;
   items: ApiPantryOverviewItem[];

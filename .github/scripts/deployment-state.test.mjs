@@ -1114,9 +1114,9 @@ test('manual rollback uses the recorded stage version when a newer version has t
   assert.equal(aliasUpdate[aliasUpdate.indexOf('--function-version') + 1], '12');
 });
 
-test('manual rollback from contract version 2 rejects version 1 before mutating AWS', async () => {
+test('manual rollback protects switched households from contract version 2 writers', async () => {
   const { recordPublishedRelease, restoreRelease } = await load();
-  const artifact = await releaseArtifact({ backendDataContractVersion: 1 });
+  const artifact = await releaseArtifact({ backendDataContractVersion: 2 });
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pantry-receipt-'));
   const deploymentSha = 'b'.repeat(40);
   const codeSha256 = createHash('sha256').update('zip-bytes').digest('base64');
@@ -1124,7 +1124,7 @@ test('manual rollback from contract version 2 rejects version 1 before mutating 
 
   await recordPublishedRelease({
     stage: 'prod', artifact, directory, deploymentSha,
-    aws: deploymentAws({ aliasVersion: '12', stackVersion: '12', codeSha256, backendDataContractVersion: 1 }),
+    aws: deploymentAws({ aliasVersion: '12', stackVersion: '12', codeSha256, backendDataContractVersion: 2 }),
     env,
   });
 
@@ -1136,7 +1136,7 @@ test('manual rollback from contract version 2 rejects version 1 before mutating 
       deploymentSha,
       aws: deploymentAws({
         aliasVersion: '12', stackVersion: '12', codeSha256, calls,
-        backendDataContractVersion: 2,
+        backendDataContractVersion: 3,
       }),
       env,
     }),

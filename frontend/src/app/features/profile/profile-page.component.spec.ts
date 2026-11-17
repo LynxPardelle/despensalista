@@ -9,6 +9,7 @@ import { ReactiveFormsModule } from '@angular/forms';
 import { RouterTestingModule } from '@angular/router/testing';
 import { ActivatedRoute, convertToParamMap } from '@angular/router';
 import { of, throwError } from 'rxjs';
+import { Store } from '@ngrx/store';
 import { AuthApiService } from '../../core/services/auth-api.service';
 import { AuthFacade } from '../../core/services/auth.facade';
 import { PantryService } from '../../core/services/pantry.service';
@@ -266,6 +267,7 @@ describe('ProfilePageComponent', () => {
           useValue: authFacade,
         },
         { provide: AuthApiService, useValue: authApi },
+        { provide: Store, useValue: { dispatch: jasmine.createSpy('dispatch') } },
         {
           provide: ProfileService,
           useValue: profileService,
@@ -735,6 +737,54 @@ describe('ProfilePageComponent', () => {
     const page = fixture.nativeElement as HTMLElement;
     expect(page.textContent).toContain('Ya eres titular de otro hogar.');
     expect(page.textContent).toContain('Tu cuenta admite un solo hogar y conserva la despensa que ya tienes.');
+  });
+
+  it('offers a household switch and carries the original household only after explicit confirmation', () => {
+    profileService.acceptHouseholdInvite.and.returnValues(throwError(() =>
+      new HttpErrorResponse({ status: 400, error: { code: 'HOUSEHOLD_ALREADY_MEMBER', role: 'owner',
+        householdSwitch: { fromHouseholdId: 'home-original', fromName: 'Hogar de Ana',
+          toName: 'Familia', role: 'editor', closesOriginal: true } } }),
+    ), of(makeHouseholdWorkspace()));
+    component.householdAcceptForm.setValue({ token: 'invite-token-safe-123' });
+    component.acceptHouseholdInvite();
+    fixture.detectChanges();
+
+    const page = fixture.nativeElement as HTMLElement;
+    expect(page.textContent).toContain('Hogar de Ana');
+    expect(page.textContent).toContain('Familia');
+    expect(page.textContent).toContain('se cerrará');
+    expect(profileService.acceptHouseholdInvite).toHaveBeenCalledOnceWith('invite-token-safe-123');
+    const confirm = Array.from(page.querySelectorAll('button')).find(button =>
+      button.textContent?.trim() === 'Confirmar cambio de hogar');
+    expect(confirm).toBeDefined();
+    confirm?.click();
+
+    expect(Array.from(profileService.acceptHouseholdInvite.calls.mostRecent().args)).toEqual([
+      'invite-token-safe-123', 'home-original',
+    ]);
+  });
+
+  it('reuses the confirmed original household when the switch response is lost', () => {
+    profileService.acceptHouseholdInvite.and.returnValues(throwError(() => new HttpErrorResponse({ status: 400,
+      error: { code: 'HOUSEHOLD_ALREADY_MEMBER', householdSwitch: { fromHouseholdId: 'home-original',
+        fromName: 'Hogar de Ana', toName: 'Familia', role: 'editor', closesOriginal: false } },
+    })), throwError(() => new HttpErrorResponse({ status: 0 })), of(makeHouseholdWorkspace()));
+    component.householdAcceptForm.setValue({ token: 'invite-token-safe-123' });
+    component.acceptHouseholdInvite();
+    fixture.detectChanges();
+
+    const page = fixture.nativeElement as HTMLElement;
+    const confirm = () => Array.from(page.querySelectorAll('button')).find(button =>
+      button.textContent?.trim() === 'Confirmar cambio de hogar');
+    confirm()?.click();
+    fixture.detectChanges();
+    expect(confirm()).toBeDefined();
+    confirm()?.click();
+
+    expect(profileService.acceptHouseholdInvite.calls.count()).toBe(3);
+    expect(Array.from(profileService.acceptHouseholdInvite.calls.mostRecent().args)).toEqual([
+      'invite-token-safe-123', 'home-original',
+    ]);
   });
 
   it('directs other members to the owner of their current household', () => {

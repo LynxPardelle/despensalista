@@ -14,6 +14,7 @@ import {
   Matches,
   Max,
   MaxLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { MAX_SHOPPING_CHECKOUT_ITEMS } from '../../../application/constants/query-limits';
@@ -62,6 +63,13 @@ export class CheckoutPantryItemDto {
 }
 
 export class CheckoutPantryDto {
+  @ApiProperty({ required: false })
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
+  originHouseholdId?: string;
+
   @ApiProperty({ type: [CheckoutPantryItemDto] })
   @IsArray()
   @ArrayMinSize(1)

@@ -552,20 +552,35 @@
           <p class="field-error" role="alert">{{ householdError }}</p>
         }
 
+        @if (householdSwitch; as pendingSwitch) {
+          <section aria-labelledby="confirm-household-switch-title">
+            <div role="status">
+              <h3 id="confirm-household-switch-title">Cambiar de hogar</h3>
+              <p>Vas a pasar de <strong>{{ pendingSwitch.offer.fromName }}</strong> a <strong>{{ pendingSwitch.offer.toName }}</strong> como {{ roleLabel(pendingSwitch.offer.role) }}.</p>
+              @if (pendingSwitch.offer.closesOriginal) {
+                <p>Tu hogar personal se cerrará al confirmar.</p>
+              } @else {
+                <p>Dejarás de pertenecer al hogar actual. Su despensa seguirá disponible para quienes permanezcan allí.</p>
+              }
+              <p>Tus compras y borradores no se trasladan al hogar nuevo.</p>
+            </div>
+            <button class="secondary-button" type="button" (click)="confirmHouseholdSwitch()">Confirmar cambio de hogar</button>
+            <button class="ghost-button" type="button" (click)="cancelHouseholdSwitch()">Cancelar</button>
+          </section>
+        } @else if (switchedHouseholdName; as householdName) {
+          <a class="secondary-button" href="/pantry">Ir a la despensa de {{ householdName }}</a>
+        } @else {
           <form class="preferences-form" [formGroup]="householdAcceptForm" (ngSubmit)="acceptHouseholdInvite()">
             <label class="field">
               <span>Enlace o c&oacute;digo de invitaci&oacute;n</span>
               <input type="text" formControlName="token" placeholder="Pega el enlace o c&oacute;digo"
                 autocomplete="off" autocapitalize="off" spellcheck="false" />
             </label>
-            <button
-              class="secondary-button"
-              type="submit"
-              [disabled]="householdAccepting"
-            >
+            <button class="secondary-button" type="submit" [disabled]="householdAccepting">
               {{ householdAccepting ? 'Aceptando...' : 'Aceptar invitaci&oacute;n' }}
             </button>
           </form>
+        }
       </aside>
 
       <aside class="panel export-panel">

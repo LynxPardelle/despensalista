@@ -527,11 +527,11 @@ test('production Lambda does not trust X-Forwarded-For for rate-limit identity',
   );
   assert.equal(
     backend.Properties.Environment.Variables.BACKEND_DATA_CONTRACT_VERSION,
-    '2',
+    '3',
   );
 });
 
-test('production infrastructure exposes idempotency headers and scoped data IAM', () => {
+test('production infrastructure exposes idempotency and household headers with scoped data IAM', () => {
   productionTemplate.hasResourceProperties('AWS::ApiGatewayV2::Api', {
     CorsConfiguration: {
       AllowHeaders: [
@@ -539,6 +539,7 @@ test('production infrastructure exposes idempotency headers and scoped data IAM'
         'content-type',
         'idempotency-key',
         'x-xsrf-token',
+        'x-despensa-household',
         'x-metrics-token',
       ],
       ExposeHeaders: ['idempotency-key', 'idempotency-replayed'],
@@ -575,6 +576,15 @@ test('production infrastructure exposes idempotency headers and scoped data IAM'
     'despensalista-prod-inventory-lots',
   ]) {
     assert.match(JSON.stringify(productionTemplate.toJSON()), new RegExp(tableName));
+  }
+});
+
+test('household switching is enabled in dev, tst and production', () => {
+  for (const stage of ['dev', 'tst', 'prod'] as const) {
+    synthesizeTemplate(stage).hasResourceProperties('AWS::Lambda::Function', {
+      FunctionName: `despensalista-${stage}-backend-api`,
+      Environment: { Variables: { HOUSEHOLD_SWITCH_ENABLED: 'true' } },
+    });
   }
 });
 
@@ -628,7 +638,7 @@ test('production publishes an aliased Lambda with all-at-once rollback controls'
   );
   assert.equal(deploymentGroup.Properties.AlarmConfiguration.Alarms.length, 1);
   productionTemplate.hasOutput('PantryQuotaSchemaVersion', { Value: '2' });
-  productionTemplate.hasOutput('BackendDataContractVersion', { Value: '2' });
+  productionTemplate.hasOutput('BackendDataContractVersion', { Value: '3' });
   productionTemplate.hasOutput('DeploymentReleaseId', { Value: 'a'.repeat(12) });
 });
 

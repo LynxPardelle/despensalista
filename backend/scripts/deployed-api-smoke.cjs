@@ -239,8 +239,7 @@ async function signIn(srp, target, fixture, enroll) {
   });
 }
 
-async function run(stage) {
-  const selected = resolveStage(stage);
+function loadSrp() {
   assert.ok(
     !Object.keys(process.env).some((key) => key.startsWith('AWS_ENDPOINT_URL')),
     'Custom AWS endpoints are not allowed',
@@ -256,7 +255,12 @@ async function run(stage) {
     relative.startsWith('..' + path.sep) || path.isAbsolute(relative),
     'SRP test tool must be outside repository',
   );
-  const srp = require(srpPath);
+  return require(srpPath);
+}
+
+async function run(stage) {
+  const selected = resolveStage(stage);
+  const srp = loadSrp();
   const cognitoSdk = require('@aws-sdk/client-cognito-identity-provider');
   const {
     DescribeTableCommand,
@@ -1191,6 +1195,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  ACCOUNT,
+  REGION,
   resolveStage,
   totp,
   ownedCondition,
@@ -1199,4 +1205,8 @@ module.exports = {
   jsonHeaders,
   activeEntityIds,
   liveCognitoClientId,
+  awsJson,
+  stackOutputs,
+  signIn,
+  loadSrp,
 };

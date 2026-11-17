@@ -4,6 +4,7 @@ import { ProductCategory, QuantityUnit } from '../../domain/enums';
 import { ProductTypeRepository } from '../../domain/repositories/product-type.repository';
 import { ProductTypeId } from '../../domain/value-objects/product-type-id.vo';
 import {
+  CheckoutCapacityExceededError,
   IdempotencyPayloadConflictError,
   PantryMutationPort,
 } from '../ports/pantry-mutation.port';
@@ -63,6 +64,27 @@ describe('CloseShoppingPurchaseUseCase', () => {
       transaction.productTypes[0].updated.shoppingMetadata.priceHistory,
     ).toHaveLength(2);
     expect(repository.findById).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the actionable capacity error from storage', async () => {
+    const mutationPort = makeMutationPort();
+    mutationPort.findReceipt.mockResolvedValue(null);
+    const error = new CheckoutCapacityExceededError();
+    mutationPort.checkout.mockRejectedValue(error);
+    const useCase = new CloseShoppingPurchaseUseCase(
+      makeProductTypeRepository([makeProductType()]),
+      mutationPort,
+    );
+
+    await expect(
+      useCase.execute({
+        userId: 'user-1',
+        idempotencyKey: '2d5c2dd4-933b-4215-b4c1-53945ac34a9b',
+        items: [
+          { productTypeId: 'type-1', quantity: 1, unit: QuantityUnit.KILOGRAM },
+        ],
+      }),
+    ).rejects.toBe(error);
   });
 
   it('stores the Mexico City purchase date as a UTC date-only label', async () => {

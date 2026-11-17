@@ -232,7 +232,13 @@ describe('ProfileService', () => {
     const acceptRequest = http.expectOne('/api/household/invites/accept');
     expect(acceptRequest.request.method).toBe('POST');
     expect(acceptRequest.request.withCredentials).toBeTrue();
+    expect(acceptRequest.request.body).toEqual({ token: 'invite-token-safe-123' });
     acceptRequest.flush(makeApiHouseholdWorkspace());
+
+    service.acceptHouseholdInvite('invite-token-safe-123', 'household-previous').subscribe();
+    const switchRequest = http.expectOne('/api/household/invites/accept');
+    expect(switchRequest.request.body).toEqual({ token: 'invite-token-safe-123', switchFromHouseholdId: 'household-previous' });
+    switchRequest.flush(makeApiHouseholdWorkspace());
 
     service.revokeHouseholdInvite('invite-1').subscribe((invite) => {
       expect(invite.id).toBe('invite-1');

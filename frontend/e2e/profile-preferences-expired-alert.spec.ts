@@ -145,6 +145,7 @@ test.beforeEach(async ({ page }) => {
       contentType: 'application/json',
       body: JSON.stringify({
         userId: 'user-1',
+        householdId: 'household-1',
         generatedAt: '2026-04-28T12:00:00.000Z',
         preferences: {
           expirationWarningDays: 7,
@@ -270,6 +271,56 @@ test('a fresh invitation survives login and is accepted before any household or 
   expect(prematureReads).toEqual([]);
 });
 
+test('switches households only after confirmation and opens the new pantry', async ({ page }) => {
+  const seenBodies: unknown[] = [];
+  const now = '2026-04-01T00:00:00.000Z';
+  await page.route('**/api/household/invites/accept', async (route) => {
+    const body = route.request().postDataJSON();
+    seenBodies.push(body);
+    if (!body.switchFromHouseholdId) {
+      await route.fulfill({ status: 400, json: {
+        code: 'HOUSEHOLD_ALREADY_MEMBER', role: 'owner',
+        householdSwitch: {
+          fromHouseholdId: 'household-1', fromName: 'Hogar de chef',
+          toName: 'Casa de familia', role: 'editor', closesOriginal: true,
+        },
+      } });
+      return;
+    }
+    await route.fulfill({ json: {
+      household: { id: 'household-2', name: 'Casa de familia', ownerUserId: 'owner', createdAt: now, updatedAt: now },
+      currentMember: { householdId: 'household-2', userId: 'user-1', email: 'chef@example.com', username: 'chef', role: 'editor', joinedAt: now, updatedAt: now },
+      members: [], invites: [], activities: [],
+    } });
+  });
+  await page.route('**/api/pantry/overview', route => route.fulfill({ json: {
+    householdId: 'household-2', userId: 'owner', generatedAt: now,
+    preferences: { showGuidanceTips: true },
+    items: [], expiringItems: [], depletingItems: [], shoppingPlanItems: [],
+  } }));
+
+  await page.goto('/profile?householdInvite=family-invite-token');
+  await expect(page.getByRole('heading', { name: 'Cambiar de hogar' })).toBeVisible();
+  await expect(page.getByText('Tu hogar personal se cerrará al confirmar.')).toBeVisible();
+  expect(seenBodies).toEqual([{ token: 'family-invite-token' }]);
+  await page.getByRole('button', { name: 'Cancelar', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Cambiar de hogar' })).toHaveCount(0);
+  expect(seenBodies).toHaveLength(1);
+  await page.getByRole('button', { name: 'Aceptar invitación' }).click();
+  await page.getByRole('button', { name: 'Confirmar cambio de hogar' }).click();
+  await expect(page.getByText('Ahora perteneces a Casa de familia.')).toBeVisible();
+  await expect(page).toHaveURL(/\/profile$/);
+  expect(seenBodies).toEqual([
+    { token: 'family-invite-token' }, { token: 'family-invite-token' },
+    { token: 'family-invite-token', switchFromHouseholdId: 'household-1' },
+  ]);
+
+  const overview = page.waitForResponse('**/api/pantry/overview');
+  await page.getByRole('link', { name: 'Ir a la despensa de Casa de familia' }).click();
+  expect((await (await overview).json()).householdId).toBe('household-2');
+  await expect(page.getByRole('heading', { name: 'Registra tu primera compra' })).toBeVisible();
+});
+
 test('loads profile preferences and saves an update', async ({ page }) => {
   await page.goto('/profile');
 
@@ -280,6 +331,27 @@ test('loads profile preferences and saves an update', async ({ page }) => {
   await page.getByRole('button', { name: 'Guardar preferencias' }).click();
 
   await expect(page.getByText('Preferencias guardadas.')).toBeVisible();
+});
+
+test('scopes pantry deletion after opening the profile directly', async ({ page }) => {
+  const pantryReads: string[] = [];
+  page.on('request', request => {
+    if (new URL(request.url()).pathname === '/api/pantry/overview') pantryReads.push(request.url());
+  });
+  await page.route('**/api/profile/pantry-data', async route => {
+    expect(route.request().method()).toBe('DELETE');
+    expect(route.request().headers()['x-despensa-household']).toBe('household-1');
+    expect(route.request().headers()['idempotency-key']).toBeTruthy();
+    expect(route.request().postDataJSON()).toEqual({ confirmationText: 'ELIMINAR' });
+    await route.fulfill({ json: { deletedInventoryLotCount: 0, deletedProductTypeCount: 0,
+      deletedShoppingListCount: 0, deletedShoppingShareCount: 0, deletedWasteEventCount: 0 } });
+  });
+
+  await page.goto('/profile');
+  await page.getByPlaceholder('ELIMINAR', { exact: true }).fill('ELIMINAR');
+  await page.getByRole('button', { name: 'Eliminar datos', exact: true }).click();
+  await expect(page.getByText(/Datos eliminados: 0 lotes/)).toBeVisible();
+  expect(pantryReads).toEqual([]);
 });
 
 test('shows and dismisses expired entry alert on pantry entry', async ({
@@ -312,6 +384,7 @@ test('shows replenishment guidance, purchase date, per-type settings, and archiv
       contentType: 'application/json',
       body: JSON.stringify({
         userId: 'user-1',
+        householdId: 'household-1',
         generatedAt: '2026-04-29T12:00:00.000Z',
         preferences: {
           expirationWarningDays: 7,
@@ -413,6 +486,7 @@ test('shows replenishment guidance, purchase date, per-type settings, and archiv
     async (route) => {
       savedPlanningSettings = true;
       expect(route.request().method()).toBe('PATCH');
+      expect(route.request().headers()['x-despensa-household']).toBe('household-1');
       expect(route.request().postDataJSON()).toMatchObject({
         planningEnabled: true,
         shoppingPlanLeadDaysOverride: 5,
@@ -441,6 +515,7 @@ test('shows replenishment guidance, purchase date, per-type settings, and archiv
   await page.route('**/api/inventory-lots/lot-detergent/archive', async (route) => {
     archivedLot = true;
     expect(route.request().method()).toBe('POST');
+    expect(route.request().headers()['x-despensa-household']).toBe('household-1');
     await route.fulfill({
       status: 200,
       contentType: 'application/json',

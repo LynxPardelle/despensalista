@@ -537,7 +537,7 @@ describe('DynamoDbPantryMutationAdapter', () => {
       makeLot(1, `lot-${index}`, type.id.toString()),
     );
 
-    await adapter.checkout({
+    const mutation = {
       receipt: receipt('close_shopping_purchase'),
       lots,
       productTypes: productTypes.map((type) => ({
@@ -545,7 +545,8 @@ describe('DynamoDbPantryMutationAdapter', () => {
         updated: type,
         changed: false,
       })),
-    });
+    };
+    await adapter.checkout(mutation);
 
     const command = dynamo.send.mock.calls[1][0] as TransactWriteCommand;
     expect(command.input.TransactItems).toHaveLength(100);
@@ -553,6 +554,151 @@ describe('DynamoDbPantryMutationAdapter', () => {
     expect(
       command.input.TransactItems?.at(-1)?.Update?.ConditionExpression,
     ).toContain('activeInventoryLots <= :remainingTotal');
+
+    await expect(
+      adapter.checkout({
+        ...mutation,
+        membershipFence: {
+          userId: 'user-1',
+          householdId: 'home-1',
+          role: 'owner',
+          joinedAt: new Date('2026-11-16T20:00:00.000Z'),
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'CHECKOUT_CAPACITY_EXCEEDED',
+      message: expect.stringContaining(
+        '48 tipos de producto distintos',
+      ) as string,
+    });
+    expect(dynamo.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('still closes a fenced purchase of 49 lots across 48 distinct types', async () => {
+    const dynamo = makeDynamo();
+    dynamo.send
+      .mockResolvedValueOnce({ Item: quotaItem(), $metadata: {} })
+      .mockResolvedValueOnce({ $metadata: {} });
+    const productTypes = Array.from({ length: 48 }, (_, index) =>
+      makeProductType(`type-${index}`),
+    );
+    const lots = [...productTypes, productTypes[0]].map((type, index) =>
+      makeLot(1, `lot-${index}`, type.id.toString()),
+    );
+
+    await makeAdapter(dynamo).checkout({
+      receipt: receipt('close_shopping_purchase'),
+      lots,
+      productTypes: productTypes.map((type) => ({
+        expected: type,
+        updated: type,
+        changed: false,
+      })),
+      membershipFence: {
+        userId: 'user-1',
+        householdId: 'home-1',
+        role: 'owner',
+        joinedAt: new Date('2026-11-16T20:00:00.000Z'),
+      },
+    });
+
+    const command = dynamo.send.mock.calls[1][0] as TransactWriteCommand;
+    expect(command.input.TransactItems).toHaveLength(100);
+    expect(command.input.TransactItems?.[1].ConditionCheck?.Key).toEqual({
+      pk: 'HOUSEHOLD_MEMBER_BY_USER#user-1',
+    });
+  });
+
+  it('fences a household checkout in the same transaction as its receipt and lots', async () => {
+    const dynamo = makeDynamo();
+    dynamo.send
+      .mockResolvedValueOnce({ Item: quotaItem(), $metadata: {} })
+      .mockResolvedValueOnce({ $metadata: {} });
+    const type = makeProductType('type-1');
+
+    await makeAdapter(dynamo).checkout({
+      receipt: {
+        ...receipt('close_shopping_purchase'),
+        checkoutHouseholdId: 'home-1',
+      },
+      lots: [makeLot(1)],
+      productTypes: [{ expected: type, updated: type, changed: false }],
+      membershipFence: {
+        userId: 'editor-1',
+        householdId: 'home-1',
+        role: 'editor',
+        joinedAt: new Date('2026-11-16T20:00:00.000Z'),
+        contextVersion: 'generation-1',
+      },
+    });
+
+    const command = dynamo.send.mock.calls[1][0] as TransactWriteCommand;
+    expect(command.input.TransactItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          Put: expect.objectContaining({
+            Item: expect.objectContaining({ checkoutHouseholdId: 'home-1' }),
+          }),
+        }),
+        {
+          ConditionCheck: {
+            TableName: 'users',
+            Key: { pk: 'HOUSEHOLD_MEMBER_BY_USER#editor-1' },
+            ConditionExpression: expect.stringContaining(
+              'contextVersion = :contextVersion',
+            ),
+            ExpressionAttributeNames: { '#role': 'role' },
+            ExpressionAttributeValues: {
+              ':householdId': 'home-1',
+              ':role': 'editor',
+              ':contextVersion': 'generation-1',
+            },
+          },
+        },
+      ]),
+    );
+  });
+
+  it('rejects a purchase after the legacy membership changes instead of retrying it in another home', async () => {
+    const dynamo = makeDynamo();
+    dynamo.send
+      .mockResolvedValueOnce({ Item: quotaItem(), $metadata: {} })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Transaction canceled'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+          ],
+        }),
+      );
+    const type = makeProductType('type-1');
+
+    await expect(
+      makeAdapter(dynamo).checkout({
+        receipt: {
+          ...receipt('close_shopping_purchase'),
+          checkoutHouseholdId: 'home-1',
+        },
+        lots: [makeLot(1)],
+        productTypes: [{ expected: type, updated: type, changed: false }],
+        membershipFence: {
+          userId: 'editor-1',
+          householdId: 'home-1',
+          role: 'editor',
+          joinedAt: new Date('2026-11-16T20:00:00.000Z'),
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'HOUSEHOLD_ORIGIN_MISMATCH' });
+
+    const command = dynamo.send.mock.calls[1][0] as TransactWriteCommand;
+    expect(command.input.TransactItems?.[1].ConditionCheck).toMatchObject({
+      ConditionExpression: expect.stringContaining(
+        'attribute_not_exists(contextVersion) AND joinedAt = :joinedAt',
+      ),
+      ExpressionAttributeValues: { ':joinedAt': '2026-11-16T20:00:00.000Z' },
+    });
+    expect(dynamo.send).toHaveBeenCalledTimes(2);
   });
 
   it('backfills archived counters from authoritative tables before the first mutation', async () => {
