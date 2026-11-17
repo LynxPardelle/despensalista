@@ -316,6 +316,7 @@ function makeHouseholdAccess(
     householdId: 'household-1',
     pantryOwnerUserId: 'user-1',
     role: 'owner' as const,
+    joinedAt: new Date('2026-11-16T00:00:00.000Z'),
     ...overrides,
   };
 }
