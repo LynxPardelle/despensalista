@@ -487,7 +487,7 @@ export class MongoPantryMutationAdapter
 
   async createShoppingList(
     list: ShoppingList,
-    savedListLimit: number,
+    savedListLimit: number | null,
   ): Promise<ShoppingList> {
     const quotaEpoch = await this.ensureQuota(list.ownerUserId);
     return this.runAtomicMutation(
@@ -500,7 +500,10 @@ export class MongoPantryMutationAdapter
         await this.incrementMongoSimpleQuota(
           list.ownerUserId,
           'savedShoppingLists',
-          Math.min(savedListLimit, MAX_SAVED_SHOPPING_LISTS_PER_USER),
+          Math.min(
+            savedListLimit ?? MAX_SAVED_SHOPPING_LISTS_PER_USER,
+            MAX_SAVED_SHOPPING_LISTS_PER_USER,
+          ),
           list.toPrimitives().updatedAt,
           session,
         );

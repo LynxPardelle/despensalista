@@ -74,10 +74,15 @@ export interface HouseholdActivityResponseDto {
 export interface HouseholdWorkspaceResponseDto {
   household: HouseholdResponseDto;
   plan: {
-    tier: 'free' | 'plus';
-    memberLimit: number;
-    savedListLimit: number;
+    tier: 'free' | 'plus' | 'pro';
+    memberLimit: number | null;
+    savedListLimit: number | null;
     paidThrough: string | null;
+    source?: 'free' | 'stripe' | 'code';
+    lifetime?: boolean;
+    validUntil?: string | null;
+    unlimitedUsage?: boolean;
+    technicalSavedListLimit?: number;
   };
   currentMember: HouseholdMemberResponseDto;
   members: HouseholdMemberResponseDto[];

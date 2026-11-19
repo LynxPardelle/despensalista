@@ -168,6 +168,66 @@
         </ul>
       </aside>
 
+      @if (householdWorkspace; as workspace) {
+        <section class="panel monetization-panel" aria-labelledby="access-code-title">
+          <h2 id="access-code-title">Accesos y códigos de regalo</h2>
+          <p class="helper-copy">Los beneficios se aplican a {{ workspace.household.name }} y sus integrantes.</p>
+
+          @if (accessLoading) {
+            <p class="loading-copy" role="status">Consultando accesos...</p>
+          }
+          @if (householdAccess; as access) {
+            @for (grant of access.grants; track grant.id) {
+              <div class="settings-group">
+                <h3>{{ planName(grant.plan) }}{{ grant.mode === 'developer' ? ' · Acceso de desarrollador' : '' }}</h3>
+                @if (grantStartsLater(grant)) {
+                  <p>Comienza el {{ formatBillingDate(grant.startsAt) }}.</p>
+                }
+                @if (grant.expiresAt; as expiresAt) {
+                  <p>Acceso hasta el {{ formatBillingDate(expiresAt) }}.</p>
+                } @else {
+                  <p>Acceso vitalicio.</p>
+                }
+                @if (grant.plan === 'pro') {
+                  <p class="helper-copy">Incluye las funciones actuales de Plus Hogar. Los beneficios adicionales de Pro se incorporarán cuando se publiquen.</p>
+                }
+                @if (grant.mode === 'developer') {
+                  <p class="helper-copy">Sin cuotas comerciales de integrantes y listas. La app conserva sus límites técnicos de almacenamiento y operación.</p>
+                }
+              </div>
+            }
+            @if (access.billingBlocksRedemption && canManageHousehold) {
+              <p class="helper-copy">Tu hogar tiene una suscripción o un pago pendiente en Stripe. Cancela la renovación desde el portal y vuelve a canjear cuando se confirme la cancelación. El código conserva su uso.</p>
+              @if (billing()?.canOpenPortal) {
+                <button class="secondary-button" type="button" [disabled]="billingAction() !== null || billingLoading()" (click)="openBillingSession('portal')">Gestionar renovación</button>
+              }
+              <button class="ghost-button" type="button" [disabled]="accessLoading || accessRedeeming" (click)="loadHouseholdAccess()">Comprobar cancelación</button>
+            }
+            @if (canManageHousehold && !switchedHouseholdName) {
+              <form class="preferences-form" [formGroup]="accessCodeForm" (ngSubmit)="redeemAccessCode()">
+                <label class="field" for="household-access-code">
+                  <span>Código de acceso</span>
+                  <input id="household-access-code" type="text" formControlName="code" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="200" aria-describedby="access-code-help" />
+                </label>
+                <p class="helper-copy" id="access-code-help">Cada código se canjea una sola vez. La vigencia comienza al canjear o al terminar el periodo que ya pagaste. La duración de cada regalo se cuenta por separado, con su propia fecha de finalización.</p>
+                <button class="primary-button" type="submit" [disabled]="!canRedeemAccess">{{ accessRedeeming ? 'Canjeando...' : 'Canjear código' }}</button>
+              </form>
+            } @else if (!canManageHousehold) {
+              <p class="helper-copy">La persona titular del hogar puede canjear los códigos.</p>
+            }
+          }
+          @if (accessError) {
+            <p class="field-error" role="alert">{{ accessError }}</p>
+            @if (!householdAccess) {
+              <button class="secondary-button" type="button" [disabled]="accessLoading || accessRedeeming" (click)="loadHouseholdAccess()">Volver a consultar accesos</button>
+            }
+          }
+          @if (accessMessage) {
+            <p class="success-copy" role="status">{{ accessMessage }}</p>
+          }
+        </section>
+      }
+
       @if (billing(); as subscription) {
         @let liveBilling = subscription.mode === 'live';
         @let canOpenSessions = !liveBilling || canOpenLiveBillingHere;
@@ -437,7 +497,12 @@
           <p class="helper-copy">
             {{ workspace.household.name }} · {{ workspace.members.length }}
             @if (workspace.plan; as plan) {
-              de {{ plan.memberLimit }} personas · {{ plan.tier === 'plus' ? 'Plus Hogar' : 'Gratis' }}
+              @if (plan.memberLimit !== null) {
+                de {{ plan.memberLimit }} personas
+              } @else {
+                personas · sin cuota comercial de integrantes
+              }
+              · {{ planName(plan.tier) }}
             } @else {
               personas
             }
@@ -474,7 +539,7 @@
           </section>
 
           @if (canManageHousehold) {
-            @if (workspace.plan && workspace.members.length >= workspace.plan.memberLimit) {
+            @if (workspace.plan && workspace.plan.memberLimit !== null && workspace.members.length >= workspace.plan.memberLimit) {
               <p class="helper-copy">Tu hogar alcanzó su cupo de personas. <a routerLink="/profile" fragment="subscription-title">Ver mi plan</a></p>
             }
             <form class="preferences-form" [formGroup]="householdInviteForm" (ngSubmit)="createHouseholdInvite()">

@@ -18,7 +18,9 @@ import {
   HouseholdInvite,
   HouseholdActivity,
   HouseholdMember,
+  HouseholdAccessStatus,
   HouseholdWorkspace,
+  RedeemHouseholdAccessResult,
   SignOutAllSessionsRequest,
   SignOutAllSessionsResult,
   UserPreferences,
@@ -95,6 +97,20 @@ export class ProfileService {
         withCredentials: true,
       })
       .pipe(map((workspace) => this.normalizeHouseholdWorkspace(workspace)));
+  }
+
+  getHouseholdAccess(): Observable<HouseholdAccessStatus> {
+    return this.http.get<HouseholdAccessStatus>(`${this.householdUrl}/access`, {
+      withCredentials: true,
+    });
+  }
+
+  redeemHouseholdAccess(code: string, householdId: string): Observable<RedeemHouseholdAccessResult> {
+    return this.http.post<RedeemHouseholdAccessResult>(
+      `${this.householdUrl}/access/redeem`,
+      { code, householdId },
+      { withCredentials: true },
+    );
   }
 
   createHouseholdInvite(

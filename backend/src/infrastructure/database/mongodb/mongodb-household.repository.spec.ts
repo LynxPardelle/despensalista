@@ -50,6 +50,43 @@ describe('Mongo household atomic membership', () => {
     await replica?.stop();
   });
 
+  it('admits members beyond the free cap when the commercial member limit is unlimited', async () => {
+    const owner = user('owner');
+    const household = Household.create(owner);
+    await repository.createHouseholdWithOwner(
+      household,
+      household.createOwnerMembership(owner),
+    );
+    const now = new Date();
+    for (const [index, id] of ['invited', 'other-user'].entries()) {
+      const invitee = user(id);
+      const invite = HouseholdInvite.create({
+        householdId: household.id,
+        invitedEmail: invitee.email,
+        invitedByUserId: owner.id.toString(),
+        role: 'editor',
+        tokenHash: String(index).repeat(64),
+        createdAt: now,
+        expiresAt: new Date(now.getTime() + 60_000),
+      });
+      await repository.saveInvite(invite, null);
+      invite.accept(now);
+      await repository.acceptInvite(
+        invite,
+        HouseholdMembership.create({
+          householdId: household.id,
+          user: invitee,
+          role: 'editor',
+          now,
+        }),
+        null,
+      );
+    }
+    expect(
+      await repository.findMembersByHouseholdId(household.id),
+    ).toHaveLength(3);
+  });
+
   it('admits only one of two invitees racing for the last seat', async () => {
     const owner = user('owner');
     const household = Household.create(owner);

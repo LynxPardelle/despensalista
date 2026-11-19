@@ -192,10 +192,34 @@ export interface HouseholdActivity {
 }
 
 export interface HouseholdPlan {
-  tier: 'free' | 'plus';
-  memberLimit: number;
-  savedListLimit: number;
+  tier: 'free' | 'plus' | 'pro';
+  memberLimit: number | null;
+  savedListLimit: number | null;
   paidThrough: string | null;
+  source?: 'free' | 'stripe' | 'code';
+  lifetime?: boolean;
+  validUntil?: string | null;
+  unlimitedUsage?: boolean;
+  technicalSavedListLimit?: number;
+}
+
+export interface HouseholdAccessGrant {
+  id: string;
+  plan: 'plus' | 'pro';
+  mode: 'plan' | 'developer';
+  startsAt: string;
+  expiresAt: string | null;
+}
+
+export interface HouseholdAccessStatus {
+  householdId: string;
+  canRedeem: boolean;
+  grants: HouseholdAccessGrant[];
+  billingBlocksRedemption: boolean;
+}
+
+export interface RedeemHouseholdAccessResult extends HouseholdAccessStatus {
+  replayed: boolean;
 }
 
 export interface ApiHouseholdWorkspace {

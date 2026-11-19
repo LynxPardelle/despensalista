@@ -92,6 +92,12 @@ test.beforeEach(async ({ page }) => {
     });
   });
 
+  await page.route('**/api/household/access', async (route) => {
+    await route.fulfill({ json: {
+      householdId: 'household-1', canRedeem: true, grants: [], billingBlocksRedemption: false,
+    } });
+  });
+
   await page.route('**/api/pantry/waste-overview', async (route) => {
     await route.fulfill({
       status: 200,
@@ -262,13 +268,47 @@ test('a fresh invitation survives login and is accepted before any household or 
       members: [], invites: [], activities: [],
     }) });
   });
+  await page.route('**/api/household/access', route => route.fulfill({ json: {
+    householdId: 'invited-household', canRedeem: false, grants: [], billingBlocksRedemption: false,
+  } }));
   await page.goto('/profile?householdInvite=fresh-invite-token');
   await expect(page).toHaveURL(/\/login\?redirectTo=/);
   await page.getByRole('button', { name: 'Entrar con correo' }).click();
   await expect(page.getByText('Invitacion aceptada.', { exact: true })).toBeVisible();
-  await expect(page.getByText('Hogar invitado', { exact: false })).toBeVisible();
+  await expect(page.getByText(/Hogar invitado\s*·\s*0\s*personas/)).toBeVisible();
   await expect(page).toHaveURL(/\/profile$/);
   expect(prematureReads).toEqual([]);
+});
+
+test('redeems a gift for the displayed household and shows lifetime access without opening Checkout', async ({ page }) => {
+  const code = 'DL1.browser-test-code';
+  let redeemed = false;
+  const access = () => ({
+    householdId: 'household-1', canRedeem: true, billingBlocksRedemption: false,
+    grants: redeemed ? [{ id: 'browser-grant', plan: 'plus', mode: 'plan', startsAt: '2026-01-01T00:00:00.000Z', expiresAt: null }] : [],
+  });
+  const paymentRequests: string[] = [];
+  page.on('request', request => {
+    if (request.url().includes('/api/billing/checkout')) paymentRequests.push(request.url());
+  });
+  await page.route('**/api/billing/status', route => route.fulfill({ json: { available: false } }));
+  await page.route('**/api/household/access', route => route.fulfill({ json: access() }));
+  await page.route('**/api/household/access/redeem', async route => {
+    expect(route.request().method()).toBe('POST');
+    expect(route.request().postDataJSON()).toEqual({ code, householdId: 'household-1' });
+    expect(route.request().url()).not.toContain(code);
+    redeemed = true;
+    await route.fulfill({ json: { ...access(), replayed: false } });
+  });
+
+  await page.goto('/profile');
+  await page.getByLabel('Código de acceso', { exact: true }).fill(code);
+  await page.getByRole('button', { name: 'Canjear código', exact: true }).click();
+  await expect(page.getByText('Código canjeado.', { exact: false })).toBeVisible();
+  await expect(page.getByText('Acceso vitalicio.', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Código de acceso', { exact: true })).toHaveValue('');
+  expect(paymentRequests).toEqual([]);
+  expect(await page.evaluate(value => Object.values(localStorage).some(item => item.includes(value)), code)).toBe(false);
 });
 
 test('switches households only after confirmation and opens the new pantry', async ({ page }) => {

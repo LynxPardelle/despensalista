@@ -1,10 +1,15 @@
 export const HOUSEHOLD_PLAN_READER = Symbol('HOUSEHOLD_PLAN_READER');
 
 export interface HouseholdPlan {
-  tier: 'free' | 'plus';
-  memberLimit: number;
-  savedListLimit: number;
+  tier: 'free' | 'plus' | 'pro';
+  memberLimit: number | null;
+  savedListLimit: number | null;
   paidThrough: string | null;
+  source?: 'free' | 'stripe' | 'code';
+  lifetime?: boolean;
+  validUntil?: string | null;
+  unlimitedUsage?: boolean;
+  technicalSavedListLimit?: number;
 }
 
 export interface HouseholdPlanReader {

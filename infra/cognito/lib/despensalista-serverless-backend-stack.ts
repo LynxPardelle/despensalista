@@ -42,7 +42,7 @@ interface DespensaListaTables {
   users: dynamodb.Table;
 }
 
-const BACKEND_DATA_CONTRACT_VERSION = '3';
+const BACKEND_DATA_CONTRACT_VERSION = '4';
 
 export class DespensaListaServerlessBackendStack extends cdk.Stack {
   constructor(

@@ -43,7 +43,7 @@ export class GetPlusHouseholdSummaryUseCase {
     ownerUserId: string,
     referenceDate = new Date(),
   ) {
-    if ((await this.plans.getPlan(householdId)).tier !== 'plus') {
+    if ((await this.plans.getPlan(householdId)).tier === 'free') {
       throw new PlusRequiredException();
     }
 

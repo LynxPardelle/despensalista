@@ -22,6 +22,7 @@ import { HouseholdMembership } from '../../domain/entities/household.entity';
 import { UserDeviceRepository } from '../../domain/repositories/user-device.repository';
 import { UserId } from '../../domain/value-objects/user-id.vo';
 import { DeletePantryDataUseCase } from './delete-pantry-data.use-case';
+import { AccessCodeStore } from '../../infrastructure/access/access-code.store';
 
 const DELETE_ACCOUNT_CONFIRMATION = 'ELIMINAR CUENTA';
 const ACCOUNT_DELETION_PENDING_UNTIL = '9999-12-31T23:59:59.999Z';
@@ -53,6 +54,7 @@ export class DeleteAccountUseCase {
     @Optional()
     @Inject(ACCOUNT_FEEDBACK_ERASER)
     private readonly feedback?: AccountFeedbackEraser,
+    @Optional() private readonly accessCodes?: AccessCodeStore,
   ) {}
 
   async execute(command: {
@@ -111,6 +113,7 @@ export class DeleteAccountUseCase {
   async resume(job: AccountDeletionJob): Promise<DeleteAccountResult> {
     if (job.householdId && job.householdRole === 'owner') {
       await this.billing.stopRenewals(job.householdId);
+      await this.accessCodes?.deleteHousehold(job.householdId);
     }
     const userId = UserId.fromString(job.userId);
     const pantryResult = await this.deletePantryDataUseCase.execute({
