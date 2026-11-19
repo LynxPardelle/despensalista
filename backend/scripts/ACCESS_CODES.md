@@ -59,3 +59,15 @@ Un código solo puede canjearse una vez. La repetición por el mismo titular y e
 Los beneficios de códigos diferentes se solapan. Sus fechas parten del canje y no acumulan automáticamente meses entre sí. Si hay una suscripción con la renovación ya cancelada, el acceso temporal comienza al acabar su periodo pagado. Los códigos vitalicios comienzan al canjear. Una suscripción que todavía renueva debe cancelarse desde el portal antes de canjear. El canje conserva los cobros e invoices existentes y no ejecuta operaciones en Stripe.
 
 Repetir los comandos con `--stage tst` o `--stage prod` permite operar el ambiente seleccionado. Las sesiones AWS y los archivos de códigos deben corresponder al mismo ambiente. Los códigos de prueba de dev y tst no sirven en producción.
+
+## Verificación desplegada
+
+El script de prueba crea cuentas y hogares temporales con TOTP, emite códigos propios de prueba, verifica los canjes y retira sus cuentas y concesiones al terminar. La comprobación inicial de producción exige el dominio público, el alias publicado y ambos controles de Checkout cerrados. La ejecución usa la biblioteca SRP externa descrita en `DEPLOYED_API_SMOKE.md` y requiere el backend compilado.
+
+```powershell
+node scripts/deployed-access-code-smoke.cjs --stage dev --run
+node scripts/deployed-access-code-smoke.cjs --stage tst --run
+node scripts/deployed-access-code-smoke.cjs --stage prod --run-production-fixtures
+```
+
+El 18 de noviembre de 2026, la versión 16 del alias productivo pasó los casos de Plus temporal, canje único concurrente, origen del hogar, vencimiento, revocación, Pro y desarrollador vitalicios y conservación de listas al volver a Gratis. La limpieza de las cuentas y concesiones temporales también pasó.

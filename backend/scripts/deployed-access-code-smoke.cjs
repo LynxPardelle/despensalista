@@ -194,10 +194,21 @@ async function run(stage) {
   if (failed) process.exitCode = 1;
 }
 
-const args = process.argv.slice(2);
-if (args.length === 3 && args[0] === '--stage' && ['dev', 'tst'].includes(args[1]) && args[2] === '--run') {
-  run(args[1]).catch(error => { console.error(JSON.stringify({ phase: 'preflight', status: 'FAIL', error: error.name })); process.exitCode = 1; });
-} else {
-  console.log('Usage: node scripts/deployed-access-code-smoke.cjs --stage dev|tst --run');
-  if (args.length && args[0] !== '--help') process.exitCode = 1;
+function parseFixtureStage(args) {
+  if (args.length !== 3 || args[0] !== '--stage') return undefined;
+  if (['dev', 'tst'].includes(args[1]) && args[2] === '--run') return args[1];
+  if (args[1] === 'prod' && args[2] === '--run-production-fixtures') return 'prod';
+  return undefined;
 }
+
+if (require.main === module) {
+  const args = process.argv.slice(2);
+  const stage = parseFixtureStage(args);
+  if (stage) {
+    run(stage).catch(error => { console.error(JSON.stringify({ phase: 'preflight', status: 'FAIL', error: error.name })); process.exitCode = 1; });
+  } else {
+    console.log('Usage: node scripts/deployed-access-code-smoke.cjs --stage dev|tst --run\nProduction requires --stage prod --run-production-fixtures.');
+    if (args.length && args[0] !== '--help') process.exitCode = 1;
+  }
+}
+module.exports = { parseFixtureStage };
