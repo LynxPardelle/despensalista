@@ -2,6 +2,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { parseArgs, createBatch, validateBatch } = require('./access-codes.cjs');
+const { parseFixtureStage } = require('./deployed-access-code-smoke.cjs');
+
+test('production smoke requires the explicit fixture flag before any AWS request', () => {
+  assert.equal(parseFixtureStage(['--stage', 'dev', '--run']), 'dev');
+  assert.equal(parseFixtureStage(['--stage', 'tst', '--run']), 'tst');
+  assert.equal(parseFixtureStage(['--stage', 'prod', '--run-production-fixtures']), 'prod');
+  assert.equal(parseFixtureStage(['--stage', 'prod', '--run']), undefined);
+  assert.equal(parseFixtureStage(['--stage', 'prod']), undefined);
+  assert.equal(parseFixtureStage(['--stage', 'production', '--run-production-fixtures']), undefined);
+  assert.equal(parseFixtureStage(['--stage', 'prod', '--run-production-fixtures', '--extra']), undefined);
+});
 
 test('operator defaults to dry-run and validates plan and stage', () => {
   const args = ['issue', '--stage', 'dev', '--plan', 'plus', '--months', '2', '--reason', 'beta'];

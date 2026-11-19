@@ -487,8 +487,8 @@
         <p class="panel-kicker">Hogar</p>
         <h2>Colaboraci&oacute;n</h2>
         <p class="helper-copy">
-          Cada cuenta pertenece a un hogar. Si eres integrante de otro hogar, su propietario debe quitarte antes de aceptar una nueva invitación.
-          Las cuentas propietarias conservan su hogar; no se trasladan automáticamente su despensa ni sus datos.
+          Cada cuenta pertenece a un hogar. Para cambiarte, abre la invitación del nuevo hogar y confirma el cambio.
+          Si eres titular, solo puedes cambiarte cuando tu hogar está sin uso. La despensa y los borradores conservan su hogar de origen.
         </p>
 
         @if (householdLoading) {
@@ -681,7 +681,7 @@
           @if (profile; as lifecycleProfile) {
             <li>{{ retentionPolicyLabel(lifecycleProfile) }}</li>
           }
-          <li>L&iacute;mites actuales: 500 tipos activos, 1000 lotes activos y 50 items por cierre de compra.</li>
+          <li>L&iacute;mites actuales: 500 tipos activos, 1000 lotes activos y hasta 49 productos de un máximo de 48 tipos distintos por cierre de compra.</li>
           <li>Los enlaces temporales de compra solo contienen la lista generada, no la cuenta completa.</li>
         </ul>
       </aside>

@@ -36,3 +36,13 @@ test('the public plans explain Gratis and show the full Plus price with sales cl
   await question.click();
   await expect(page.getByText('Después tu hogar vuelve a Gratis', { exact: false })).toBeVisible();
 });
+
+test('the plans skip link keeps keyboard navigation on the plans page', async ({ page }) => {
+  await page.goto('/planes');
+  const skipLink = page.getByRole('link', { name: 'Ir al contenido' });
+  await skipLink.focus();
+  await skipLink.press('Enter');
+
+  await expect(page).toHaveURL(/\/planes#contenido$/);
+  await expect(page.getByRole('heading', { name: 'Planes para tu hogar' })).toBeVisible();
+});
