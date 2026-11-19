@@ -527,7 +527,7 @@ test('production Lambda does not trust X-Forwarded-For for rate-limit identity',
   );
   assert.equal(
     backend.Properties.Environment.Variables.BACKEND_DATA_CONTRACT_VERSION,
-    '3',
+    '4',
   );
 });
 
@@ -638,7 +638,7 @@ test('production publishes an aliased Lambda with all-at-once rollback controls'
   );
   assert.equal(deploymentGroup.Properties.AlarmConfiguration.Alarms.length, 1);
   productionTemplate.hasOutput('PantryQuotaSchemaVersion', { Value: '2' });
-  productionTemplate.hasOutput('BackendDataContractVersion', { Value: '3' });
+  productionTemplate.hasOutput('BackendDataContractVersion', { Value: '4' });
   productionTemplate.hasOutput('DeploymentReleaseId', { Value: 'a'.repeat(12) });
 });
 

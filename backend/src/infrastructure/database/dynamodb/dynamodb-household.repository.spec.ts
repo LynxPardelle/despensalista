@@ -82,66 +82,75 @@ describe('DynamoDbHouseholdRepository', () => {
     );
   });
 
-  it('accepts a live invite and claims membership in a single transaction', async () => {
-    const send = jest
-      .fn()
-      .mockResolvedValueOnce({ Item: { memberUserIds: new Set(['owner']) } })
-      .mockResolvedValue({});
-    const repository = new DynamoDbHouseholdRepository(
-      { send } as unknown as DynamoDbDocumentClientService,
-      makeConfigService(),
-    );
-    const now = new Date();
-    const invite = HouseholdInvite.fromPrimitives({
-      id: 'invite',
-      householdId: 'household-1',
-      invitedEmail: 'user@example.com',
-      invitedByUserId: 'owner',
-      role: 'editor',
-      tokenHash: 'a'.repeat(64),
-      createdAt: now,
-      updatedAt: now,
-      expiresAt: new Date(now.getTime() + 60000),
-    });
-    invite.accept(now);
-    await repository.acceptInvite(invite, testMember(), 5);
-    const transaction = send.mock.calls[1][0] as TransactWriteCommand;
-    expect(transaction).toBeInstanceOf(TransactWriteCommand);
-    expect(
-      transaction.input.TransactItems?.find(
-        (item) => item.Update?.Key?.pk === 'HOUSEHOLD#household-1',
-      )?.Update?.ConditionExpression,
-    ).toContain('attribute_not_exists(deleting)');
-    expect(transaction.input.TransactItems).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          ConditionCheck: expect.objectContaining({
-            Key: { pk: 'USER#user-1' },
-          }),
-        }),
-        expect.objectContaining({
-          ConditionCheck: expect.objectContaining({
-            Key: { pk: 'USER#owner' },
-          }),
-        }),
-        expect.objectContaining({
-          Put: expect.objectContaining({
-            Item: expect.objectContaining({ entityType: 'HOUSEHOLD_INVITE' }),
-            ConditionExpression: expect.stringContaining(
-              'attribute_not_exists(revokedAt)',
-            ),
-          }),
-        }),
-        expect.objectContaining({
-          Put: expect.objectContaining({
-            Item: expect.objectContaining({
-              pk: 'HOUSEHOLD_MEMBER_BY_USER#user-1',
+  it.each([5, null])(
+    'accepts a live invite atomically with a member limit of %s',
+    async (memberLimit) => {
+      const send = jest
+        .fn()
+        .mockResolvedValueOnce({ Item: { memberUserIds: new Set(['owner']) } })
+        .mockResolvedValue({});
+      const repository = new DynamoDbHouseholdRepository(
+        { send } as unknown as DynamoDbDocumentClientService,
+        makeConfigService(),
+      );
+      const now = new Date();
+      const invite = HouseholdInvite.fromPrimitives({
+        id: 'invite',
+        householdId: 'household-1',
+        invitedEmail: 'user@example.com',
+        invitedByUserId: 'owner',
+        role: 'editor',
+        tokenHash: 'a'.repeat(64),
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: new Date(now.getTime() + 60000),
+      });
+      invite.accept(now);
+      await repository.acceptInvite(invite, testMember(), memberLimit);
+      const transaction = send.mock.calls[1][0] as TransactWriteCommand;
+      expect(transaction).toBeInstanceOf(TransactWriteCommand);
+      if (memberLimit === null) {
+        expect(
+          transaction.input.TransactItems?.[2].Update
+            ?.ExpressionAttributeValues,
+        ).not.toHaveProperty(':memberLimit');
+      }
+      expect(
+        transaction.input.TransactItems?.find(
+          (item) => item.Update?.Key?.pk === 'HOUSEHOLD#household-1',
+        )?.Update?.ConditionExpression,
+      ).toContain('attribute_not_exists(deleting)');
+      expect(transaction.input.TransactItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            ConditionCheck: expect.objectContaining({
+              Key: { pk: 'USER#user-1' },
             }),
           }),
-        }),
-      ]),
-    );
-  });
+          expect.objectContaining({
+            ConditionCheck: expect.objectContaining({
+              Key: { pk: 'USER#owner' },
+            }),
+          }),
+          expect.objectContaining({
+            Put: expect.objectContaining({
+              Item: expect.objectContaining({ entityType: 'HOUSEHOLD_INVITE' }),
+              ConditionExpression: expect.stringContaining(
+                'attribute_not_exists(revokedAt)',
+              ),
+            }),
+          }),
+          expect.objectContaining({
+            Put: expect.objectContaining({
+              Item: expect.objectContaining({
+                pk: 'HOUSEHOLD_MEMBER_BY_USER#user-1',
+              }),
+            }),
+          }),
+        ]),
+      );
+    },
+  );
 
   it('releases the old seat, claims the new seat and consumes a switch invite atomically', async () => {
     const send = jest.fn().mockResolvedValue({

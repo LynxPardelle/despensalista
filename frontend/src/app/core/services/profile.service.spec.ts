@@ -207,6 +207,23 @@ describe('ProfileService', () => {
     request.flush(makeApiHouseholdWorkspace());
   });
 
+  it('reads access separately from billing and sends a redemption code only in a credentialed POST body', () => {
+    const access = { householdId: 'household-1', canRedeem: true, grants: [], billingBlocksRedemption: false };
+    service.getHouseholdAccess().subscribe(result => expect(result.householdId).toBe('household-1'));
+    const read = http.expectOne('/api/household/access');
+    expect(read.request.withCredentials).toBeTrue();
+    expect(read.request.method).toBe('GET');
+    read.flush(access);
+
+    service.redeemHouseholdAccess('DL1.one-use-secret', 'household-1').subscribe(result => expect(result.replayed).toBeTrue());
+    const redeem = http.expectOne('/api/household/access/redeem');
+    expect(redeem.request.withCredentials).toBeTrue();
+    expect(redeem.request.method).toBe('POST');
+    expect(redeem.request.body).toEqual({ code: 'DL1.one-use-secret', householdId: 'household-1' });
+    expect(redeem.request.urlWithParams).not.toContain('one-use-secret');
+    redeem.flush({ ...access, replayed: true });
+  });
+
   it('creates, accepts, revokes, and removes household access', () => {
     service
       .createHouseholdInvite({ email: 'familia@example.com', role: 'editor' })
