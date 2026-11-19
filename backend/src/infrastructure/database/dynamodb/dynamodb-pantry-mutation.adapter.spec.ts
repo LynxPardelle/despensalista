@@ -950,47 +950,52 @@ describe('DynamoDbPantryMutationAdapter', () => {
     ).toContain('lotsByProductType.#productType <= :remainingType');
   });
 
-  it('creates product types and saved lists with atomic owner quota checks', async () => {
-    const dynamo = makeDynamo();
-    (dynamo.send as jest.Mock)
-      .mockResolvedValueOnce({ Item: quotaItem() })
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({ Item: quotaItem() })
-      .mockResolvedValueOnce({});
-    const adapter = makeAdapter(dynamo);
+  it.each([3, 15, null])(
+    'creates saved lists with commercial limit %s and an atomic safety quota',
+    async (savedListLimit) => {
+      const dynamo = makeDynamo();
+      (dynamo.send as jest.Mock)
+        .mockResolvedValueOnce({ Item: quotaItem() })
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ Item: quotaItem() })
+        .mockResolvedValueOnce({});
+      const adapter = makeAdapter(dynamo);
 
-    await adapter.createProductType(makeProductType('type-new'));
-    await adapter.createShoppingList(
-      ShoppingList.create({
-        ownerUserId: 'user-1',
-        title: 'Semanal',
-        items: [
-          {
-            productTypeId: 'type-1',
-            baseName: 'Leche',
-            quantity: 1,
-            unit: QuantityUnit.PIECE,
-          },
-        ],
-      }),
-      3,
-    );
+      await adapter.createProductType(makeProductType('type-new'));
+      await adapter.createShoppingList(
+        ShoppingList.create({
+          ownerUserId: 'user-1',
+          title: 'Semanal',
+          items: [
+            {
+              productTypeId: 'type-1',
+              baseName: 'Leche',
+              quantity: 1,
+              unit: QuantityUnit.PIECE,
+            },
+          ],
+        }),
+        savedListLimit,
+      );
 
-    const typeCommand = dynamo.send.mock.calls[1][0] as TransactWriteCommand;
-    const listCommand = dynamo.send.mock.calls[3][0] as TransactWriteCommand;
-    expect(typeCommand.input.TransactItems?.[1].Update).toMatchObject({
-      ConditionExpression: expect.stringContaining(
-        'activeProductTypes < :maximum AND attribute_not_exists(productTypeNames.#name) AND deleting = :deleting',
-      ),
-    });
-    expect(listCommand.input.TransactItems?.[1].Update).toMatchObject({
-      ConditionExpression: expect.stringContaining(
-        '#counter < :maximum AND deleting = :deleting',
-      ),
-      ExpressionAttributeNames: { '#counter': 'savedShoppingLists' },
-      ExpressionAttributeValues: expect.objectContaining({ ':maximum': 3 }),
-    });
-  });
+      const typeCommand = dynamo.send.mock.calls[1][0] as TransactWriteCommand;
+      const listCommand = dynamo.send.mock.calls[3][0] as TransactWriteCommand;
+      expect(typeCommand.input.TransactItems?.[1].Update).toMatchObject({
+        ConditionExpression: expect.stringContaining(
+          'activeProductTypes < :maximum AND attribute_not_exists(productTypeNames.#name) AND deleting = :deleting',
+        ),
+      });
+      expect(listCommand.input.TransactItems?.[1].Update).toMatchObject({
+        ConditionExpression: expect.stringContaining(
+          '#counter < :maximum AND deleting = :deleting',
+        ),
+        ExpressionAttributeNames: { '#counter': 'savedShoppingLists' },
+        ExpressionAttributeValues: expect.objectContaining({
+          ':maximum': savedListLimit ?? 25,
+        }),
+      });
+    },
+  );
 
   it('atomically fences legacy products and public shares with optimistic writes', async () => {
     const dynamo = makeDynamo();

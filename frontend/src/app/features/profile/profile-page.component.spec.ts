@@ -8,7 +8,7 @@ import { HttpTestingController, provideHttpClientTesting } from '@angular/common
 import { ReactiveFormsModule } from '@angular/forms';
 import { RouterTestingModule } from '@angular/router/testing';
 import { ActivatedRoute, convertToParamMap } from '@angular/router';
-import { of, throwError } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 import { Store } from '@ngrx/store';
 import { AuthApiService } from '../../core/services/auth-api.service';
 import { AuthFacade } from '../../core/services/auth.facade';
@@ -16,6 +16,7 @@ import { PantryService } from '../../core/services/pantry.service';
 import { ProfileService } from '../../core/services/profile.service';
 import { readHouseholdInviteCode } from './household-invite-link';
 import { ProfilePageComponent } from './profile-page.component';
+import { HouseholdAccessStatus, RedeemHouseholdAccessResult } from '../../shared/models/profile.model';
 
 describe('ProfilePageComponent', () => {
   const subscription = {
@@ -52,6 +53,8 @@ describe('ProfilePageComponent', () => {
       'deleteAccount',
       'signOutAllSessions',
       'getHouseholdWorkspace',
+      'getHouseholdAccess',
+      'redeemHouseholdAccess',
       'createHouseholdInvite',
       'acceptHouseholdInvite',
       'revokeHouseholdInvite',
@@ -138,6 +141,7 @@ describe('ProfilePageComponent', () => {
     profileService.getHouseholdWorkspace.and.returnValue(
       of(makeHouseholdWorkspace()),
     );
+    profileService.getHouseholdAccess.and.returnValue(of(makeAccessStatus()));
     profileService.createHouseholdInvite.and.returnValue(
       of({
         invite: makeHouseholdWorkspace().invites[0],
@@ -314,6 +318,97 @@ describe('ProfilePageComponent', () => {
       shoppingPlanLeadDays: 5,
       showGuidanceTips: false,
     });
+  });
+
+  it('redeems a code for the confirmed household and refreshes benefits without saving the code', () => {
+    const reply = new Subject<RedeemHouseholdAccessResult>();
+    profileService.redeemHouseholdAccess.and.returnValue(reply);
+    profileService.getHouseholdWorkspace.calls.reset();
+    const beforeStorage = { ...window.localStorage };
+    component.accessCodeForm.controls.code.setValue('  DL1.single-use-test  ');
+
+    component.redeemAccessCode();
+    component.redeemAccessCode();
+
+    expect(profileService.redeemHouseholdAccess).toHaveBeenCalledOnceWith('DL1.single-use-test', 'household-1');
+    reply.next({ ...makeAccessStatus(), replayed: false });
+    reply.complete();
+    fixture.detectChanges();
+
+    expect(component.accessCodeForm.controls.code.value).toBe('');
+    expect(profileService.getHouseholdWorkspace).toHaveBeenCalledTimes(1);
+    expect(fixture.nativeElement.textContent).toContain('Código canjeado');
+    expect({ ...window.localStorage }).toEqual(beforeStorage);
+  });
+
+  it('shows lifetime Pro access even when Stripe is unavailable and avoids a tier refresh loop', () => {
+    http.expectOne('/api/billing/status').flush({ available: false });
+    profileService.getHouseholdAccess.and.returnValue(of(makeAccessStatus({
+      grants: [{ id: 'grant-lifetime', plan: 'pro', mode: 'developer', startsAt: '2026-01-01T00:00:00.000Z', expiresAt: null }],
+    })));
+    profileService.getHouseholdWorkspace.and.returnValue(of({
+      ...makeHouseholdWorkspace(),
+      plan: { tier: 'pro', memberLimit: null, savedListLimit: null, paidThrough: null, lifetime: true, source: 'code' },
+    }));
+    component.loadHouseholdWorkspace();
+    profileService.getHouseholdWorkspace.calls.reset();
+    (component as unknown as { refreshBillingStatus(): void }).refreshBillingStatus();
+    http.expectOne('/api/billing/status').flush({ ...subscription, hasPlus: true, canCheckout: false });
+    fixture.detectChanges();
+
+    expect(profileService.getHouseholdWorkspace).not.toHaveBeenCalled();
+    const page = fixture.nativeElement as HTMLElement;
+    expect(page.textContent).toContain('Pro · Acceso de desarrollador');
+    expect(page.textContent).toContain('Acceso vitalicio');
+    expect(page.textContent).toContain('sin cuota comercial de integrantes');
+    expect(page.textContent).not.toContain('de  personas');
+  });
+
+  it('describes a gift scheduled after the paid period', () => {
+    profileService.getHouseholdAccess.and.returnValue(of(makeAccessStatus({
+      grants: [{ id: 'grant-future', plan: 'plus', mode: 'plan', startsAt: '2099-02-01T12:00:00.000Z', expiresAt: '2099-03-01T12:00:00.000Z' }],
+    })));
+    component.loadHouseholdWorkspace();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('Comienza el');
+    expect(fixture.nativeElement.textContent).toContain('Acceso hasta el');
+  });
+
+  it('leaves the code available and keeps the Stripe portal reachable when recurring billing blocks redemption', () => {
+    http.expectOne('/api/billing/status').flush({ ...subscription, mode: 'test', status: 'active', hasPlus: true, canOpenPortal: true, canCheckout: false });
+    profileService.getHouseholdAccess.and.returnValue(of(makeAccessStatus({ canRedeem: false, billingBlocksRedemption: true })));
+    component.loadHouseholdWorkspace();
+    component.accessCodeForm.controls.code.setValue('DL1.gift-to-keep');
+    component.redeemAccessCode();
+    fixture.detectChanges();
+
+    expect(profileService.redeemHouseholdAccess).not.toHaveBeenCalled();
+    expect(component.accessCodeForm.controls.code.value).toBe('DL1.gift-to-keep');
+    const page = fixture.nativeElement as HTMLElement;
+    expect(page.textContent).toContain('cancelación esté confirmada');
+    expect(Array.from(page.querySelectorAll('button')).some(button => button.textContent?.includes('Gestionar renovación'))).toBeTrue();
+  });
+
+  it('rejects a response for another household before sending a code', () => {
+    profileService.getHouseholdAccess.and.returnValue(of(makeAccessStatus({ householdId: 'other-home' })));
+    component.loadHouseholdWorkspace();
+    component.accessCodeForm.controls.code.setValue('DL1.original-home-only');
+    component.redeemAccessCode();
+
+    expect(profileService.redeemHouseholdAccess).not.toHaveBeenCalled();
+  });
+
+  it('explains a used code and keeps the entered value for correction', () => {
+    profileService.redeemHouseholdAccess.and.returnValue(throwError(() => new HttpErrorResponse({
+      status: 409, error: { code: 'ACCESS_CODE_USED', message: 'secret must never be rendered' },
+    })));
+    component.accessCodeForm.controls.code.setValue('DL1.used-code');
+    component.redeemAccessCode();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain('Este código ya se canjeó');
+    expect(fixture.nativeElement.textContent).not.toContain('secret must never be rendered');
+    expect(component.accessCodeForm.controls.code.value).toBe('DL1.used-code');
   });
 
   it('shows key management only when the API confirms a verified Google session', () => {
@@ -1237,6 +1332,10 @@ function setFiscalSelect(panel: HTMLElement, name: string, value: string) {
   const select = panel.querySelector<HTMLSelectElement>(`#cfdi-${name}`)!;
   select.value = value;
   select.dispatchEvent(new Event('change'));
+}
+
+function makeAccessStatus(overrides: Partial<HouseholdAccessStatus> = {}): HouseholdAccessStatus {
+  return { householdId: 'household-1', canRedeem: true, grants: [], billingBlocksRedemption: false, ...overrides };
 }
 
 function makeHouseholdWorkspace() {

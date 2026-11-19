@@ -175,10 +175,10 @@ function normalizePositiveAmount(value: number, label: string): number {
 }
 
 function normalizeOptionalMoney(
-  value: number | undefined,
+  value: number | null | undefined,
   label: string,
 ): number | undefined {
-  if (value === undefined) {
+  if (value === undefined || value === null) {
     return undefined;
   }
 

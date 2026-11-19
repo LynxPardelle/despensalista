@@ -169,6 +169,9 @@ import { SesRenewalNoticeTransport } from './infrastructure/billing/renewals/ses
 import { StripeRenewalNoticeRecipient } from './infrastructure/billing/renewals/stripe-renewal-notice-recipient';
 import { StripeHouseholdBilling } from './infrastructure/billing/stripe-household-billing';
 import { StripeHouseholdPlan } from './infrastructure/billing/stripe-household-plan';
+import { AccessCodeStore } from './infrastructure/access/access-code.store';
+import { AccessCodeService } from './infrastructure/access/access-code.service';
+import { AccessCodeController } from './infrastructure/http/controllers/access-code.controller';
 import { HOUSEHOLD_PLAN_READER } from './application/ports/household-plan-reader';
 import { MONTHLY_PURCHASE_SPEND_READER } from './application/ports/monthly-purchase-spend-reader';
 import { GetPlusHouseholdSummaryUseCase } from './application/use-cases/get-plus-household-summary.use-case';
@@ -516,6 +519,7 @@ const wasteEventRepositoryProvider = useDynamoDb
     AuthController,
     GoogleMfaController,
     StripeBillingController,
+    AccessCodeController,
     CfdiController,
     PlusHouseholdSummaryController,
     HouseholdController,
@@ -542,6 +546,8 @@ const wasteEventRepositoryProvider = useDynamoDb
     CfdiRequestStore,
     CfdiMail,
     StripeBillingStore,
+    AccessCodeStore,
+    AccessCodeService,
     RenewalNoticeStore,
     RenewalNoticeDispatcher,
     {

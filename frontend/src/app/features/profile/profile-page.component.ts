@@ -37,6 +37,8 @@ import * as PantryActions from '../../store/pantry/pantry.actions';
 import * as ProductActions from '../../store/product/product.actions';
 import {
   HouseholdActivity,
+  HouseholdAccessGrant,
+  HouseholdAccessStatus,
   HouseholdInvite,
   HouseholdRole,
   HouseholdSwitchOffer,
@@ -126,6 +128,7 @@ export class ProfilePageComponent implements OnInit {
   protected readonly currentPlusHogarTermsVersion = plusHogarTermsVersion;
   private billingStatusRequest?: Subscription;
   private householdWorkspaceRequest?: Subscription;
+  private householdAccessRequest?: Subscription;
 
   profile: UserProfile | null = null;
   loading = false;
@@ -149,6 +152,11 @@ export class ProfilePageComponent implements OnInit {
   householdLoading = false;
   householdError: string | null = null;
   householdMessage: string | null = null;
+  protected householdAccess: HouseholdAccessStatus | null = null;
+  protected accessLoading = false;
+  protected accessRedeeming = false;
+  protected accessError: string | null = null;
+  protected accessMessage: string | null = null;
   householdInviteCreating = false;
   householdAccepting = false;
   householdInviteToken: string | null = null;
@@ -237,6 +245,24 @@ export class ProfilePageComponent implements OnInit {
   readonly householdAcceptForm = this.formBuilder.nonNullable.group({
     token: ['', [Validators.required, Validators.minLength(16)]],
   });
+
+  readonly accessCodeForm = this.formBuilder.nonNullable.group({
+    code: ['', [Validators.required, Validators.maxLength(200)]],
+  });
+
+  protected get canRedeemAccess(): boolean {
+    return !!this.householdAccess?.canRedeem && this.canManageHousehold &&
+      this.householdAccess.householdId === this.currentPantryHouseholdId &&
+      !this.householdAccepting && !this.accessRedeeming && !this.accessLoading;
+  }
+
+  protected planName(tier: 'free' | 'plus' | 'pro'): string {
+    return tier === 'pro' ? 'Pro' : tier === 'plus' ? 'Plus Hogar' : 'Gratis';
+  }
+
+  protected grantStartsLater(grant: HouseholdAccessGrant): boolean {
+    return Date.parse(grant.startsAt) > Date.now();
+  }
 
   get canDeletePantryData(): boolean {
     return (
@@ -363,8 +389,9 @@ export class ProfilePageComponent implements OnInit {
         next: (status) => {
           this.billing.set(status.available ? status : null);
           const displayedPlan = this.householdWorkspace?.plan?.tier;
-          if (status.available && displayedPlan && !this.householdLoading && !this.householdAccepting &&
-            displayedPlan !== (status.hasPlus ? 'plus' : 'free')) {
+          if (status.available && displayedPlan && this.householdWorkspace?.plan?.source !== 'code' &&
+            !this.householdLoading && !this.householdAccepting &&
+            (displayedPlan !== 'free') !== !!status.hasPlus) {
             this.loadHouseholdWorkspace();
           }
         },
@@ -674,8 +701,14 @@ export class ProfilePageComponent implements OnInit {
       )
       .subscribe({
         next: (workspace) => {
+          if (this.householdWorkspace?.household.id !== workspace.household.id) {
+            this.accessCodeForm.reset();
+            this.householdAccess = null;
+            this.accessMessage = null;
+          }
           this.householdWorkspace = workspace;
           this.pantryScope.bind(workspace.household.id);
+          this.loadHouseholdAccess();
           this.changeDetector.markForCheck();
         },
         error: (error) => {
@@ -683,6 +716,96 @@ export class ProfilePageComponent implements OnInit {
           this.changeDetector.markForCheck();
         },
       });
+  }
+
+  protected loadHouseholdAccess(): void {
+    const householdId = this.householdWorkspace?.household.id;
+    if (!householdId) return;
+    this.householdAccessRequest?.unsubscribe();
+    this.accessLoading = true;
+    this.accessError = null;
+    this.householdAccessRequest = this.profileService.getHouseholdAccess().pipe(
+      takeUntilDestroyed(this.destroyRef),
+      finalize(() => {
+        this.accessLoading = false;
+        this.changeDetector.markForCheck();
+      }),
+    ).subscribe({
+      next: (access) => {
+        if (this.householdWorkspace?.household.id !== householdId) return;
+        if (access.householdId !== householdId) {
+          this.pantryScope.markChanged();
+          this.householdAccess = null;
+          this.accessError = 'El hogar activo cambió. Recarga el perfil antes de canjear el código.';
+          return;
+        }
+        this.householdAccess = access;
+      },
+      error: (error: unknown) => {
+        this.householdAccess = null;
+        this.accessError = this.getErrorMessage(error);
+      },
+    });
+  }
+
+  redeemAccessCode(): void {
+    if (this.accessRedeeming) return;
+    if (!this.canRedeemAccess) {
+      this.accessError = this.householdAccess?.billingBlocksRedemption
+        ? 'Cancela la renovación desde el portal y vuelve a canjear el código cuando la cancelación esté confirmada. El código sigue sin usar.'
+        : 'Confirma tu hogar y tu acceso como titular antes de canjear el código.';
+      return;
+    }
+    const code = this.accessCodeForm.controls.code.value.trim();
+    const householdId = this.currentPantryHouseholdId;
+    if (!code || this.accessCodeForm.invalid || !householdId) {
+      this.accessCodeForm.markAllAsTouched();
+      this.accessError = 'Pega el código completo que recibiste.';
+      return;
+    }
+    this.accessRedeeming = true;
+    this.accessError = null;
+    this.accessMessage = null;
+    this.profileService.redeemHouseholdAccess(code, householdId).pipe(
+      takeUntilDestroyed(this.destroyRef),
+      finalize(() => {
+        this.accessRedeeming = false;
+        this.changeDetector.markForCheck();
+      }),
+    ).subscribe({
+      next: (access) => {
+        if (access.householdId !== householdId || this.currentPantryHouseholdId !== householdId) {
+          this.accessError = 'El hogar activo cambió. Recarga el perfil para comprobar el resultado del canje.';
+          this.pantryScope.markChanged();
+          return;
+        }
+        this.householdAccess = access;
+        this.accessCodeForm.reset();
+        this.accessMessage = access.replayed
+          ? 'El acceso ya estaba aplicado a este hogar. Sus beneficios están disponibles.'
+          : 'Código canjeado. Los beneficios ya están disponibles para este hogar.';
+        this.loadHouseholdWorkspace();
+        this.refreshBillingStatus();
+      },
+      error: (error: unknown) => {
+        this.accessError = this.accessCodeError(error);
+        if (isPantryHouseholdMismatch(error)) this.pantryScope.markChanged();
+      },
+    });
+  }
+
+  private accessCodeError(error: unknown): string {
+    if (!(error instanceof HttpErrorResponse)) return this.getErrorMessage(error);
+    switch (error.error?.code) {
+      case 'ACCESS_CODE_INVALID': return 'Revisa que el código esté completo y corresponda a DespensaLista.';
+      case 'ACCESS_CODE_EXPIRED': return 'Terminó el plazo para canjear este código. Pide uno nuevo a quien te lo entregó.';
+      case 'ACCESS_CODE_USED': return 'Este código ya se canjeó. Cada código se puede usar una sola vez.';
+      case 'ACCESS_CODE_REVOKED': return 'Este código dejó de estar disponible. Consulta a quien te lo entregó.';
+      case 'ACCESS_CODE_BILLING_ACTIVE': return 'Cancela la renovación desde el portal y vuelve a canjear el código cuando la cancelación esté confirmada. El código sigue sin usar.';
+      case 'HOUSEHOLD_ORIGIN_MISMATCH': return 'El hogar activo cambió. Recarga el perfil antes de canjear el código.';
+      case 'ACCESS_CODE_RATE_LIMITED': return 'Alcanzaste el límite de intentos. Espera antes de volver a intentar.';
+      default: return this.getErrorMessage(error);
+    }
   }
 
   createHouseholdInvite(): void {
@@ -789,6 +912,10 @@ export class ProfilePageComponent implements OnInit {
         next: (workspace) => {
           this.householdWorkspace = workspace;
           this.householdAcceptForm.reset({ token: '' });
+          this.householdAccessRequest?.unsubscribe();
+          this.householdAccess = null;
+          this.accessCodeForm.reset();
+          this.accessMessage = null;
           if (switchFromHouseholdId) {
             this.pantryScope.markChanged();
             this.deletePantryDataForm.reset({ confirmationText: '' });
@@ -799,6 +926,7 @@ export class ProfilePageComponent implements OnInit {
           } else {
             this.pantryScope.bind(workspace.household.id);
             this.householdMessage = 'Invitacion aceptada.';
+            this.loadHouseholdAccess();
           }
           this.billing.set(null);
           this.billingActionError.set(null);

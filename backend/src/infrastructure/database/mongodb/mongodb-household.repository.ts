@@ -110,7 +110,7 @@ export class MongoHouseholdRepository
   async acceptInvite(
     invite: HouseholdInvite,
     membership: HouseholdMembership,
-    memberLimit: number,
+    memberLimit: number | null,
     previous?: HouseholdMembership,
   ): Promise<HouseholdMembership> {
     const inviteRecord = this.toInviteRecord(invite);
@@ -433,7 +433,7 @@ export class MongoHouseholdRepository
 
   async saveInvite(
     invite: HouseholdInvite,
-    memberLimit?: number,
+    memberLimit?: number | null,
   ): Promise<HouseholdInvite> {
     const record = this.toInviteRecord(invite);
     return this.writeOpenHouseholdChild(
@@ -447,7 +447,7 @@ export class MongoHouseholdRepository
         if (invitedUser)
           await this.assertActiveUsers([invitedUser.id], session);
         if (!record.revokedAt) {
-          if (memberLimit !== undefined)
+          if (memberLimit != null)
             await this.assertMemberSpace(
               invite.householdId,
               memberLimit,
@@ -810,10 +810,11 @@ export class MongoHouseholdRepository
 
   private async assertMemberSpace(
     householdId: string,
-    memberLimit: number,
+    memberLimit: number | null,
     session: ClientSession,
     existingUserId?: string,
   ): Promise<void> {
+    if (memberLimit === null) return;
     const filter = { entityType: 'HOUSEHOLD_MEMBERSHIP', householdId };
     const count = await this.householdModel
       .countDocuments(filter)

@@ -27,6 +27,7 @@ import {
   type HouseholdSwitchOffer,
 } from '../../../application/use-cases/household.use-cases';
 import type { HouseholdRole } from '../../../domain/entities/household.entity';
+import { AccessCodeException } from '../../access/access-code.service';
 
 interface ApiErrorBody {
   statusCode: number;
@@ -106,6 +107,13 @@ function getStatusCode(exception: unknown): number {
 }
 
 function getErrorCode(exception: unknown): string | undefined {
+  if (exception instanceof AccessCodeException) return exception.code;
+  if (exception instanceof HttpException) {
+    const response = exception.getResponse();
+    if (isRecord(response) && response['code'] === 'ACCESS_ALREADY_GRANTED') {
+      return 'ACCESS_ALREADY_GRANTED';
+    }
+  }
   if (
     exception instanceof HouseholdOriginMismatchError ||
     exception instanceof CheckoutCapacityExceededError

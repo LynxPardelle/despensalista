@@ -164,7 +164,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
   async acceptInvite(
     invite: HouseholdInvite,
     membership: HouseholdMembership,
-    memberLimit: number,
+    memberLimit: number | null,
     previous?: HouseholdMembership,
   ): Promise<HouseholdMembership> {
     const item = this.toInviteItem(invite);
@@ -198,11 +198,18 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
                 TableName: this.tableName,
                 Key: { pk: householdKey(invite.householdId) },
                 UpdateExpression: 'ADD memberUserIds :joiningUsers',
-                ConditionExpression: `${OPEN_HOUSEHOLD} AND attribute_exists(memberUserIds) AND (contains(memberUserIds, :joiningUser) OR size(memberUserIds) < :memberLimit)`,
+                ConditionExpression:
+                  memberLimit === null
+                    ? `${OPEN_HOUSEHOLD} AND attribute_exists(memberUserIds)`
+                    : `${OPEN_HOUSEHOLD} AND attribute_exists(memberUserIds) AND (contains(memberUserIds, :joiningUser) OR size(memberUserIds) < :memberLimit)`,
                 ExpressionAttributeValues: {
-                  ':joiningUser': membership.userId,
                   ':joiningUsers': new Set([membership.userId]),
-                  ':memberLimit': memberLimit,
+                  ...(memberLimit === null
+                    ? {}
+                    : {
+                        ':joiningUser': membership.userId,
+                        ':memberLimit': memberLimit,
+                      }),
                 },
               },
             },
@@ -494,10 +501,10 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
 
   async saveInvite(
     invite: HouseholdInvite,
-    memberLimit?: number,
+    memberLimit?: number | null,
   ): Promise<HouseholdInvite> {
     const item = this.toInviteItem(invite);
-    if (memberLimit !== undefined)
+    if (memberLimit != null)
       await this.requireMemberManifest(invite.householdId);
     const invitedUser = await this.findUserLookup(item.invitedEmail);
     const activeUserChecks = this.activeUserChecks([
@@ -529,10 +536,10 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
                 TableName: this.tableName,
                 Key: { pk: householdKey(invite.householdId) },
                 ConditionExpression:
-                  memberLimit === undefined
+                  memberLimit == null
                     ? OPEN_HOUSEHOLD
                     : `${OPEN_HOUSEHOLD} AND size(memberUserIds) < :memberLimit`,
-                ...(memberLimit === undefined
+                ...(memberLimit == null
                   ? {}
                   : {
                       ExpressionAttributeValues: {
@@ -560,7 +567,7 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
       )
         throw error;
       if (
-        memberLimit !== undefined &&
+        memberLimit != null &&
         wasConditionalCheckFailure(
           error,
           activeUserChecks.length + (invitedUser ? 1 : 0),
@@ -1245,9 +1252,10 @@ export class DynamoDbHouseholdRepository implements HouseholdRepository {
 
   private async assertSeatAvailable(
     householdId: string,
-    maximum: number,
+    maximum: number | null,
     existingUserId?: string,
   ): Promise<void> {
+    if (maximum === null) return;
     const household = await this.readMemberManifest(householdId);
     const members = household?.memberUserIds;
     if (

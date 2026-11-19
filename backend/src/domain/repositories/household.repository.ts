@@ -37,7 +37,7 @@ export interface HouseholdRepository {
   acceptInvite(
     invite: HouseholdInvite,
     membership: HouseholdMembership,
-    memberLimit: number,
+    memberLimit: number | null,
     previous?: HouseholdMembership,
   ): Promise<HouseholdMembership>;
   registerHouseholdSwitchCandidate(userId: string): Promise<void>;
@@ -48,7 +48,7 @@ export interface HouseholdRepository {
   saveMembership(membership: HouseholdMembership): Promise<HouseholdMembership>;
   saveInvite(
     invite: HouseholdInvite,
-    memberLimit?: number,
+    memberLimit?: number | null,
   ): Promise<HouseholdInvite>;
   saveActivity(activity: HouseholdActivity): Promise<HouseholdActivity>;
   findHouseholdById(id: string): Promise<Household | null>;

@@ -26,7 +26,7 @@ jobs:
         node-version: 22
 
     - name: Test release, smoke, and workflow contracts
-      run: node --test .github/scripts/*.test.mjs docker/mongodb/replica-health.test.mjs backend/scripts/deployed-api-smoke.test.cjs
+      run: node --test .github/scripts/*.test.mjs docker/mongodb/replica-health.test.mjs backend/scripts/deployed-api-smoke.test.cjs backend/scripts/access-codes.test.cjs
 
     - name: Verify authenticated MongoDB replica-set transactions
       run: bash .github/scripts/mongodb-compose-smoke.sh

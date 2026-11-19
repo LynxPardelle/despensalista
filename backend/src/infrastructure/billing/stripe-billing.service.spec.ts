@@ -15,6 +15,37 @@ import { StripeBillingService } from './stripe-billing.service';
 import type { BillingRecord, StripeBillingStore } from './stripe-billing.store';
 import type { DynamoDbDocumentClientService } from '../database/dynamodb/dynamodb-document-client.service';
 import { RenewalNoticeStore } from './renewals/renewal-notice.store';
+import type { AccessCodeStore } from '../access/access-code.store';
+
+function giftSnapshot() {
+  return {
+    householdId: 'household-1',
+    revision: 1,
+    grants: [
+      {
+        id: 'gift',
+        plan: 'plus',
+        mode: 'plan',
+        lifetime: true,
+        startsAt: '2026-01-01T00:00:00.000Z',
+        expiresAt: null,
+      },
+    ],
+  };
+}
+
+function scheduledGiftSnapshot() {
+  const snapshot = giftSnapshot();
+  return {
+    ...snapshot,
+    grants: snapshot.grants.map((grant) => ({
+      ...grant,
+      lifetime: false,
+      startsAt: new Date(Date.now() + 86_400_000).toISOString(),
+      expiresAt: new Date(Date.now() + 2 * 86_400_000).toISOString(),
+    })),
+  };
+}
 
 describe('StripeBillingService', () => {
   const secret = 'whsec_unit_test_secret';
@@ -73,11 +104,17 @@ describe('StripeBillingService', () => {
   let saveRecord: jest.Mock;
   let noticeValues: Record<string, string>;
   let noticeRead: jest.Mock;
+  let readGrants: jest.Mock;
 
   beforeEach(() => {
     record = undefined;
     noticeValues = {};
     noticeRead = jest.fn().mockResolvedValue({});
+    readGrants = jest.fn().mockResolvedValue({
+      householdId: 'household-1',
+      revision: 0,
+      grants: [],
+    });
     exists = jest.fn().mockResolvedValue(false);
     settings = jest.fn().mockResolvedValue(billing);
     customerMapping = jest.fn().mockResolvedValue(undefined);
@@ -126,6 +163,7 @@ describe('StripeBillingService', () => {
         send: noticeRead,
       } as unknown as DynamoDbDocumentClientService),
       { get: (key: string) => noticeValues[key] } as ConfigService,
+      { readGrants } as unknown as AccessCodeStore,
     );
     jest.spyOn(stripe.prices, 'retrieve').mockResolvedValue({
       id: 'price_test',
@@ -171,6 +209,85 @@ describe('StripeBillingService', () => {
         },
       } as unknown as Stripe.Response<Stripe.Checkout.Session>),
     );
+  });
+
+  it('shows gifted access while preserving an existing billing portal', async () => {
+    membership.mockResolvedValue({ householdId: 'household-1', role: 'owner' });
+    readGrants.mockResolvedValue(giftSnapshot());
+    record = {
+      householdId: 'household-1',
+      revision: 1,
+      customerId: 'cus_test',
+      subscriptionId: 'sub_test',
+      status: 'canceled',
+    };
+
+    await expect(service.status('owner-1')).resolves.toMatchObject({
+      hasPlus: true,
+      canCheckout: false,
+      canOpenPortal: true,
+      access: { tier: 'plus', source: 'code', lifetime: true },
+    });
+  });
+
+  it('does not open a new Checkout for an active gift', async () => {
+    readGrants.mockResolvedValue(giftSnapshot());
+    await expect(service.checkout('owner-1', billing.origin)).rejects.toThrow(
+      'El hogar ya tiene acceso',
+    );
+    expect(beginCheckout).not.toHaveBeenCalled();
+    expect(stripe.customers.create).not.toHaveBeenCalled();
+  });
+
+  it('keeps Checkout closed for a scheduled gift after a subscription was canceled immediately', async () => {
+    membership.mockResolvedValue({ householdId: 'household-1', role: 'owner' });
+    readGrants.mockResolvedValue(scheduledGiftSnapshot());
+    record = { householdId: 'household-1', revision: 1, status: 'canceled' };
+
+    await expect(service.status('owner-1')).resolves.toMatchObject({
+      hasPlus: false,
+      canCheckout: false,
+    });
+    await expect(service.checkout('owner-1', billing.origin)).rejects.toThrow(
+      'El hogar ya tiene acceso',
+    );
+    expect(beginCheckout).not.toHaveBeenCalled();
+    expect(stripe.customers.create).not.toHaveBeenCalled();
+  });
+
+  it('rechecks a newly scheduled gift while holding the Checkout lease', async () => {
+    readGrants
+      .mockResolvedValueOnce({
+        householdId: 'household-1',
+        revision: 0,
+        grants: [],
+      })
+      .mockResolvedValueOnce(scheduledGiftSnapshot());
+
+    await expect(service.checkout('owner-1', billing.origin)).rejects.toThrow(
+      'El hogar ya tiene acceso',
+    );
+    expect(beginCheckout).toHaveBeenCalledTimes(1);
+    expect(endCheckout).toHaveBeenCalledTimes(1);
+    expect(stripe.customers.create).not.toHaveBeenCalled();
+    expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
+  });
+
+  it('rechecks gifts under the Checkout lease before starting Stripe side effects', async () => {
+    readGrants
+      .mockResolvedValueOnce({
+        householdId: 'household-1',
+        revision: 0,
+        grants: [],
+      })
+      .mockResolvedValueOnce(giftSnapshot());
+    await expect(service.checkout('owner-1', billing.origin)).rejects.toThrow(
+      'El hogar ya tiene acceso',
+    );
+    expect(beginCheckout).toHaveBeenCalledTimes(1);
+    expect(endCheckout).toHaveBeenCalledTimes(1);
+    expect(stripe.customers.create).not.toHaveBeenCalled();
+    expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
   });
 
   it('enqueues only an eligible verified dev renewal and reconfirms fresh cancellation', async () => {
