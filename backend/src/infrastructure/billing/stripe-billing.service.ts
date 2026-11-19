@@ -24,7 +24,12 @@ import {
   type CheckoutAttempt,
   type CheckoutConsent,
 } from './stripe-billing.store';
-import { paidPlusThrough } from './stripe-household-plan';
+import { paidPlusThrough, planFromAccessGrants } from './stripe-household-plan';
+import { AccessCodeStore } from '../access/access-code.store';
+import {
+  activeAccessGrants,
+  type AccessGrantsSnapshot,
+} from '../access/access-code.types';
 import { renewalNoticeConfig } from './renewals/renewal-notice.config';
 import { RenewalNoticeStore } from './renewals/renewal-notice.store';
 import type { RenewalNoticeCandidate } from './renewals/renewal-notice.types';
@@ -57,6 +62,7 @@ export class StripeBillingService {
     private readonly access: ResolveHouseholdPantryAccessUseCase,
     private readonly renewalNotices: RenewalNoticeStore,
     @Optional() private readonly noticeConfig?: ConfigService,
+    @Optional() private readonly accessCodes?: AccessCodeStore,
   ) {}
 
   async status(userId: string) {
@@ -71,13 +77,15 @@ export class StripeBillingService {
     const canManage =
       !membership ||
       Boolean(membership.role === 'owner' && household?.ownerUserId === userId);
-    const [price, record, vatRateId] = await Promise.all([
+    const [price, record, vatRateId, grantsSnapshot] = await Promise.all([
       this.getPrice(settings),
       household ? this.store.read(settings.table, household.id) : undefined,
       settings.checkoutEnabled
         ? this.getCheckoutVatRate(settings).catch(() => undefined)
         : undefined,
+      household ? this.accessCodes?.readGrants(household.id) : undefined,
     ]);
+    const grants = grantsSnapshot ? activeAccessGrants(grantsSnapshot) : [];
     const requiresVat = requiresCheckoutVat(settings);
     const pendingCheckout =
       record?.checkout && record.checkout.expiresAt > epochSeconds();
@@ -90,6 +98,7 @@ export class StripeBillingService {
     const paid = paidPlusThrough(record);
     const canCheckout =
       settings.checkoutEnabled &&
+      !hasUnexpiredAccessGrant(grantsSnapshot) &&
       price.active &&
       (!requiresVat ||
         Boolean(vatRateId && price.unit_amount === plusSubtotalMinor)) &&
@@ -105,7 +114,10 @@ export class StripeBillingService {
     return {
       available: true,
       mode: settings.mode,
-      hasPlus: paid !== undefined,
+      hasPlus: paid !== undefined || grants.length > 0,
+      ...(grants.length > 0 && {
+        access: planFromAccessGrants(grants, paid),
+      }),
       ...(record?.paidThrough && {
         currentPeriodEnd: new Date(record.paidThrough * 1000).toISOString(),
         cancelAtPeriodEnd: record.cancelAtPeriodEnd === true,
@@ -170,6 +182,7 @@ export class StripeBillingService {
     ) {
       throw new ForbiddenException('Only household owners can manage billing');
     }
+    await this.assertNoAccessGrant(access.householdId);
     const consent =
       settings.mode === 'live'
         ? { termsVersion, acceptedAt: new Date().toISOString() }
@@ -191,9 +204,23 @@ export class StripeBillingService {
       throw new ConflictException('Checkout is busy, please retry');
     }
     try {
+      // Recheck after acquiring the lease. Redemption checks the same lease
+      // before it commits, so neither path can open a competing entitlement.
+      await this.assertNoAccessGrant(householdId);
       return await this.createCheckout(settings, householdId, offer, consent);
     } finally {
       await this.store.endCheckout(settings.table, householdId, lease);
+    }
+  }
+
+  private async assertNoAccessGrant(householdId: string): Promise<void> {
+    const snapshot = await this.accessCodes?.readGrants(householdId);
+    if (hasUnexpiredAccessGrant(snapshot)) {
+      throw new ConflictException({
+        code: 'ACCESS_ALREADY_GRANTED',
+        message:
+          'El hogar ya tiene acceso vigente o programado mediante un código.',
+      });
     }
   }
 
@@ -777,6 +804,19 @@ export class StripeBillingService {
     }
     return event;
   }
+}
+
+function hasUnexpiredAccessGrant(
+  snapshot: AccessGrantsSnapshot | undefined,
+): boolean {
+  const now = Date.now();
+  return (
+    snapshot?.grants.some((grant) =>
+      grant.lifetime
+        ? grant.expiresAt === null
+        : grant.expiresAt !== null && Date.parse(grant.expiresAt) > now,
+    ) === true
+  );
 }
 
 function isFinished(status: string): boolean {

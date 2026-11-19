@@ -117,7 +117,7 @@ export interface PantryMutationPort {
   ): Promise<ProductType>;
   createShoppingList(
     list: ShoppingList,
-    savedListLimit: number,
+    savedListLimit: number | null,
   ): Promise<ShoppingList>;
   createProduct(product: Product): Promise<Product>;
   updateProduct(expected: Product, updated: Product): Promise<Product>;

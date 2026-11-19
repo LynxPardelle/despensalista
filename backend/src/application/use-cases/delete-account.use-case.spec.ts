@@ -9,6 +9,7 @@ import { UserDeviceRepository } from '../../domain/repositories/user-device.repo
 import { UserId } from '../../domain/value-objects/user-id.vo';
 import { DeletePantryDataUseCase } from './delete-pantry-data.use-case';
 import { DeleteAccountUseCase } from './delete-account.use-case';
+import type { AccessCodeStore } from '../../infrastructure/access/access-code.store';
 
 describe('DeleteAccountUseCase', () => {
   it('stops owner renewals before deleting any account contents', async () => {
@@ -20,6 +21,7 @@ describe('DeleteAccountUseCase', () => {
       confirmationText: 'ELIMINAR CUENTA',
     });
     expect(fixture.stopRenewals).toHaveBeenCalledWith('household-1');
+    expect(fixture.deleteAccessGrants).toHaveBeenCalledWith('household-1');
     expect(fixture.stopRenewals.mock.invocationCallOrder[0]).toBeLessThan(
       fixture.deletePantryDataUseCase.execute.mock.invocationCallOrder[0],
     );
@@ -56,6 +58,30 @@ describe('DeleteAccountUseCase', () => {
       confirmationText: 'ELIMINAR CUENTA',
     });
     expect(fixture.stopRenewals).not.toHaveBeenCalled();
+    expect(fixture.deleteAccessGrants).not.toHaveBeenCalled();
+  });
+
+  it('retries gift erasure before removing the deleting owner identity', async () => {
+    const fixture = makeUseCase({
+      membership: makeMembership('user-1', 'owner'),
+    });
+    fixture.deleteAccessGrants.mockRejectedValueOnce(
+      new Error('Access erasure unavailable'),
+    );
+    await expect(
+      fixture.useCase.execute({
+        userId: 'user-1',
+        confirmationText: 'ELIMINAR CUENTA',
+      }),
+    ).rejects.toThrow('Access erasure unavailable');
+    expect(fixture.userDao.delete).not.toHaveBeenCalled();
+    expect(fixture.deletePantryDataUseCase.execute).not.toHaveBeenCalled();
+
+    await fixture.useCase.resume(
+      await fixture.beginAccountDeletion.mock.results[0].value,
+    );
+    expect(fixture.deleteAccessGrants).toHaveBeenCalledTimes(2);
+    expect(fixture.userDao.delete).toHaveBeenCalledTimes(1);
   });
 
   it('removes the account feedback before deleting the account and retries erasure on resume', async () => {
@@ -435,6 +461,7 @@ function makeUseCase(
   } as unknown as jest.Mocked<UserDeviceRepository>;
   const stopRenewals = jest.fn().mockResolvedValue(undefined);
   const deleteFeedback = jest.fn().mockResolvedValue(undefined);
+  const deleteAccessGrants = jest.fn().mockResolvedValue(undefined);
   const useCase = new DeleteAccountUseCase(
     userDao,
     householdRepository,
@@ -443,6 +470,7 @@ function makeUseCase(
     deletePantryDataUseCase,
     { stopRenewals },
     { deleteForAccount: deleteFeedback },
+    { deleteHousehold: deleteAccessGrants } as unknown as AccessCodeStore,
   );
 
   return {
@@ -454,6 +482,7 @@ function makeUseCase(
     deletePantryDataUseCase,
     stopRenewals,
     deleteFeedback,
+    deleteAccessGrants,
     beginHouseholdDeletion,
     beginAccountDeletion,
     deleteAccountHouseholdReferences,

@@ -253,13 +253,16 @@ already successful release, run the rollback workflow with that release's exact
 stage receipt; for a failed unpublished release, ship a reviewed release.
 
 The release manifest, backend stack, and deployment receipt carry
-`BackendDataContractVersion=3`. A manual rollback requires the selected release
+`BackendDataContractVersion=4`. A manual rollback requires the selected release
 and receipt to match the deployed contract. Missing contract values are treated
 as version `0`. Version 1 protects durable account-deletion identity state and
 device-cap reservations. Version 2 protects the household member manifest and
 monthly purchase totals. Version 3 protects household switches and keeps purchase
 writes bound to the household that originally recorded them. A version 2 writer
 could apply an older pending purchase without an origin to a different household.
+Version 4 preserves household access granted by a code and blocks new Checkout
+sessions while a current or scheduled grant exists. A version 3 writer could
+charge a household that has already redeemed a gift or lifetime access.
 Before the initial upgrade reopens writers, an automatic restore can return to
 the captured release while concurrency remains at zero. After reopening, use a
 successful compatible release or fix forward. Increment both the manifest constant
