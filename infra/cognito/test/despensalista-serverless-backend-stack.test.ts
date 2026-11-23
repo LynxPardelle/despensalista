@@ -192,7 +192,19 @@ test('production can dry run notices without authorizing SES and requires produc
   });
   production.hasResourceProperties('AWS::Events::Rule', {
     Name: 'despensalista-prod-plus-renewal-notices',
+    ScheduleExpression: 'rate(1 hour)',
+    Targets: Match.arrayWith([Match.objectLike({
+      Input: JSON.stringify({ source: 'despensalista.renewal-notice-worker', 'detail-type': 'dispatch' }),
+      RetryPolicy: { MaximumEventAgeInSeconds: 300, MaximumRetryAttempts: 0 },
+    })]),
+  });
+  production.hasResourceProperties('AWS::Events::Rule', {
+    Name: 'despensalista-prod-account-deletion-resume',
     ScheduleExpression: 'rate(15 minutes)',
+    Targets: Match.arrayWith([Match.objectLike({
+      Input: JSON.stringify({ source: 'despensalista.account-deletion-worker', 'detail-type': 'resume' }),
+      RetryPolicy: { MaximumEventAgeInSeconds: 300, MaximumRetryAttempts: 0 },
+    })]),
   });
   production.hasResourceProperties('AWS::IAM::Policy', {
     PolicyDocument: { Statement: Match.arrayWith([

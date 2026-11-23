@@ -344,7 +344,7 @@ export class DespensaListaServerlessBackendStack extends cdk.Stack {
     if (renewalNotice) {
       new events.Rule(this, 'PlusRenewalNoticeRule', {
         ruleName: `${projectName}-${stage}-plus-renewal-notices`,
-        schedule: events.Schedule.rate(stage === 'prod' ? cdk.Duration.minutes(15) : cdk.Duration.hours(1)),
+        schedule: events.Schedule.rate(cdk.Duration.hours(1)),
         targets: [new eventTargets.LambdaFunction(liveAlias, {
           event: events.RuleTargetInput.fromObject({
             source: 'despensalista.renewal-notice-worker',
