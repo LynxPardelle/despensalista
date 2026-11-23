@@ -413,7 +413,7 @@ export class DespensaListaCognitoStack extends cdk.Stack {
         ses.EasyDkimSigningKeyLength.RSA_2048_BIT,
       ),
       dkimSigning: true,
-      feedbackForwarding: true,
+      feedbackForwarding: false,
     });
 
     identity.dkimRecords.forEach((record, index) => {
