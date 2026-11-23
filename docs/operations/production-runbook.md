@@ -1,7 +1,8 @@
 # DespensaLista production runbook
 
-Updated: 2026-09-26. AWS account `765932874577`, region `us-east-1`.
-Production: <https://despensalista.lynxpardelle.com>.
+Updated: 2026-11-23. AWS account `765932874577`, region `us-east-1`.
+Production: <https://despensalista.com>; the original
+`despensalista.lynxpardelle.com` alias remains part of the authentication contract.
 
 This runbook describes the implemented release controls. A successful synthesis
 does not prove deployment: record the actual Actions run, manifest source SHA,
@@ -378,7 +379,7 @@ shared account already exceeded its free standard alarm allowance.
 | Existing DynamoDB PITR | Storage-based | 35 days; restore is one-time about USD 0.15/GB in this region |
 | Cognito TOTP | No separate TOTP message charge | No SMS MFA; ordinary MAU pricing remains applicable |
 | SES identity + DKIM records | No fixed identity/DKIM fee | Existing hosted zone, no new hosted zone |
-| SES sending after approval | AWS currently lists USD 0.16/1,000 on Essentials or USD 0.10/1,000 à la carte, plus data | Transactional auth only; verify the account plan before switching; currently Cognito-managed |
+| SES sending after approval | AWS currently lists USD 0.16/1,000 on Essentials or USD 0.10/1,000 à la carte, plus data | Transactional renewal/CFDI flows; verify the shared account plan; authentication remains Cognito-managed |
 | CloudWatch Synthetics and paid CloudFront/WAF plans | Excluded | Expected cost exceeds the approved feature threshold |
 
 Price references: [CloudFront](https://aws.amazon.com/cloudfront/pricing/),
@@ -465,34 +466,227 @@ provided. If the request has no delivery address, coordinate delivery using the
 same folio. Before opening sales, verify one authorized request from the target
 stage and the copy that actually reaches the mailbox.
 
-## SES approval blocker
+<a id="ses-approval-blocker"></a>
 
-Plus Hogar renewal notices currently run only in the dev Stripe sandbox. The
-dev deployment uses `PLUS_RENEWAL_NOTICE_MODE` and the environment secret
-`PLUS_RENEWAL_NOTICE_TEST_TO`. The allowed SES address must be verified before
-using `ses` mode. The dev Cognito delivery stack needs the matching bootstrap
-policy for the exact verified recipient and the hourly EventBridge rule. The
-worker calculates the due date using the Mexico City calendar and remains
-independent of Stripe's account-wide reminder settings. The `dry-run` mode
-preserves pending notices.
+## SES production approval and renewal delivery
 
-To check delivery, use a disposable test subscription, verify the calendar
-gates at eight and seven days before renewal, and confirm the message ID and
-mailbox receipt. Direct Lambda clock overrides require a single exact notice
-ID and are accepted only in dev. Treat an `unknown` SES attempt as potentially
-accepted and reconcile it before sending again.
+AWS approved the [DespensaLista reconsideration, case 179454466900956](https://support.console.aws.amazon.com/support/home#/case/?displayId=179454466900956)
+on November 21, 2026 at 19:08 UTC (13:08 in Mexico City). On November 23 the
+regional API confirmed `ProductionAccessEnabled=true`, `SendingEnabled=true`,
+`EnforcementStatus=HEALTHY`, 50,000 recipients per 24 hours and 14 recipients per
+second. The SES account's `Details` field still describes the older Moyra case;
+do not replace that shared account metadata or change Moyra's identities or
+configuration sets while configuring DespensaLista. Approval and quota are
+regional capabilities, not permission to open Plus Hogar sales or a spending cap.
 
-On 2026-09-25 the domain `despensalista.lynxpardelle.com` and RSA-2048 Easy DKIM
-were verified `SUCCESS`. Future intended SES sender:
-`DespensaLista <no-reply@despensalista.lynxpardelle.com>`.
+The existing sender is `no-reply@despensalista.lynxpardelle.com`. Its domain
+identity and RSA-2048 Easy DKIM were reconfirmed `SUCCESS` on November 23.
+`despensalista.com` is not an SES domain identity; adding one is unnecessary for
+the sender implemented by the app. The default SES MAIL FROM remains in use.
+The account suppresses hard bounces and complaints. Cognito continues to use
+`COGNITO_DEFAULT`; enabling subscription notices does not require changing signup
+or recovery delivery.
 
-The account remains in the `us-east-1` SES sandbox. The prior production-access
-case `178199358800446` was denied for Moyra. AWS Support accepted a separate
-[DespensaLista reconsideration, case 179454466900956](https://support.console.aws.amazon.com/support/home#/case/?displayId=179454466900956)
-on November 12 (Mexico City time). The November 14 reply added subscription
-renewal notices to the requested transactional scope and summarized the dev
-delivery, duplicate prevention, and cancellation results. Activate production
-sending only after SES reports production access in `us-east-1`.
+Before any production activation, complete the controlled dev test to a mailbox
+not verified in SES. The dev deployment uses `PLUS_RENEWAL_NOTICE_MODE=ses` and
+the environment secret `PLUS_RENEWAL_NOTICE_TEST_TO`. The serving Lambda's
+`RENEWAL_NOTICE_SES_TEST_TO`, its inline send policy and its administrator-managed
+permissions boundary must agree on that exact lowercase recipient. Preserve the
+separate CFDI permission. Do not verify the destination in SES to make this test
+pass: the point is delivery after sandbox removal. The recipient resolver still
+requires a currently verified Cognito address belonging to the fixture owner.
+
+Use a disposable Stripe Sandbox subscription, check no send eight calendar days
+before renewal, and confirm exactly one mailbox receipt seven days before renewal
+using the Mexico City calendar. Repeat that notice to check deduplication and
+cancel another renewal before its send window to check suppression. Direct Lambda
+clock overrides require a single exact notice ID and are accepted only in dev.
+An SES message ID alone does not establish inbox delivery. Treat an `unknown`
+attempt as potentially accepted and reconcile it before sending again. Restore
+the intended dev recipient and its matching grant if the test used a temporary
+address. Do not change Stripe's account-wide reminder settings.
+
+### Administrator bootstrap for production renewal permissions
+
+After the dev delivery test passes, use the existing auth-only administrative
+path to prepare the runtime boundary, worker-rule deployment permissions and
+GitHub's SES readiness reads. Do not bootstrap the production backend directly.
+Run from `infra/cognito` using an authorized administrative session, first review
+the diff, then deploy only `despensalista-prod-cognito`:
+
+```powershell
+$env:NODE_USE_SYSTEM_CA = '1'
+$sesProdCertificate = gh variable get PUBLIC_PRODUCTION_CERTIFICATE_ARN --env prod
+$sesProdVatRate = gh variable get STRIPE_BILLING_VAT_RATE_ID --env prod
+$sesProdBootstrapContext = @(
+  '--context', 'projectName=despensalista',
+  '--context', 'stage=prod',
+  '--context', 'awsRegion=us-east-1',
+  '--context', 'controlPlaneBootstrap=true',
+  '--context', 'includeServerlessBackend=false',
+  '--context', 'removalPolicy=retain',
+  '--context', 'deletionProtection=true',
+  '--context', 'domainPrefix=despensalista-prod-765932874577',
+  '--context', 'appDomainName=despensalista.lynxpardelle.com',
+  '--context', 'productionFrontendBaseUrl=https://despensalista.lynxpardelle.com',
+  '--context', 'serverlessFrontendBaseUrl=https://despensalista.lynxpardelle.com',
+  '--context', 'externallyManagedSocialProviders=Google',
+  '--context', 'enablePublicProductionDomain=true',
+  '--context', "publicProductionCertificateArn=$sesProdCertificate",
+  '--context', 'enableStripeBilling=true',
+  '--context', 'enableStripeBillingBoundary=true',
+  '--context', 'externalStripeBillingBoundary=false',
+  '--context', 'enableStripeBillingCheckout=false',
+  '--context', 'enablePublicStripeBillingCheckout=false',
+  '--context', "stripeBillingVatRateId=$sesProdVatRate",
+  '--context', 'cfdiRequestRecipient=facturas@despensalista.com',
+  '--context', 'renewalNoticeMode=ses',
+  '--context', 'renewalNoticeSesProductionAccess=true'
+)
+npx cdk diff despensalista-prod-cognito --no-change-set @sesProdBootstrapContext
+npx cdk deploy despensalista-prod-cognito --exclusively --require-approval never @sesProdBootstrapContext
+```
+
+These contexts preserve billing-secret access, CFDI and both production origins
+and keep Google and `COGNITO_DEFAULT`. On November 23 this synthesis left the pool
+and client unchanged. The expected IAM delta adds `ses:SendEmail` restricted to
+the existing sender and `us-east-1`, `ses:GetAccount`, the readiness identity read
+and the exact renewal rule. CDK can split the executor policy into an overflow
+managed policy when it reaches IAM's size limit. A Windows synthesis can also
+change the quota guard's inline-code line endings or error-text encoding; inspect
+that diff rather than assuming an IAM-only update. Its admitted-message limits
+must stay 30 total, 10 reserved for recovery and 5 per recipient.
+
+Verify the default version of `despensalista-prod-runtime-boundary` and the
+effective runtime/deployment permissions before enabling the backend worker.
+GitHub cannot update this boundary itself. Production notices resolve each
+eligible owner in the application; they must not use a fixed test-recipient
+override. Keep the exact sender/region conditions and the separate CFDI grant.
+
+### Bounce and complaint feedback
+
+The existing Standard SNS topic is
+`arn:aws:sns:us-east-1:765932874577:despensalista-prod-operations-alarms`.
+It has a confirmed operations email subscription and no KMS key. Reuse it for
+bounces and complaints only, with original message headers disabled. This
+requires no new topic, queue, Lambda, SES configuration set or paid SES plan.
+
+On November 23 the identity was configured for both topics with original headers
+disabled, preserving the topic's existing policy statements. Controlled SES
+bounce and complaint simulator events were accepted, and both notifications
+arrived in the operations mailbox; their original unread state was preserved.
+Email feedback forwarding was then disabled for this DespensaLista identity only,
+leaving the verified SNS path as the feedback channel. This verifies the feedback path, not
+the separate D-7 subscription reminder delivery test or production activation.
+
+The minimal persistent setup is an administrator-owned SES identity configuration
+and an idempotent addition to the topic policy. These attributes are not currently
+managed by `AWS::SES::EmailIdentity`; keep this procedure versioned and verify it
+after later infrastructure deployments. Preserve every existing topic-policy
+statement so CloudWatch alarm publishing continues to work. Add only this
+identity-scoped SES permission:
+
+```json
+{
+  "Sid": "AllowDespensaListaSesFeedback",
+  "Effect": "Allow",
+  "Principal": { "Service": "ses.amazonaws.com" },
+  "Action": "sns:Publish",
+  "Resource": "arn:aws:sns:us-east-1:765932874577:despensalista-prod-operations-alarms",
+  "Condition": {
+    "StringEquals": { "AWS:SourceAccount": "765932874577" },
+    "ArnEquals": {
+      "AWS:SourceArn": "arn:aws:ses:us-east-1:765932874577:identity/despensalista.lynxpardelle.com"
+    }
+  }
+}
+```
+
+An administrator can merge that statement without replacing the existing policy:
+
+```powershell
+$sesFeedbackTopic = 'arn:aws:sns:us-east-1:765932874577:despensalista-prod-operations-alarms'
+$sesFeedbackIdentity = 'despensalista.lynxpardelle.com'
+$sesFeedbackAttributes = aws sns get-topic-attributes --topic-arn $sesFeedbackTopic --region us-east-1 --output json | ConvertFrom-Json
+$sesFeedbackPolicy = $sesFeedbackAttributes.Attributes.Policy | ConvertFrom-Json
+$sesFeedbackStatement = @{
+  Sid = 'AllowDespensaListaSesFeedback'
+  Effect = 'Allow'
+  Principal = @{ Service = 'ses.amazonaws.com' }
+  Action = 'sns:Publish'
+  Resource = $sesFeedbackTopic
+  Condition = @{
+    StringEquals = @{ 'AWS:SourceAccount' = '765932874577' }
+    ArnEquals = @{ 'AWS:SourceArn' = 'arn:aws:ses:us-east-1:765932874577:identity/despensalista.lynxpardelle.com' }
+  }
+}
+$sesFeedbackPolicy.Version = '2012-10-17'
+$sesFeedbackPolicy.Statement = @($sesFeedbackPolicy.Statement | Where-Object { $_.Sid -ne 'AllowDespensaListaSesFeedback' }) + @($sesFeedbackStatement)
+$sesFeedbackPolicyFile = [IO.Path]::GetTempFileName()
+try {
+  [IO.File]::WriteAllText($sesFeedbackPolicyFile, ($sesFeedbackPolicy | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
+  aws sns set-topic-attributes --topic-arn $sesFeedbackTopic --attribute-name Policy --attribute-value "file://$sesFeedbackPolicyFile" --region us-east-1
+} finally {
+  Remove-Item -LiteralPath $sesFeedbackPolicyFile
+}
+foreach ($sesFeedbackType in @('Bounce', 'Complaint')) {
+  aws ses set-identity-notification-topic --identity $sesFeedbackIdentity --notification-type $sesFeedbackType --sns-topic $sesFeedbackTopic --region us-east-1
+  aws ses set-identity-headers-in-notifications-enabled --identity $sesFeedbackIdentity --notification-type $sesFeedbackType --no-enabled --region us-east-1
+}
+aws ses get-identity-notification-attributes --identities $sesFeedbackIdentity --region us-east-1 --output json
+aws sns get-topic-attributes --topic-arn $sesFeedbackTopic --region us-east-1 --query Attributes.Policy --output json
+```
+
+Confirm both topic ARNs, both `HeadersIn*NotificationsEnabled=false` values and
+the existing confirmed subscription. Keep email feedback forwarding enabled
+until controlled SES bounce/complaint simulator events reach the operations
+inbox. Do not use real customer addresses to generate a bounce or complaint.
+Forwarding can then be disabled for this identity if duplicate feedback would be
+unhelpful. SES can remove a topic assignment and restore email forwarding after
+a failed publish; recheck the attributes when investigating missing feedback.
+The service notification still contains destination addresses, message IDs and
+diagnostics even with original headers excluded; handle it as operations data.
+Do not post its full JSON to public logs or issue comments. Follow the
+[AWS SES SNS configuration procedure](https://docs.aws.amazon.com/ses/latest/dg/configure-sns-notifications.html).
+
+### Controlled activation and cost
+
+After the dev test and feedback checks, set the protected production environment's
+`PLUS_RENEWAL_NOTICE_MODE=ses`, retain `ENABLE_STRIPE_BILLING_CHECKOUT=false` and
+`ENABLE_PUBLIC_PLUS_CHECKOUT=false`, and dispatch **Deploy Serverless Prod** on
+`prod` with `backend_only=true`. It still requires production environment
+approval and reuses the tested immutable release. Verify the published alias,
+mode `ses`, existing queue, hourly rule, effective sender permissions and public
+health. Review due, late and `unknown` rows before dispatching; do not reset
+accepted or uncertain attempts to force a resend. Opening public sales is a
+separate authorization.
+
+The November 23 strongly consistent preflight found zero production notice rows,
+including zero due, sending or unknown notices. The billing table had one local
+household record with status `active` and `cancelAtPeriodEnd=true`, and zero local
+renewal-eligible records. These aggregate reads excluded customer/household IDs,
+email, invoice and message contents; they did not reconcile live Stripe objects.
+Repeat the check before activation if the billing state has changed.
+
+No fixed-fee SES add-on is required. At the prices reviewed on November 23,
+[SES Essentials](https://aws.amazon.com/ses/pricing/) has no monthly plan fee and
+charges USD 0.16 per 1,000 outbound recipients; a-la-carte outbound sending is
+USD 0.10 per 1,000, plus applicable data charges. Do not change the shared
+account's plan or enable Pro, Enterprise, dedicated IPs or other add-ons for this
+work. The hourly worker's limit of five messages per invocation models at most
+3,600 recipients in a 30-day month without additional manual invocations:
+USD 0.576 of Essentials outbound fees, excluding data, Lambda, DynamoDB and SNS.
+This is a usage model, not a hard spending cap.
+
+The existing [SNS Standard topic](https://aws.amazon.com/sns/pricing/) has no
+fixed topic fee. The first 1,000 email deliveries per month are free; subsequent
+email deliveries cost USD 2 per 100,000, with request/data charges subject to the
+account's shared free tier. Send only bounce and complaint events, not a delivery
+notification for every successful email. At pilot volumes this does not require
+a new monthly service commitment; consult the operator before adding any option
+whose expected incremental monthly cost exceeds USD 1.
+
+### Pause and resume
 
 After the administrative production SES permissions are installed, pause
 delivery by setting `PLUS_RENEWAL_NOTICE_MODE=dry-run` and
@@ -508,6 +702,8 @@ in the stack across `off`, `dry-run`, and `ses`. Use the same queue when resumin
 delivery. A reinstated renewal can requeue a notice that was skipped because the
 subscription was not set to renew. The worker still enforces the delivery
 window and leaves previously accepted or uncertain send attempts terminal.
+
+### Cognito sender remains unchanged
 
 All stages keep Cognito `EmailSendingAccount=COGNITO_DEFAULT` without `From` or
 `SourceArn`, so signup and recovery continue through Cognito's managed sender.
@@ -557,9 +753,9 @@ Verify a confirmed operations SNS subscription to receive those notifications.
 Lambda/DynamoDB work from denied attack traffic remains usage-based and is not
 hard-capped by the 35 admitted-message budget.
 
-The account-level SES suppression list already covers `BOUNCE` and `COMPLAINT`
-(read-only verification, 2026-09-25). Before switching to SES, configure
-bounce/complaint suppression, choose a real support/reply-to address if replies
+The account-level SES suppression list covers `BOUNCE` and `COMPLAINT`
+(reconfirmed November 23, 2026). Before any future change of Cognito's sender to
+SES, preserve bounce/complaint suppression, choose a real support/reply-to address if replies
 are expected, grant the Cognito sender identity permissions, and test signup and
 recovery delivery to an unverified recipient. An SES domain identity does not
 create an inbound mailbox. Do not send marketing mail under this transactional
