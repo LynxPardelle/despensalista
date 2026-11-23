@@ -212,3 +212,14 @@ test('the production email alarm uses the existing operations SNS topic by ARN',
     false,
   );
 });
+
+test('production SES keeps duplicate email forwarding disabled after SNS feedback setup', () => {
+  const identity = namedResource(
+    synthesize('prod'),
+    'AWS::SES::EmailIdentity',
+    'EmailIdentity',
+    'despensalista.lynxpardelle.com',
+  );
+
+  assert.equal(identity.Properties.FeedbackAttributes.EmailForwardingEnabled, false);
+});

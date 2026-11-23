@@ -653,9 +653,12 @@ Do not post its full JSON to public logs or issue comments. Follow the
 
 After the dev test and feedback checks, set the protected production environment's
 `PLUS_RENEWAL_NOTICE_MODE=ses`, retain `ENABLE_STRIPE_BILLING_CHECKOUT=false` and
-`ENABLE_PUBLIC_PLUS_CHECKOUT=false`, and dispatch **Deploy Serverless Prod** on
-`prod` with `backend_only=true`. It still requires production environment
-approval and reuses the tested immutable release. Verify the published alias,
+`ENABLE_PUBLIC_PLUS_CHECKOUT=false`. If application or infrastructure source has
+changed, promote the candidate through `dev` -> `tst` -> `prod` using the canonical
+workflows and the same immutable artifact. Use **Deploy Serverless Prod** with
+`backend_only=true` only to reactivate or change configuration for a release
+already tested in those stages; it does not publish an unpromoted code candidate.
+Both paths retain the protected production environment approval. Verify the published alias,
 mode `ses`, existing queue, hourly rule, effective sender permissions and public
 health. Review due, late and `unknown` rows before dispatching; do not reset
 accepted or uncertain attempts to force a resend. Opening public sales is a
