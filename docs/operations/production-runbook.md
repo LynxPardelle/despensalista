@@ -673,10 +673,11 @@ No fixed-fee SES add-on is required. At the prices reviewed on November 23,
 charges USD 0.16 per 1,000 outbound recipients; a-la-carte outbound sending is
 USD 0.10 per 1,000, plus applicable data charges. Do not change the shared
 account's plan or enable Pro, Enterprise, dedicated IPs or other add-ons for this
-work. The hourly worker's limit of five messages per invocation models at most
-3,600 recipients in a 30-day month without additional manual invocations:
-USD 0.576 of Essentials outbound fees, excluding data, Lambda, DynamoDB and SNS.
-This is a usage model, not a hard spending cap.
+work. A nominal 30-day model is 720 scheduled invocations times five recipients:
+3,600 recipients and USD 0.576 of Essentials outbound fees, excluding data,
+Lambda, DynamoDB and SNS. This model excludes automatic retries, duplicate
+deliveries and manual invocations; five is a per-invocation limit, not a hard
+hourly or monthly spending cap.
 
 The existing [SNS Standard topic](https://aws.amazon.com/sns/pricing/) has no
 fixed topic fee. The first 1,000 email deliveries per month are free; subsequent
